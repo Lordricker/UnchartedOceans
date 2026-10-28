@@ -1,0 +1,268 @@
+class_name WorldChart
+extends RefCounted
+## World chart: the whole world as data (land mask, shore distance, heightmap, ports).
+## Built from the macro heightmap in res://assets/world/. Nothing here is a 3D scene;
+## it answers "where is land / which port is near / how far does a sleep carry me".
+##
+## Coordinates: world metres as floats (GDScript floats are 64-bit, so no precision problem).
+## x = east, z = south (north is -Z, like Godot's forward). Origin = top-left of the chart.
+## Heading: degrees, 0 = north, 90 = east, clockwise.
+## The chart size comes from width_m in world_chart.json; change it and every distance rescales.
+
+const DATA_PATH := "res://assets/world/world_chart.json"
+const LAND_PATH := "res://assets/world/world_land.png"
+const SHORE_PATH := "res://assets/world/world_shore.png"
+const HEIGHT_PATH := "res://assets/world/world_height.png"
+
+## Streaming rings (proposed, see claude/world-map-and-sleep.md).
+const PORT_SPAWN_M := 6000.0     # full port scene spawns inside this distance
+const PORT_DESPAWN_M := 8000.0   # and unloads outside this one (hysteresis)
+const EDGE_MARGIN_M := 3000.0    # sleeping never carries you closer than this to the chart edge
+const EYE_HEIGHT_M := 3.0
+
+var width_m := 600000.0
+var height_m := 400000.0
+var px_w := 1536
+var px_h := 1024
+var mpp := 390.625               # metres per pixel
+var ports: Array = []            # Dictionaries: id, region, tier, type, x, z
+
+var _land := PackedByteArray()
+var _shore := PackedByteArray()
+var _height := PackedByteArray()
+
+
+static func load_default() -> WorldChart:
+	var c := WorldChart.new()
+	if not c.load_from(DATA_PATH):
+		return null
+	return c
+
+
+static func _load_l8(path: String) -> Image:
+	var img: Image = null
+	var tex := load(path) as Texture2D
+	if tex != null:
+		img = tex.get_image()
+	if img == null and FileAccess.file_exists(path):
+		img = Image.load_from_file(path)
+	if img == null:
+		return null
+	if img.is_compressed():
+		img.decompress()
+	img.convert(Image.FORMAT_L8)
+	return img
+
+
+func load_from(json_path: String) -> bool:
+	var f := FileAccess.open(json_path, FileAccess.READ)
+	if f == null:
+		push_error("WorldChart: cannot open %s" % json_path)
+		return false
+	var d: Variant = JSON.parse_string(f.get_as_text())
+	if typeof(d) != TYPE_DICTIONARY:
+		push_error("WorldChart: bad JSON in %s" % json_path)
+		return false
+	width_m = float(d.get("width_m", 600000.0))
+	px_w = int(d.get("px_width", 1536))
+	px_h = int(d.get("px_height", 1024))
+	mpp = width_m / float(px_w)
+	height_m = mpp * float(px_h)
+	var land := _load_l8(LAND_PATH)
+	var shore := _load_l8(SHORE_PATH)
+	var hmap := _load_l8(HEIGHT_PATH)
+	for im in [land, shore, hmap]:
+		if im == null or im.get_width() != px_w or im.get_height() != px_h:
+			push_error("WorldChart: map image missing or wrong size (expected %dx%d)" % [px_w, px_h])
+			return false
+	_land = land.get_data()
+	_shore = shore.get_data()
+	_height = hmap.get_data()
+	ports.clear()
+	for p in d.get("ports", []):
+		ports.append({
+			"id": String(p["id"]),
+			"region": String(p["region"]),
+			"tier": String(p["tier"]),
+			"type": String(p["type"]),
+			"x": (float(p["px"]) + 0.5) * mpp,
+			"z": (float(p["py"]) + 0.5) * mpp,
+		})
+	return true
+
+
+# ---------- sampling ----------
+
+func _texel(data: PackedByteArray, x: int, y: int) -> float:
+	x = clampi(x, 0, px_w - 1)
+	y = clampi(y, 0, px_h - 1)
+	return float(data[y * px_w + x])
+
+
+## Bilinear sample, raw 0..255.
+func _sample(data: PackedByteArray, x: float, z: float) -> float:
+	var u := x / mpp - 0.5
+	var v := z / mpp - 0.5
+	var x0 := int(floor(u))
+	var y0 := int(floor(v))
+	var fx := u - float(x0)
+	var fy := v - float(y0)
+	var a := _texel(data, x0, y0)
+	var b := _texel(data, x0 + 1, y0)
+	var c := _texel(data, x0, y0 + 1)
+	var e := _texel(data, x0 + 1, y0 + 1)
+	return lerpf(lerpf(a, b, fx), lerpf(c, e, fx), fy)
+
+
+func is_inside(x: float, z: float, margin_m: float = 0.0) -> bool:
+	return x >= margin_m and z >= margin_m and x <= width_m - margin_m and z <= height_m - margin_m
+
+
+## 0..1 land coverage (the mask is feathered about 1 px, so this gives a sub-pixel coastline).
+func land_value(x: float, z: float) -> float:
+	return _sample(_land, x, z) / 255.0
+
+
+func is_land(x: float, z: float) -> bool:
+	return land_value(x, z) >= 0.5
+
+
+## Relief 0..1 straight from the macro heightmap (land only is meaningful).
+func height01(x: float, z: float) -> float:
+	return _sample(_height, x, z) / 255.0
+
+
+## Distance from the nearest coast over water, metres (0 on land). Resolution is about one pixel.
+func shore_distance_m(x: float, z: float) -> float:
+	if is_land(x, z):
+		return 0.0
+	return _sample(_shore, x, z) * mpp
+
+
+## Rough sea depth for the macro layer (proposed numbers; each port's local seabed is generated at higher detail).
+## Shelf: about 2 m at the beach to 40 m at 12 km out, then falling away to 2500 m by about 42 km.
+func sea_depth_m(x: float, z: float) -> float:
+	if is_land(x, z):
+		return 0.0
+	var d_km := shore_distance_m(x, z) / 1000.0
+	if d_km < 12.0:
+		return lerpf(2.0, 40.0, pow(d_km / 12.0, 0.8))
+	return lerpf(40.0, 2500.0, pow(clampf((d_km - 12.0) / 30.0, 0.0, 1.0), 1.5))
+
+
+# ---------- directions and distances ----------
+
+static func direction(heading_deg: float) -> Vector2:
+	var r := deg_to_rad(heading_deg)
+	return Vector2(sin(r), -cos(r))
+
+
+static func heading_to(ax: float, az: float, bx: float, bz: float) -> float:
+	return fposmod(rad_to_deg(atan2(bx - ax, -(bz - az))), 360.0)
+
+
+static func distance_m(ax: float, az: float, bx: float, bz: float) -> float:
+	return sqrt((bx - ax) * (bx - ax) + (bz - az) * (bz - az))
+
+
+## How far away something of height h_obj is visible from eye height h_eye (metres).
+## 3.57 km x sqrt(height); eye at 3 m sees about 6.2 km, a 22 m light is visible from about 17 km.
+static func horizon_m(h_eye: float, h_obj: float = 0.0) -> float:
+	return 3570.0 * (sqrt(maxf(h_eye, 0.0)) + sqrt(maxf(h_obj, 0.0)))
+
+
+# ---------- ports ----------
+
+func get_port(id: String) -> Dictionary:
+	for p in ports:
+		if p["id"] == id:
+			return p
+	return {}
+
+
+func nearest_port(x: float, z: float) -> Dictionary:
+	var best: Dictionary = {}
+	var bd := INF
+	for p in ports:
+		var d := distance_m(x, z, p["x"], p["z"])
+		if d < bd:
+			bd = d
+			best = p
+	if best.is_empty():
+		return best
+	var out := best.duplicate()
+	out["dist_m"] = bd
+	return out
+
+
+func ports_within(x: float, z: float, radius_m: float) -> Array:
+	var out: Array = []
+	for p in ports:
+		var d := distance_m(x, z, p["x"], p["z"])
+		if d <= radius_m:
+			var e: Dictionary = p.duplicate()
+			e["dist_m"] = d
+			out.append(e)
+	out.sort_custom(func(a, b): return a["dist_m"] < b["dist_m"])
+	return out
+
+
+# ---------- travel along a straight line ----------
+
+## March from (x, z) along a heading for up to dist_m. No drift, straight line.
+## Stops early for: land, the chart edge, or entering a port's spawn ring (ports you already
+## started inside are ignored, so you can leave one).
+## Returns {dist_m, x, z, stop: "none"|"land"|"edge"|"port_ring", port: id or ""}.
+## opts: land_margin_m (default 1500; applies only while closing on a coast), step_m (200), stop_at_ports (true).
+func march(x: float, z: float, heading_deg: float, dist_m: float, opts: Dictionary = {}) -> Dictionary:
+	var margin: float = opts.get("land_margin_m", 1500.0)
+	var step: float = opts.get("step_m", 200.0)
+	var stop_ports: bool = opts.get("stop_at_ports", true)
+	var dir := direction(heading_deg)
+	var dx := float(dir.x)
+	var dz := float(dir.y)
+	var start_in := {}
+	if stop_ports:
+		for p in ports:
+			if distance_m(x, z, p["x"], p["z"]) <= PORT_SPAWN_M:
+				start_in[p["id"]] = true
+	var res := {"dist_m": 0.0, "x": x, "z": z, "stop": "none", "port": ""}
+	var travelled := 0.0
+	var prev_shore := shore_distance_m(x, z)
+	var n := int(ceil(dist_m / step))
+	for i in n:
+		var nt := minf(travelled + step, dist_m)
+		var nx := x + dx * nt
+		var nz := z + dz * nt
+		if not is_inside(nx, nz, EDGE_MARGIN_M):
+			res["stop"] = "edge"
+			break
+		var sd := shore_distance_m(nx, nz)
+		if is_land(nx, nz) or (sd < margin and sd < prev_shore):
+			res["stop"] = "land"
+			break
+		prev_shore = sd
+		var hit := ""
+		if stop_ports:
+			for p in ports:
+				if not start_in.has(p["id"]) and distance_m(nx, nz, p["x"], p["z"]) <= PORT_SPAWN_M:
+					hit = p["id"]
+					break
+		travelled = nt
+		res["dist_m"] = travelled
+		res["x"] = nx
+		res["z"] = nz
+		if hit != "":
+			res["stop"] = "port_ring"
+			res["port"] = hit
+			break
+	return res
+
+
+## Sleep: carry the ship along a heading for some hours at a speed (m/s).
+## Plug the sail model's polar in for speed later; for now it is one number.
+## Adds hours_slept (less than asked if something woke you early).
+func sleep_travel(x: float, z: float, heading_deg: float, hours: float, speed_mps: float = 3.5, opts: Dictionary = {}) -> Dictionary:
+	var r := march(x, z, heading_deg, speed_mps * hours * 3600.0, opts)
+	r["hours_slept"] = float(r["dist_m"]) / maxf(speed_mps, 0.001) / 3600.0
+	return r

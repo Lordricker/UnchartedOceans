@@ -1,0 +1,426 @@
+class_name WorldStreamer
+extends Node3D
+## Streams the world chart (world_chart.gd) into the 3D scene around the ship.
+##
+##  - Floating origin: Godot coordinates stay small. A Godot position is a chart position minus the
+##    origin (origin_x, origin_z, 64-bit floats, a multiple of rebase_step_m). When the ship gets more
+##    than rebase_awake_m from the Godot origin, or after a sleep, the origin is rebased: the ship and
+##    player are moved together and the ocean's wave phases are shifted by the same amount in 64-bit,
+##    so the sea looks and floats exactly as before. Moving the ship teleports its collision bodies,
+##    so the player is paused for a few physics ticks to keep the kinematic velocity spike off them.
+##  - Ports: a port scene is spawned inside PORT_SPAWN_M (6 km) and freed outside PORT_DESPAWN_M (8 km).
+##    Until a port has a real scene (port_scenes: id -> res:// path, loaded on a thread) it gets a
+##    placeholder beacon: a stone tower and a few huts.
+##  - Macro terrain (world_terrain.gd) and macro shoaling (Ocean.set_world) come from the chart.
+##  - Macro grounding: the keel is checked against the chart's shelf. Ports can switch it off around
+##    themselves by setting the meta "own_grounding" on their node (they bring their own seabed).
+##  - Sleep (T): carries the ship along its heading for sleep_hours (WorldChart.sleep_travel).
+##
+## Chart coordinates: x east, z south, metres from the chart's top-left. Ship heading_deg (ship_motion)
+## grows to port, so the chart heading (0 = north, clockwise) is -heading_deg.
+
+signal port_spawned(id: String)
+signal port_despawned(id: String)
+signal slept(result: Dictionary)
+signal rebased(shift: Vector3)
+
+@export var ocean_path: NodePath = ^"../Ocean"
+@export var ship_path: NodePath = ^"../ShipRig"
+@export var player_path: NodePath = ^"../Player"
+@export var home_port_id := "AC00"
+@export var start_distance_m := 2500.0
+@export var rebase_awake_m := 20000.0
+@export var rebase_step_m := 5000.0
+@export var sleep_hours := 8.0
+@export var sleep_speed_mps := 3.5
+@export var key_sleep := KEY_T
+@export var key_home := KEY_H
+@export var far_plane_m := 160000.0
+@export var terrain_enabled := true
+@export var macro_grounding := true
+## Pause the player for a few physics ticks when the ship is moved (hides the kinematic velocity spike).
+@export var pause_player_on_move := true
+## Port id -> res:// path of its scene. Loaded on a thread when the port comes inside the spawn ring.
+@export var port_scenes := {}
+
+const KEEL_CLEARANCE_M := 3.0
+const PLAYER_PAUSE_TICKS := 3
+
+var chart: WorldChart
+var origin_x := 0.0
+var origin_z := 0.0
+var aground := false
+var last_sleep := {}
+
+var _ocean: Ocean
+var _ship: Node3D
+var _player: Node3D
+var _terrain: WorldTerrain
+var _ports := {}              # id -> Node3D
+var _loading := {}            # id -> res path
+var _port_timer := 0.0
+var _pause_ticks := 0
+var _last_ok := Vector3.ZERO
+var _label: Label
+var _msg := ""
+var _msg_t := 0.0
+var _cam_set := false
+
+
+func _ready() -> void:
+	chart = WorldChart.load_default()
+	if chart == null:
+		push_error("WorldStreamer: no chart")
+		return
+	_ocean = get_node_or_null(ocean_path) as Ocean
+	_ship = get_node_or_null(ship_path) as Node3D
+	_player = get_node_or_null(player_path) as Node3D
+	if terrain_enabled:
+		_terrain = WorldTerrain.new()
+		_terrain.name = "Terrain"
+		_terrain.curvature_radius_m = _ocean.curvature_radius_m if _ocean else 6370000.0
+		add_child(_terrain)
+	_make_hud()
+	go_home()
+
+
+func _make_hud() -> void:
+	var cl := CanvasLayer.new()
+	_label = Label.new()
+	_label.position = Vector2(12, 640)
+	_label.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.8))
+	_label.add_theme_constant_override("shadow_offset_x", 1)
+	_label.add_theme_constant_override("shadow_offset_y", 1)
+	cl.add_child(_label)
+	add_child(cl)
+
+
+# ------------------------------------------------------------------ coordinates
+
+func chart_x(gx: float) -> float:
+	return origin_x + gx
+
+
+func chart_z(gz: float) -> float:
+	return origin_z + gz
+
+
+func ship_cx() -> float:
+	return origin_x + _ship.global_position.x
+
+
+func ship_cz() -> float:
+	return origin_z + _ship.global_position.z
+
+
+## Chart heading of the ship (0 = north, clockwise).
+func ship_chart_heading() -> float:
+	return fposmod(-float(_ship.get("heading_deg")), 360.0)
+
+
+func ship_depth_m() -> float:
+	return chart.sea_depth_m(ship_cx(), ship_cz())
+
+
+# ------------------------------------------------------------------ moving the ship around the chart
+
+## Put the ship at a chart position and heading (chart degrees) and rebase the origin there.
+func place_ship(cx: float, cz: float, chart_heading_deg: float) -> void:
+	_ship.set("heading_deg", fposmod(-chart_heading_deg, 360.0))
+	_ship.rotation.y = deg_to_rad(float(_ship.get("heading_deg")))
+	relocate(cx, cz)
+
+
+## Move the ship to a chart position, snapping the origin to the grid around it.
+## The player rides along with the ship, with the same offset from it.
+func relocate(cx: float, cz: float) -> void:
+	var ox := roundf(cx / rebase_step_m) * rebase_step_m
+	var oz := roundf(cz / rebase_step_m) * rebase_step_m
+	var old := _ship.global_position
+	var target := Vector3(cx - ox, old.y, cz - oz)
+	var delta := target - old
+	origin_x = ox
+	origin_z = oz
+	_ship.global_position = target
+	if _player:
+		_player.global_position += delta
+		_pause_player()
+	_last_ok = target
+	_refresh_world()
+	rebased.emit(delta)
+
+
+func _pause_player() -> void:
+	if _player and pause_player_on_move:
+		_pause_ticks = PLAYER_PAUSE_TICKS
+		_player.set_physics_process(false)
+
+
+func _refresh_world() -> void:
+	if _ocean:
+		_ocean.set_world(chart, origin_x, origin_z)
+	if _terrain:
+		_terrain.set_world(chart, origin_x, origin_z)
+	for id in _ports:
+		_place_port(id)
+
+
+func go_home() -> void:
+	var p := chart.get_port(home_port_id)
+	if p.is_empty():
+		push_warning("WorldStreamer: no port %s" % home_port_id)
+		return
+	# start in clear water, a little way off, facing the port: the heading whose approach line
+	# stays deepest (the macro shelf is shallow right up to the coast, ports sit in the shallows)
+	var best_a := -1
+	var best_min := -1.0
+	for a in range(0, 360, 15):
+		var dir := WorldChart.direction(float(a))
+		var m := INF
+		for i in range(1, 11):
+			var f := float(i) / 10.0 * start_distance_m
+			m = minf(m, chart.sea_depth_m(float(p["x"]) + dir.x * f, float(p["z"]) + dir.y * f))
+		if m > best_min:
+			best_min = m
+			best_a = a
+	if best_min < KEEL_CLEARANCE_M + 1.0:
+		push_warning("WorldStreamer: no clear water %.0f m from %s (best %.1f m)" % [start_distance_m, home_port_id, best_min])
+	var bd := WorldChart.direction(float(best_a))
+	var sx: float = p["x"] + bd.x * start_distance_m
+	var sz: float = p["z"] + bd.y * start_distance_m
+	place_ship(sx, sz, WorldChart.heading_to(sx, sz, p["x"], p["z"]))
+	_update_ports()
+
+
+## Sleep: carry the ship along its heading. Returns the WorldChart.sleep_travel result.
+func sleep(hours: float = -1.0) -> Dictionary:
+	if hours <= 0.0:
+		hours = sleep_hours
+	var r := chart.sleep_travel(ship_cx(), ship_cz(), ship_chart_heading(), hours, sleep_speed_mps)
+	if float(r["dist_m"]) > 0.0:
+		relocate(r["x"], r["z"])
+	_update_ports()
+	last_sleep = r
+	var why := {"none": "", "land": " (land ahead)", "edge": " (edge of the world)", "port_ring": " (port ahead)"}
+	_say("Slept %.1f h, %.1f km%s" % [r["hours_slept"], float(r["dist_m"]) / 1000.0, why.get(r["stop"], "")])
+	slept.emit(r)
+	return r
+
+
+# ------------------------------------------------------------------ ports
+
+func _update_ports() -> void:
+	var cx := ship_cx()
+	var cz := ship_cz()
+	for p in chart.ports:
+		var id: String = p["id"]
+		var d := WorldChart.distance_m(cx, cz, p["x"], p["z"])
+		if d <= WorldChart.PORT_SPAWN_M and not _ports.has(id) and not _loading.has(id):
+			_spawn_port(p)
+		elif d > WorldChart.PORT_DESPAWN_M:
+			_despawn_port(id)
+
+
+func _spawn_port(p: Dictionary) -> void:
+	var id: String = p["id"]
+	if port_scenes.has(id) and ResourceLoader.exists(port_scenes[id]):
+		_loading[id] = String(port_scenes[id])
+		ResourceLoader.load_threaded_request(_loading[id])
+		return
+	_add_port(id, _make_beacon(p))
+
+
+func _add_port(id: String, node: Node3D) -> void:
+	node.name = "Port_" + id
+	node.set_meta("port_id", id)
+	add_child(node)
+	_ports[id] = node
+	_place_port(id)
+	port_spawned.emit(id)
+
+
+func _place_port(id: String) -> void:
+	var p := chart.get_port(id)
+	var node: Node3D = _ports[id]
+	node.position = Vector3(float(p["x"]) - origin_x, 0.0, float(p["z"]) - origin_z)
+	if _terrain and node.has_meta("terrain_hole_m"):
+		_terrain.set_hole(node.position.x, node.position.z, float(node.get_meta("terrain_hole_m")))
+
+
+func _despawn_port(id: String) -> void:
+	_loading.erase(id)
+	if not _ports.has(id):
+		return
+	var node: Node3D = _ports[id]
+	if _terrain and node.has_meta("terrain_hole_m"):
+		_terrain.set_hole(0.0, 0.0, -1.0)
+	_ports.erase(id)
+	node.queue_free()
+	port_despawned.emit(id)
+
+
+func port_ids() -> Array:
+	return _ports.keys()
+
+
+func _poll_loading() -> void:
+	for id in _loading.keys():
+		var path: String = _loading[id]
+		var st := ResourceLoader.load_threaded_get_status(path)
+		if st == ResourceLoader.THREAD_LOAD_LOADED:
+			var res := ResourceLoader.load_threaded_get(path) as PackedScene
+			_loading.erase(id)
+			if res:
+				_add_port(id, res.instantiate() as Node3D)
+		elif st == ResourceLoader.THREAD_LOAD_FAILED or st == ResourceLoader.THREAD_LOAD_INVALID_RESOURCE:
+			push_warning("WorldStreamer: could not load %s" % path)
+			_loading.erase(id)
+			_add_port(id, _make_beacon(chart.get_port(id)))
+
+
+## Placeholder port: a stone tower with a lamp, and a few huts round it.
+func _make_beacon(p: Dictionary) -> Node3D:
+	var root := Node3D.new()
+	var rng := RandomNumberGenerator.new()
+	rng.seed = hash(String(p["id"]))
+	var stone := StandardMaterial3D.new()
+	stone.albedo_color = Color(0.62, 0.58, 0.5)
+	stone.roughness = 0.95
+	var roof := StandardMaterial3D.new()
+	roof.albedo_color = Color(0.45, 0.2, 0.14)
+	var glow := StandardMaterial3D.new()
+	glow.albedo_color = Color(1.0, 0.85, 0.5)
+	glow.emission_enabled = true
+	glow.emission = Color(1.0, 0.8, 0.4)
+	glow.emission_energy_multiplier = 4.0
+	var tower := MeshInstance3D.new()
+	var cyl := CylinderMesh.new()
+	cyl.top_radius = 2.2
+	cyl.bottom_radius = 3.4
+	cyl.height = 27.0
+	tower.mesh = cyl
+	tower.material_override = stone
+	tower.position = Vector3(0, 8.5, 0)
+	root.add_child(tower)
+	var lamp := MeshInstance3D.new()
+	var sph := SphereMesh.new()
+	sph.radius = 1.6
+	sph.height = 3.2
+	lamp.mesh = sph
+	lamp.material_override = glow
+	lamp.position = Vector3(0, 23.5, 0)
+	root.add_child(lamp)
+	for i in 7:
+		var hut := MeshInstance3D.new()
+		var box := BoxMesh.new()
+		box.size = Vector3(rng.randf_range(6, 11), rng.randf_range(3, 5), rng.randf_range(6, 10))
+		hut.mesh = box
+		hut.material_override = stone if i % 2 == 0 else roof
+		var a := rng.randf() * TAU
+		var r := rng.randf_range(25.0, 120.0)
+		hut.position = Vector3(cos(a) * r, box.size.y * 0.5 - 0.5, sin(a) * r)
+		hut.rotation.y = rng.randf() * TAU
+		root.add_child(hut)
+	return root
+
+
+# ------------------------------------------------------------------ per frame
+
+func _unhandled_input(e: InputEvent) -> void:
+	if chart == null:
+		return
+	if e is InputEventKey and e.pressed and not e.echo:
+		if e.physical_keycode == key_sleep:
+			sleep()
+		elif e.physical_keycode == key_home:
+			go_home()
+
+
+func _physics_process(delta: float) -> void:
+	if chart == null or _ship == null:
+		return
+	if _pause_ticks > 0:
+		_pause_ticks -= 1
+		if _pause_ticks == 0 and _player:
+			_player.set_physics_process(true)
+	if macro_grounding:
+		_ground_check()
+	var g := _ship.global_position
+	if Vector2(g.x, g.z).length() > rebase_awake_m:
+		relocate(ship_cx(), ship_cz())
+	_port_timer -= delta
+	if _port_timer <= 0.0:
+		_port_timer = 0.25
+		_update_ports()
+	_poll_loading()
+
+
+func _process(delta: float) -> void:
+	if chart == null or _ship == null:
+		return
+	if not _cam_set:
+		var cam := get_viewport().get_camera_3d()
+		if cam:
+			cam.far = far_plane_m
+			_cam_set = true
+	_msg_t = maxf(_msg_t - delta, 0.0)
+	_update_hud()
+
+
+func _in_own_grounding_port() -> bool:
+	for id in _ports:
+		var node: Node3D = _ports[id]
+		if node.has_meta("own_grounding"):
+			var p := chart.get_port(id)
+			if WorldChart.distance_m(ship_cx(), ship_cz(), p["x"], p["z"]) <= float(node.get_meta("own_grounding")):
+				return true
+	return false
+
+
+## The keel against the chart's shelf. Touching bottom kills the ship's speed and holds it where it was.
+func _ground_check() -> void:
+	if _in_own_grounding_port():
+		aground = false
+		_last_ok = _ship.global_position
+		return
+	var g := _ship.global_position
+	var yaw := deg_to_rad(float(_ship.get("heading_deg")))
+	var fwd := Vector2(-sin(yaw), -cos(yaw))
+	var cx := origin_x + g.x
+	var cz := origin_z + g.z
+	var shallow := INF
+	for off in [-8.5, 0.0, 9.0]:
+		shallow = minf(shallow, chart.sea_depth_m(cx + fwd.x * off, cz + fwd.y * off))
+	if shallow < KEEL_CLEARANCE_M:
+		if not aground:
+			_say("Aground")
+		aground = true
+		_ship.global_position = Vector3(_last_ok.x, g.y, _last_ok.z)
+		var sails = _ship.get("sails")
+		if sails and sails.get("model"):
+			sails.model.v_f = 0.0
+			sails.model.v_s = 0.0
+	else:
+		aground = false
+		_last_ok = g
+
+
+func _say(t: String) -> void:
+	_msg = t
+	_msg_t = 6.0
+
+
+func _update_hud() -> void:
+	if _label == null:
+		return
+	var cx := ship_cx()
+	var cz := ship_cz()
+	var np := chart.nearest_port(cx, cz)
+	var s := "chart  x %.1f km   z %.1f km   heading %03d\n" % [cx / 1000.0, cz / 1000.0, int(ship_chart_heading())]
+	s += "water  %.0f m   shore %.1f km   origin (%.0f, %.0f)\n" % [ship_depth_m(), chart.shore_distance_m(cx, cz) / 1000.0, origin_x, origin_z]
+	if not np.is_empty():
+		s += "nearest port  %s  %.1f km\n" % [np["id"], float(np["dist_m"]) / 1000.0]
+	s += "T = sleep %.0f h   H = home port" % sleep_hours
+	if _msg_t > 0.0:
+		s += "\n" + _msg
+	_label.text = s

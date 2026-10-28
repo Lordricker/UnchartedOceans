@@ -1,0 +1,146 @@
+extends Node3D
+## Floats the ship on the Ocean: samples the wave height at points around the hull and
+## eases heave, pitch and roll toward the plane through them (a heavy hull doesn't follow
+## every ripple). The deck collision (ShipBody, an AnimatableBody3D) follows this node,
+## so the player is carried along.
+##
+## Keys (in game): F = toggle slow ahead (about 5 knots), R = toggle wave motion on/off.
+## Also feeds the ocean shader the ship transform so no water is drawn inside the hull.
+## Extra weight (flood water, later cargo) pushes the ship down and over through load_offset.
+
+@export var ocean_path: NodePath = ^"../Ocean"
+@export var ship_path: NodePath = ^"Brig"
+@export var floating := true
+## Ship-local (x, z) points where the hull feels the water. Bow is -Z.
+@export var sample_points := PackedVector2Array([
+	Vector2(0, -8.0), Vector2(0, 7.5),
+	Vector2(-2.6, -4.0), Vector2(2.6, -4.0),
+	Vector2(-3.0, 0.5), Vector2(3.0, 0.5),
+	Vector2(-2.7, 5.0), Vector2(2.7, 5.0),
+])
+## Seconds for the hull to catch up with the water (bigger = heavier, slower ship).
+@export var heave_lag := 0.7
+@export var pitch_lag := 0.9
+@export var roll_lag := 1.3
+## Extra roll on top of the wave slope (a narrow hull rolls more than the slope alone).
+@export var roll_gain := 1.25
+@export var draft_offset := 0.0
+@export var ahead_speed := 2.6   ## m/s when F is on (~5 knots)
+@export_range(0.0, 360.0) var heading_deg := 0.0
+
+var underway := false
+## Extra (heave, pitch, roll) from weight aboard, set each tick by ship_flooding.gd.
+## Heave is in metres (negative = lower), pitch and roll in radians, same signs as the waves.
+var load_offset := Vector3.ZERO
+var _ocean: Ocean
+var _ship: Node3D
+var _heave := 0.0
+var _pitch := 0.0
+var _roll := 0.0
+var _heave_v := 0.0
+var _pitch_v := 0.0
+var _roll_v := 0.0
+var _amount := 1.0
+
+func _ready() -> void:
+	_ocean = get_node_or_null(ocean_path) as Ocean
+	_ship = get_node_or_null(ship_path)
+	if _ocean == null:
+		push_warning("ship_motion: no Ocean found at %s" % ocean_path)
+	var mat := _ocean.get_ocean_material() if _ocean else null
+	if mat and _ship:
+		var ex := _find_waterline(_ship)
+		if ex.is_empty():
+			push_warning("ship_motion: no waterline data on the ship; sea will show inside the hull")
+		else:
+			var hb := PackedFloat32Array(ex["waterline_half_beam"])
+			mat.set_shader_parameter("half_beam", hb)
+			mat.set_shader_parameter("sample_count", hb.size())
+			mat.set_shader_parameter("y_min", float(ex["waterline_y_min"]))
+			mat.set_shader_parameter("y_step", float(ex["waterline_y_step"]))
+	if _ocean:
+		_heave = _ocean.get_height(global_position.x, global_position.z)
+	_unsync_bodies(self)
+
+## The deck and hull collision live in AnimatableBody3D nodes under the ship. With
+## sync_to_physics on, they only follow their *own* local transform, so when this rig
+## moves them through their parent the collision stays behind. Turned off, every parent
+## move is sent to physics as a kinematic move (with velocity), which carries the player.
+func _unsync_bodies(n: Node) -> void:
+	if n is AnimatableBody3D:
+		(n as AnimatableBody3D).sync_to_physics = false
+	for c in n.get_children():
+		_unsync_bodies(c)
+
+func _find_waterline(n: Node) -> Dictionary:
+	if n.has_meta("extras"):
+		var e = n.get_meta("extras")
+		if e is Dictionary and e.has("waterline_half_beam"):
+			return e
+	for c in n.get_children():
+		var r := _find_waterline(c)
+		if not r.is_empty():
+			return r
+	return {}
+
+func _unhandled_input(e: InputEvent) -> void:
+	if e is InputEventKey and e.pressed and not e.echo:
+		if e.physical_keycode == KEY_R:
+			floating = not floating
+		elif e.physical_keycode == KEY_F:
+			underway = not underway
+
+## Target heave, pitch, roll from the water under the sample points (least-squares plane).
+func water_pose() -> Vector3:
+	var yaw := deg_to_rad(heading_deg)
+	var fwd := Vector2(-sin(yaw), -cos(yaw))    # world xz of ship -Z
+	var right := Vector2(cos(yaw), -sin(yaw))   # world xz of ship +X
+	var hs := PackedFloat32Array()
+	var mean := 0.0
+	for sp in sample_points:
+		var w := Vector2(global_position.x, global_position.z) + right * sp.x - fwd * sp.y
+		var h := _ocean.get_height(w.x, w.y)
+		hs.append(h)
+		mean += h
+	mean /= sample_points.size()
+	var sxh := 0.0; var sxx := 0.0; var szh := 0.0; var szz := 0.0
+	for i in sample_points.size():
+		var sp := sample_points[i]
+		sxh += sp.x * (hs[i] - mean); sxx += sp.x * sp.x
+		szh += sp.y * (hs[i] - mean); szz += sp.y * sp.y
+	var roll := atan(sxh / maxf(sxx, 0.001)) * roll_gain   # +roll raises ship +X
+	var pitch := atan(-szh / maxf(szz, 0.001))             # +pitch raises the bow (-Z)
+	return Vector3(mean, pitch, roll)
+
+func _physics_process(delta: float) -> void:
+	_amount = move_toward(_amount, 1.0 if floating else 0.0, delta * 0.3)
+	if underway:
+		var yaw := deg_to_rad(heading_deg)
+		global_position += Vector3(-sin(yaw), 0.0, -cos(yaw)) * ahead_speed * delta
+	var target := water_pose() * _amount if _ocean else Vector3.ZERO
+	target += load_offset
+	_heave = _spring(_heave, target.x, heave_lag, delta, 0)
+	_pitch = _spring(_pitch, target.y, pitch_lag, delta, 1)
+	_roll = _spring(_roll, target.z, roll_lag, delta, 2)
+	position.y = _heave + draft_offset
+	basis = Basis(Vector3.UP, deg_to_rad(heading_deg)) \
+		* Basis(Vector3.RIGHT, _pitch) * Basis(Vector3.BACK, _roll)
+
+# Critically damped spring toward target, so motion has some weight and no jitter.
+func _spring(x: float, target: float, lag: float, dt: float, which: int) -> float:
+	var omega := 2.0 / maxf(lag, 0.05)
+	var v: float = [_heave_v, _pitch_v, _roll_v][which]
+	var ex := exp(-omega * dt)
+	var change := x - target
+	var temp := (v + omega * change) * dt
+	v = (v - omega * temp) * ex
+	var out := target + (change + temp) * ex
+	match which:
+		0: _heave_v = v
+		1: _pitch_v = v
+		2: _roll_v = v
+	return out
+
+func _process(_delta: float) -> void:
+	if _ocean and _ship and _ocean.get_ocean_material():
+		_ocean.get_ocean_material().set_shader_parameter("ship_inv", Projection(_ship.global_transform.affine_inverse()))

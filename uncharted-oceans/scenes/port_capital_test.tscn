@@ -1,0 +1,74 @@
+[gd_scene format=3]
+
+[ext_resource type="PackedScene" uid="uid://d3r20cy4p4qf" path="res://assets/port/PortCapital.glb" id="1_port"]
+[ext_resource type="Script" uid="uid://da07cl2ygaab4" path="res://scripts/player.gd" id="2_player"]
+[ext_resource type="Script" uid="uid://b212s1egyu5j0" path="res://scripts/debug_hud.gd" id="3_hud"]
+
+[sub_resource type="ProceduralSkyMaterial" id="SkyMat"]
+sky_top_color = Color(0.29, 0.34, 0.42, 1)
+sky_horizon_color = Color(0.58, 0.6, 0.62, 1)
+ground_bottom_color = Color(0.1, 0.14, 0.18, 1)
+ground_horizon_color = Color(0.58, 0.6, 0.62, 1)
+
+[sub_resource type="Sky" id="Sky"]
+sky_material = SubResource("SkyMat")
+
+[sub_resource type="Environment" id="Env"]
+background_mode = 2
+sky = SubResource("Sky")
+ambient_light_source = 3
+ambient_light_energy = 0.8
+tonemap_mode = 2
+ssao_enabled = true
+fog_enabled = true
+fog_light_color = Color(0.52, 0.56, 0.6, 1)
+fog_density = 0.004
+
+[sub_resource type="PlaneMesh" id="SeaMesh"]
+size = Vector2(1200, 1200)
+
+[sub_resource type="StandardMaterial3D" id="SeaMatFlat"]
+albedo_color = Color(0.03, 0.09, 0.1, 1)
+roughness = 0.08
+
+[sub_resource type="CapsuleShape3D" id="PlayerShape"]
+radius = 0.22
+height = 1.02
+
+[node name="PortCapitalTest" type="Node3D"]
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+environment = SubResource("Env")
+
+[node name="Sun" type="DirectionalLight3D" parent="."]
+transform = Transform3D(0.8253356, -0.42420486, 0.3726545, 0, 0.6599831, 0.7512804, -0.5646425, -0.6200585, 0.54470754, 0, 0, 0)
+light_color = Color(1, 0.93, 0.82, 1)
+shadow_enabled = true
+directional_shadow_max_distance = 120.0
+
+[node name="PortCapital" parent="." instance=ExtResource("1_port")]
+
+[node name="SeaPlane" type="MeshInstance3D" parent="."]
+mesh = SubResource("SeaMesh")
+surface_material_override/0 = SubResource("SeaMatFlat")
+
+[node name="Player" type="CharacterBody3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2.2, -16)
+script = ExtResource("2_player")
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="Player"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.51, 0)
+shape = SubResource("PlayerShape")
+
+[node name="Head" type="Node3D" parent="Player"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.95, 0)
+
+[node name="Camera3D" type="Camera3D" parent="Player/Head"]
+near = 0.03
+
+[node name="HUD" type="CanvasLayer" parent="."]
+
+[node name="Label" type="Label" parent="HUD"]
+offset_left = 12.0
+offset_top = 8.0
+script = ExtResource("3_hud")

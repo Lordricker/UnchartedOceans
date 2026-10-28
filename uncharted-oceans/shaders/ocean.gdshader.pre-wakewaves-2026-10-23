@@ -1,0 +1,412 @@
+// Open-ocean surface: a sum of warped exponential sine waves (the "Acerola" approach,
+// after GPU Gems ch.1 sum-of-sines). Each wave is exp(peak * (sin(x) - 1)): sharp crests,
+// wide troughs. Each octave is sampled at a position nudged by the previous octaves'
+// slope (domain warping), so wave fronts bend into each other instead of running straight.
+//
+// The wave table (direction, wavenumber, amplitude, speed, phase) is built by ocean.gd and
+// shared with its CPU height sampler, so buoyancy uses exactly the waves you see.
+//  - The first `vertex_octaves` waves displace the mesh (the swells the ship rides).
+//  - `octaves` waves feed the per-pixel normal. Octaves smaller than about two pixels are
+//    faded out, so distant water doesn't shimmer.
+//
+// Ripples: a fine, wind-driven ripple pattern on top of the swells (normals plus a slight
+// shade change, close to the water colour). Strength is set per sea state by ocean.gd
+// (off in calm water). Computed in the shader from gradient noise, so it never tiles, and
+// it fades out with distance before it can shimmer.
+//
+// See-through: the water's opacity comes from how much water lies between the surface and
+// whatever is behind it (from the depth buffer), so the hull below the waterline shows
+// through, fading into the deep colour. Open ocean (nothing below) stays fully opaque.
+//
+// Also: crest foam, light scattering through crests, and the hull mask from the old sea
+// shader (no water drawn inside the ship).
+shader_type spatial;
+render_mode cull_back, depth_draw_always;
+
+#include "res://shaders/world_chart.gdshaderinc"
+
+const int MAX_WAVES = 32;
+
+// ---- wave table (set by ocean.gd) ----
+uniform int octaves = 16;
+uniform int vertex_octaves = 10;
+uniform float peak = 1.0;              // crest sharpness
+uniform float warp = 0.5;              // domain-warp strength
+uniform float height_offset = 0.0;     // keeps mean sea level at 0
+uniform float ocean_time = 0.0;
+uniform float sea_amplitude = 1.0;     // roughly the crest height of this sea state (for foam)
+uniform float w_dx[32];
+uniform float w_dz[32];
+uniform float w_k[32];                 // wavenumber 2*pi / wavelength
+uniform float w_a[32];                 // amplitude (m)
+uniform float w_w[32];                 // angular speed (deep-water dispersion)
+uniform float w_p[32];                 // phase
+uniform vec2 wind_dir = vec2(0.57, -0.82); // direction the wind blows toward (set by ocean.gd)
+
+// ---- look ----
+// A touch bluer than before: slate blue in the deep, teal through the lit faces.
+uniform vec3 deep_color : source_color = vec3(0.022, 0.075, 0.12);
+uniform vec3 shallow_color : source_color = vec3(0.065, 0.27, 0.29);
+uniform vec3 scatter_color : source_color = vec3(0.05, 0.28, 0.31);
+uniform vec3 foam_color : source_color = vec3(0.85, 0.88, 0.86);
+uniform float roughness_value = 0.06;
+uniform float scatter_strength = 1.2;
+uniform vec3 sun_dir = vec3(0.4, 0.6, 0.5); // points toward the sun (set by ocean.gd)
+uniform vec3 sun_color : source_color = vec3(1.0, 0.93, 0.82);
+uniform float foam_start = 0.5;        // fraction of sea_amplitude where crest foam begins
+uniform float foam_amount = 0.6;
+
+// ---- weather (set by SkySystem; the defaults leave the water as it was) ----
+uniform vec3 horizon_color : source_color = vec3(0.58, 0.6, 0.62);
+uniform float sky_tint = 0.0;          // how much the water body takes on the horizon colour (more under cloud)
+uniform float water_gray = 0.0;        // 0..1: duller, greyer water in bad weather
+uniform float water_dark = 0.0;        // 0..1: darker water and less glow in storms
+
+// ---- ship wake (set by ship_motion.gd) ----
+uniform vec3 wake_fwd = vec3(0.0, 0.0, 1.0);   // the bow's direction in the hull's own space
+uniform float wake_speed = 0.0;                // smoothed speed through the water, m/s
+uniform float hull_bow = 10.0;                 // waterline ends measured along wake_fwd, metres (bow +, stern -)
+uniform float hull_stern = -10.0;
+uniform float hull_beam = 3.0;                 // widest half-beam at the waterline
+uniform sampler2D foam_noise : hint_default_white, filter_linear_mipmap, repeat_enable;
+
+// ---- see-through ----
+uniform float absorption : hint_range(0.05, 3.0) = 0.45;   // per metre; higher = murkier
+uniform sampler2D depth_tex : hint_depth_texture, filter_nearest;
+
+// ---- ripples ----
+uniform float ripple_strength : hint_range(0.0, 1.0) = 0.6; // per sea state (set by ocean.gd)
+uniform float ripple_scale = 0.9;      // ripples per metre across the wind: higher = finer
+uniform float ripple_stretch = 2.2;    // >1 makes ripples longer along their crests
+uniform float ripple_depth = 0.05;     // bumpiness
+uniform float ripple_tint = 0.18;      // how much ripples lighten/darken the water colour
+uniform float ripple_speed = 0.8;      // drift with the wind (m/s)
+
+// ---- island (set by ocean.gd when an island registers) ----
+// The island's heightmap: R = ground height (m, negative under water), G = wave shelter, B = signed shore distance.
+uniform sampler2D island_tex : filter_linear, repeat_disable;
+uniform vec2 island_origin = vec2(0.0);
+uniform float island_size = 400.0;
+uniform vec2 island_uv = vec2(1.0, 0.0);   // texel-centre mapping (scale, offset)
+uniform float island_on = 0.0;
+uniform float shoal_depth = 12.0;
+uniform float shoal_pow = 0.6;
+uniform float shore_foam_width = 1.1;      // metres of depth the surf reaches at calm; grows with the swell
+
+// ---- world chart (set by Ocean.set_world() in world mode) ----
+// Macro shoaling from the chart's shelf (same maths as WorldChart.wave_scale), the curved horizon,
+// and foam offsets so a rebase of the world origin does not move the foam.
+uniform float chart_on = 0.0;
+uniform vec2 chart_origin = vec2(0.0);
+uniform vec2 chart_size = vec2(600000.0, 400000.0);
+uniform float chart_mpp = 390.625;
+uniform sampler2D chart_land : filter_linear, repeat_disable;
+uniform sampler2D chart_shore : filter_linear, repeat_disable;
+uniform float curve_k = 0.0;               // 1 / (2 * planet radius)
+uniform vec2 foam_off1 = vec2(0.0);
+uniform vec2 foam_off2 = vec2(0.0);
+
+// ---- hull mask (set by ship_motion.gd; same data as the old sea shader) ----
+uniform mat4 ship_inv;
+uniform float half_beam[43];
+uniform float y_min = -10.5;
+uniform float y_step = 0.5;
+uniform int sample_count = 0;
+uniform float inset = 0.02;
+
+varying vec2 world_xz;
+varying float wave_h;
+varying float shoal_v;
+
+// (ground height, wave scale, shore distance) of the island at world xz; open sea outside it.
+vec3 island_info(vec2 p) {
+	vec2 uv = (p - island_origin) / island_size + 0.5;
+	uv = uv * island_uv.x + island_uv.y;
+	vec3 t = textureLod(island_tex, uv, 0.0).rgb;
+	float scale = pow(clamp(-t.r / shoal_depth, 0.0, 1.0), shoal_pow) * t.g;
+	return vec3(t.r, mix(1.0, scale, island_on), t.b);
+}
+
+float chart_scale(vec2 p) {
+	vec2 uv = (p + chart_origin) / chart_size;
+	float land = textureLod(chart_land, uv, 0.0).r;
+	float shore = textureLod(chart_shore, uv, 0.0).r;
+	float depth = land >= 0.5 ? 0.0 : chart_shelf_depth(shore * 255.0 * chart_mpp / 1000.0);
+	return pow(clamp(depth / shoal_depth, 0.0, 1.0), shoal_pow);
+}
+
+// Height and slope of the first `n` waves at p. Matches Ocean.get_height() in ocean.gd.
+vec3 waves(vec2 p, int n, float footprint) {
+	float h = 0.0;
+	vec2 grad = vec2(0.0);
+	for (int i = 0; i < MAX_WAVES; i++) {
+		if (i >= n) break;
+		float lambda = 6.2831853 / w_k[i];
+		// fade waves smaller than ~2-4 pixels (footprint = metres per pixel, 0 = no fade)
+		float fade = footprint > 0.0 ? clamp(lambda / footprint * 0.5 - 1.0, 0.0, 1.0) : 1.0;
+		if (fade <= 0.0) break;
+		vec2 d = vec2(w_dx[i], w_dz[i]);
+		float x = dot(d, p) * w_k[i] + ocean_time * w_w[i] + w_p[i];
+		float s = sin(x);
+		float c = cos(x);
+		float e = exp(peak * (s - 1.0));
+		float a = w_a[i] * fade;
+		h += a * e;
+		float dx = a * peak * e * c;   // dh/dx along d (per radian)
+		grad += d * dx * w_k[i];
+		p += d * dx * warp;            // domain warp: next wave sees a shifted position
+	}
+	return vec3(h + height_offset, grad);
+}
+
+// Gradient noise with its derivative, computed in the shader (full float precision and it
+// never repeats). After Inigo Quilez; hash after Dave Hoskins' "hash without sine".
+// Returns (value about -0.7..0.7, d/dx, d/dy).
+vec2 hash22(vec2 p) {
+	vec3 p3 = fract(vec3(p.xyx) * vec3(0.1031, 0.1030, 0.0973));
+	p3 += dot(p3, p3.yzx + 33.33);
+	return fract((p3.xx + p3.yz) * p3.zy) * 2.0 - 1.0;
+}
+vec3 gnoised(vec2 p) {
+	vec2 i = floor(p);
+	vec2 f = fract(p);
+	vec2 u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+	vec2 du = 30.0 * f * f * (f * (f - 2.0) + 1.0);
+	vec2 ga = hash22(i);
+	vec2 gb = hash22(i + vec2(1.0, 0.0));
+	vec2 gc = hash22(i + vec2(0.0, 1.0));
+	vec2 gd = hash22(i + vec2(1.0, 1.0));
+	float va = dot(ga, f);
+	float vb = dot(gb, f - vec2(1.0, 0.0));
+	float vc = dot(gc, f - vec2(0.0, 1.0));
+	float vd = dot(gd, f - vec2(1.0, 1.0));
+	float k = va - vb - vc + vd;
+	float v = va + u.x * (vb - va) + u.y * (vc - va) + u.x * u.y * k;
+	vec2 d = ga + u.x * (gb - ga) + u.y * (gc - ga) + u.x * u.y * (ga - gb - gc + gd)
+		+ du * (u.yx * k + vec2(vb, vc) - va);
+	return vec3(v, d);
+}
+
+// One ripple layer: noise stretched along the ripple crests (across the wind), drifting
+// with the wind. Returns (height, world-space gradient per metre), faded by pixel size.
+vec3 ripple_layer(vec2 p, float scale, float speed, float angle, float px_size) {
+	float c = cos(angle);
+	float s = sin(angle);
+	vec2 along = mat2(vec2(c, s), vec2(-s, c)) * wind_dir;
+	vec2 across = vec2(-along.y, along.x);
+	vec2 r = p - along * ocean_time * speed;
+	vec2 kx = across * scale;                    // rows of the world -> noise matrix
+	vec2 ky = along * scale * ripple_stretch;
+	vec3 n = gnoised(vec2(dot(r, kx), dot(r, ky)));
+	vec2 grad = kx * n.y + ky * n.z;
+	// fade once a ripple is less than ~4 pixels long
+	float fade = 1.0 - smoothstep(0.12, 0.28, px_size * scale * ripple_stretch);
+	return vec3(n.x, grad) * fade;
+}
+
+vec3 ripples(vec2 p, float px_size) {
+	// coarse layer keeps texture visible further out; the finer two add detail up close
+	vec3 c = ripple_layer(p - 57.1, ripple_scale * 0.4, ripple_speed * 0.7, -0.35, px_size);
+	vec3 a = ripple_layer(p, ripple_scale, ripple_speed, 0.0, px_size);
+	vec3 b = ripple_layer(p + 31.7, ripple_scale * 2.3, ripple_speed * 1.5, 0.5, px_size);
+	return c * 0.7 + a + b * 0.45;
+}
+
+// Two foam patterns from the world position: x = lacy veins (ridged noise), y = streaks stretched along the wind.
+// Both drift slowly with the wind, and fade to their average where their cells get down to a few pixels.
+vec2 foam_pattern(vec2 p, float footprint) {
+	vec2 along = wind_dir;
+	vec2 across = vec2(-along.y, along.x);
+	float lace_v = 0.3;
+	float lf = 1.0 - smoothstep(0.07, 0.22, footprint);
+	if (lf > 0.0) {
+		vec2 q = p * 2.2 + along * ocean_time * 0.45;
+		float a = 1.0 - abs(gnoised(q).x * 1.45);
+		float b = 1.0 - abs(gnoised(q * 2.13 + vec2(17.3, 41.7)).x * 1.45);
+		lace_v = mix(0.3, smoothstep(0.62, 0.92, a * 0.65 + b * 0.35), lf);
+	}
+	float streak_v = 0.35;
+	float sf = 1.0 - smoothstep(0.3, 0.9, footprint);
+	if (sf > 0.0) {
+		vec2 q2 = vec2(dot(p, across) * 1.5, dot(p, along) * 0.2 - ocean_time * 0.12);
+		float n = gnoised(q2).x * 1.4 + gnoised(q2 * 2.3 + vec2(9.1, 3.7)).x * 0.5;
+		streak_v = mix(0.35, smoothstep(0.1, 0.55, n + 0.25), sf);
+	}
+	return vec2(lace_v, streak_v);
+}
+
+// Half-beam of the hull's waterline at zl (= -z in the hull's space, the same index the hull mask reads); 0 off the ends.
+float hull_half_beam(float zl) {
+	float f = (zl - y_min) / y_step;
+	if (sample_count <= 0 || f < 0.0 || f > float(sample_count - 1)) {
+		return 0.0;
+	}
+	int i = int(floor(f));
+	int j = min(i + 1, sample_count - 1);
+	return mix(half_beam[i], half_beam[j], fract(f));
+}
+
+// The foam a moving hull leaves, worked out in the hull's own space so it sticks to the ship: white water along the
+// planking and heaviest round the stem, the bow wave's two diagonal lines, and the churned trail behind the stern that
+// thins out with distance. The trail is a rigid strip behind the hull (it does not bend through a turn). `pat` is the
+// world-fixed foam pattern, so the white seems to stay in the water while the ship moves through it.
+// Returns (foam, how thick it is).
+vec2 wake_foam(vec3 hl, vec2 pat, float nz) {
+	float sp = smoothstep(0.2, 5.0, wake_speed);
+	float along = dot(hl, wake_fwd);            // + toward the bow
+	float across = abs(hl.x);
+	// distance outside the waterline outline
+	float out_x = max(across - hull_half_beam(-hl.z), 0.0);
+	float out_z = max(max(along - hull_bow, hull_stern - along), 0.0);
+	float d = length(vec2(out_x, out_z));
+
+	// 1. white water against the planking, wider and heavier with speed, heaviest round the stem
+	float stem = smoothstep(hull_bow - 5.0, hull_bow, along);
+	float width = 0.3 + 1.1 * sp + 1.6 * sp * stem;
+	float ring = (1.0 - smoothstep(0.0, width, d)) * (0.15 + 0.85 * sp) * (0.45 + 0.9 * pat.x) * smoothstep(0.1, 0.5, nz + 0.35);
+
+	// 2. the bow wave: a diagonal line out from the stem on each side (about the 19 degree wedge)
+	float back = hull_bow - along;              // metres behind the stem
+	float line_c = hull_beam * 0.35 + back * 0.32;
+	float line_w = 0.35 + 0.3 * sp + back * 0.04;
+	float line_len = 3.0 + 14.0 * sp;
+	float bow_line = (1.0 - smoothstep(0.0, line_w, abs(across - line_c)))
+		* smoothstep(0.0, 1.5, back) * (1.0 - smoothstep(line_len * 0.5, line_len, back))
+		* sp * (0.4 + 0.9 * pat.y);
+
+	// 3. the churned trail behind the stern
+	float s = hull_stern - along;               // metres behind the stern
+	float trail_len = 6.0 + 30.0 * sp;
+	float half_w = hull_beam * 0.8 + s * 0.14;
+	float trail = (1.0 - smoothstep(0.0, half_w, across)) * smoothstep(-2.0, 0.5, s)
+		* (1.0 - smoothstep(0.25 * trail_len, trail_len, s));
+	trail *= sp * (0.35 + 0.95 * pat.x * (0.6 + 0.8 * pat.y));
+	float trail_f = smoothstep(0.2, 0.55, trail);
+
+	float w = max(ring, max(bow_line, trail_f));
+	float t = max(ring * 0.9, trail_f * (1.0 - smoothstep(0.0, trail_len * 0.5, s)));
+	return vec2(clamp(w, 0.0, 1.0), clamp(t, 0.0, 1.0));
+}
+
+void vertex() {
+	vec3 wp = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
+	world_xz = wp.xz;
+	float dist = length(wp.xz - CAMERA_POSITION_WORLD.xz);
+	// grid spacing grows with distance; skip swells too small for the mesh to show
+	float spacing = max(0.35, dist * 0.035);
+	vec3 w = waves(wp.xz, vertex_octaves, spacing * 2.0);
+	float sc = island_on > 0.5 ? island_info(wp.xz).y : 1.0;
+	if (chart_on > 0.5) {
+		sc *= chart_scale(wp.xz);
+	}
+	shoal_v = sc;
+	wave_h = w.x * sc;
+	VERTEX.y += w.x * sc - dist * dist * curve_k;
+}
+
+void fragment() {
+	vec3 wpos = (INV_VIEW_MATRIX * vec4(VERTEX, 1.0)).xyz;
+
+	// hull mask
+	if (sample_count > 0) {
+		vec3 l = (ship_inv * vec4(wpos, 1.0)).xyz;
+		float f = (-l.z - y_min) / y_step;
+		if (f >= 0.0 && f <= float(sample_count - 1)) {
+			int i = int(floor(f));
+			int j = min(i + 1, sample_count - 1);
+			float hb = mix(half_beam[i], half_beam[j], fract(f));
+			if (abs(l.x) < hb - inset) discard;
+		}
+	}
+
+	float footprint = max(length(fwidth(world_xz)), 0.002);
+	vec3 w = waves(world_xz, octaves, footprint);
+	vec3 isl = island_on > 0.5 ? island_info(world_xz) : vec3(-99.0, 1.0, 99.0);
+	w.yz *= shoal_v;       // shoaled swell is flatter (the slope of the shoaling itself is ignored)
+	vec3 rip = vec3(0.0);
+	if (ripple_strength > 0.0) {
+		rip = ripples(world_xz, footprint) * ripple_strength;
+	}
+	vec2 slope = w.yz + rip.yz * ripple_depth;
+	vec3 n_world = normalize(vec3(-slope.x, 1.0, -slope.y));
+	NORMAL = normalize((VIEW_MATRIX * vec4(n_world, 0.0)).xyz);
+
+	vec3 v_world = normalize(CAMERA_POSITION_WORLD - wpos);
+	vec3 l_world = normalize(sun_dir);
+
+	// how much water is behind this pixel (along the view ray), from the depth buffer
+	float scene_depth = texture(depth_tex, SCREEN_UV).r;
+#if CURRENT_RENDERER == RENDERER_COMPATIBILITY
+	vec3 ndc = vec3(SCREEN_UV, scene_depth) * 2.0 - 1.0;
+#else
+	vec3 ndc = vec3(SCREEN_UV * 2.0 - 1.0, scene_depth);
+#endif
+	vec4 scene_view = INV_PROJECTION_MATRIX * vec4(ndc, 1.0);
+	scene_view.xyz /= scene_view.w;
+	float thickness = max(VERTEX.z - scene_view.z, 0.0);
+	float clarity = exp(-thickness * absorption);          // 1 = clear, 0 = opaque
+
+	// light passing through wave crests toward the viewer (after the 'Atlas' GDC talk)
+	float h01 = clamp(wave_h / max(sea_amplitude, 0.05), 0.0, 1.0);
+	float through = pow(max(dot(l_world, -v_world), 0.0), 4.0) * pow(0.5 - 0.5 * dot(l_world, n_world), 3.0);
+	float facing = pow(max(dot(v_world, n_world), 0.0), 2.0);
+	float sss = (3.0 * h01 * through + 0.45 * facing * (0.3 + h01)) * scatter_strength;
+	vec3 scatter = scatter_color * sun_color * sss * (1.0 - 0.6 * water_dark);
+
+	// crest foam, broken up by two scrolling noise layers at unrelated scales (hides tiling)
+	vec2 uv1 = world_xz * 0.071 + foam_off1 + vec2(ocean_time * 0.011, ocean_time * 0.004);
+	vec2 uv2 = mat2(vec2(0.8, 0.6), vec2(-0.6, 0.8)) * world_xz * 0.193 + foam_off2 - vec2(ocean_time * 0.007, 0.0);
+	float nz = texture(foam_noise, uv1).r * 0.6 + texture(foam_noise, uv2).r * 0.4;
+	// whitecaps where the wave is both high and steep; steepness alone adds streaks in rough seas
+	float steep = 1.0 - n_world.y;
+	float crest = smoothstep(foam_start, 1.0, h01 + (nz - 0.5) * 0.5 + steep * 1.5 * foam_amount);
+	// layers: thick white on the highest crests, lacy veins and wind streaks on the flanks around them
+	vec3 hl = (ship_inv * vec4(wpos, 1.0)).xyz;                  // this pixel in the hull's own space
+	float h_along = dot(hl, wake_fwd);
+	bool near_ship = sample_count > 0 && abs(hl.x) < 30.0 && h_along > hull_stern - 60.0 && h_along < hull_bow + 15.0;
+	vec2 fp = vec2(0.3, 0.35);                                   // each pattern's average, used where it is not drawn
+	if (crest > 0.02 || near_ship) {
+		fp = foam_pattern(world_xz, footprint);
+	}
+	float breakup = smoothstep(0.35, 0.75, nz + crest * 0.3);
+	float thick = smoothstep(0.55, 0.9, crest + (nz - 0.5) * 0.45) * breakup;
+	float lace_f = fp.x * smoothstep(0.08, 0.65, crest) * breakup;
+	float streak_f = fp.y * smoothstep(0.2, 0.75, crest) * breakup * 0.85;
+	float foam = clamp(max(thick, max(lace_f, streak_f)) * foam_amount * 1.6, 0.0, 1.0);
+	thick = clamp(thick * foam_amount * 1.6, 0.0, 1.0);
+	// the ship's own wake
+	if (near_ship) {
+		vec2 wf = wake_foam(hl, fp, nz);
+		foam = max(foam, wf.x);
+		thick = max(thick, wf.y);
+	}
+	float crest_foam = foam;
+
+	// surf and wash along the shore: lacy foam on the shallows, pulsing in and out with the swell
+	if (island_on > 0.5) {
+		float depth_here = max(-isl.x, 0.0);
+		float reach = shore_foam_width + sea_amplitude * 1.2;
+		float pulse = 0.5 + 0.5 * sin(ocean_time * 0.9 + isl.z * 0.35 + nz * 3.0);
+		float zone = 1.0 - smoothstep(0.0, reach * (0.55 + 0.6 * pulse), depth_here);
+		float lace = smoothstep(0.30, 0.62, nz + zone * 0.45);
+		float edge = 1.0 - smoothstep(0.0, 0.18, depth_here);       // solid line right at the water line
+		foam = max(foam, clamp(zone * lace * 1.0 + edge * 0.7, 0.0, 1.0) * smoothstep(0.0, 0.05, 1.0 - float(isl.x > 0.0)));
+	}
+
+	vec3 body = mix(deep_color, shallow_color, clarity);
+	float body_l = dot(body, vec3(0.333));
+	body = mix(body, vec3(body_l * 1.15), water_gray * 0.5);       // duller, greyer water under heavy cloud
+	body = mix(body, horizon_color * 0.07, sky_tint);               // some of the sky's colour shows through the water
+	body *= 1.0 - 0.45 * water_dark;
+	body *= 1.0 + rip.x * ripple_tint;               // ripples: slightly lighter/darker bands
+	thick = max(thick, clamp(foam - crest_foam, 0.0, 1.0) * 1.2);   // surf along the shore is thick white water
+	vec3 foam_col = mix(foam_color * 0.72 + body * 0.35, foam_color, clamp(thick * 1.3, 0.0, 1.0));   // thin foam shows the water through it
+	ALBEDO = mix(body, foam_col, foam);
+	ROUGHNESS = mix(roughness_value, 0.85, foam);
+	SPECULAR = 0.5;
+	EMISSION = scatter * (1.0 - foam);
+
+	// see-through where the water is thin; reflections (grazing angles) and foam stay opaque
+	float fresnel = pow(1.0 - max(dot(n_world, v_world), 0.0), 5.0);
+	ALPHA = clamp(max(max(1.0 - clarity, fresnel), foam), 0.0, 1.0);
+}

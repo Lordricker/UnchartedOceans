@@ -1,0 +1,23 @@
+class_name ShipLadder
+extends Node3D
+## A climbable ladder on the outside of a ship. Put it under the ship (so it moves with it).
+## Local frame: origin at the foot of the ladder on its outer face, +Y up the ladder,
+## -Z pointing into the ship. The player (player.gd) grabs it by moving toward it, W/S climbs,
+## Space lets go, and climbing past the top takes you over the rail onto the deck.
+
+@export var height := 2.35            ## foot to top, metres
+@export var half_width := 0.35        ## how far either side of the centre you can grab it
+@export var climb_offset := 0.5       ## player's centre stays this far out from the ladder face
+@export var reach_below := 1.5        ## can be grabbed from this far below the foot (from the water)
+@export var mantle_depth := 0.95      ## how far inboard you land after climbing over the top
+@export var mantle_height := 0.15     ## clearance above the top when going over
+
+func _ready() -> void:
+	add_to_group("ship_ladders")
+
+## The ship (ship_motion.gd) this ladder rides on, if any.
+func ship() -> Node:
+	var n := get_parent()
+	while n and not n.has_method("velocity_at"):
+		n = n.get_parent()
+	return n

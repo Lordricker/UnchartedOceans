@@ -1,0 +1,39 @@
+extends Label
+## Corner readout for performance tests: FPS, frame time, sea state and the keys.
+## C cycles the frame cap (60 / 120 / uncapped / 30). The default cap is set in Project
+## Settings > Application > Run > Max FPS.
+
+@export var ocean_path: NodePath = ^"../../Ocean"
+@export var ship_path: NodePath = ^"../../ShipRig"
+
+var _ocean: Ocean
+var _ship: Node
+const CAPS := [60, 120, 0, 30]
+
+func _ready() -> void:
+	_ocean = get_node_or_null(ocean_path) as Ocean
+	_ship = get_node_or_null(ship_path)
+	RenderingServer.viewport_set_measure_render_time(get_viewport().get_viewport_rid(), true)
+
+func _process(_delta: float) -> void:
+	var fps := Engine.get_frames_per_second()
+	var sea := "?"
+	if _ocean:
+		sea = ["calm", "moderate", "rough", "storm"][_ocean.sea_state]
+	var ahead := "stopped"
+	if _ship and _ship.get("underway"):
+		ahead = "ahead slow"
+	var vp := get_viewport().get_viewport_rid()
+	var gpu := RenderingServer.viewport_get_measured_render_time_gpu(vp)
+	var cpu := RenderingServer.viewport_get_measured_render_time_cpu(vp)
+	var vsync := "on" if DisplayServer.window_get_vsync_mode() != DisplayServer.VSYNC_DISABLED else "off"
+	var cap := "uncapped" if Engine.max_fps == 0 else "%d" % Engine.max_fps
+	text = "%d fps  (cap %s)   GPU %.2f ms   render CPU %.2f ms   vsync %s\nsea: %s   ship: %s\n1-4 sea state   F ahead   R waves on/off   C frame cap   H hide" % [
+		fps, cap, gpu, cpu, vsync, sea, ahead]
+
+func _unhandled_input(e: InputEvent) -> void:
+	if e is InputEventKey and e.pressed and not e.echo and e.physical_keycode == KEY_H:
+		visible = not visible
+	elif e is InputEventKey and e.pressed and not e.echo and e.physical_keycode == KEY_C:
+		var i := CAPS.find(Engine.max_fps)
+		Engine.max_fps = CAPS[(i + 1) % CAPS.size()]

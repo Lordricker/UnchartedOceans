@@ -1,0 +1,228 @@
+class_name SailModel
+extends RefCounted
+## The sailing physics, with no scene attached so it can be tested on its own (see
+## tests/sail_polar.gd). ShipSails (ship_sails.gd) feeds it the sails as they stand and the wind,
+## and applies the result to the ship.
+##
+## Frame: (f, s) = (forward, starboard) in the ship's own plan view, metres and newtons.
+## Wind vectors say where the AIR IS GOING (a wind "from astern" is +f).
+##
+## What it models, the way it works on a real square-rigger:
+##  * Apparent wind = true wind minus the ship's own velocity. It comes further ahead the faster you go.
+##  * Each sail is a thin cloth wing. The air hits it at an angle of attack; the force is lift (across the
+##    wind) plus drag (along it). Lift peaks around 20 to 25 degrees, then the cloth stalls.
+##  * A square sail's plane is set by how far its yard is braced. Braced too square for a wind from the
+##    side it stalls (all drag); braced too sharp, or pointed too close to the wind, it shakes (luffs) and
+##    gives nothing; with the wind on the FRONT of it the sail is aback and pushes the ship astern.
+##  * Fore-and-aft sails (jib, staysail, spanker) sit on the lee side of their stay or mast, and the crew
+##    trims them for the best angle, up to how far the sheet lets them swing.
+##  * Sideways force heels the ship (the tall sails give it a long lever) and pushes it sideways through
+##    the water (leeway), which the keel resists more the faster you go.
+##  * The sails ahead of or behind the keel's centre of lateral resistance steer the ship by themselves
+##    (weather helm: it wants to turn up into the wind), so the rudder has to hold it.
+##  * Hull drag grows with the square of speed and climbs steeply near hull speed (about 10 knots).
+##  * Sails far forward sit in the lee of the ones behind them when the wind is aft (blanketing).
+
+const RHO_AIR := 1.2
+const G := 9.81
+const KNOTS := 0.514444
+
+## One sail, as the rig currently has it. ShipSails keeps these up to date and reads the outputs back.
+class Sail:
+	var kind := 0                 # 0 = square (on a yard), 1 = fore-and-aft
+	var area := 30.0              # m2 with everything set
+	var set_frac := 1.0           # 0..1 share of that area that's drawing (furled = 0, one reef ~ 0.75)
+	var f := 0.0                  # centre of effort, metres forward of midships
+	var h := 7.0                  # centre of effort, metres above the waterline
+	var beta := 0.0               # square: yard brace angle, radians, + = starboard yardarm forward
+	var max_swing := 1.2          # fore-and-aft: how far the sheet lets it swing (radians)
+	var group := 0                # 0 = forward sails, 1 = aft sails (blanketing)
+	var headsail := false
+	# ---- results ----
+	var force := Vector2.ZERO     # (fore, starboard), newtons
+	var alpha := 0.0              # angle of attack, radians (signed: negative = aback / wrong side)
+	var fill := 0.0               # -1 aback .. 0 slack .. 1 full
+	var luff := 0.0               # 0..1 shaking
+	var theta := 0.0              # fore-and-aft trim angle (radians, toward the lee side)
+	var lee := 1.0                # +1 = the sail is on the starboard side, -1 = port
+
+# ---- tuning ----
+## Mass including the water the hull drags along, kg.
+var mass := 1.9e5
+## Displacement for stability (kg) and the metacentric height (m): how stiff the hull is against heeling.
+var displacement := 2.0e5
+var gm := 0.5
+var max_heel := deg_to_rad(32.0)
+## Forward hull drag: R = hull_drag v^2 (1 + (v / hull_speed)^4 * wave_drag).
+var hull_drag := 390.0
+var hull_speed := 5.3             # m/s, about 10 knots for a ~18 m waterline
+var wave_drag := 3.0
+var astern_drag_factor := 2.2     # going backwards is much harder
+## Sideways resistance of the keel: (keel_lat * (|v_f| + keel_v0)) * v_s, plus a quadratic term.
+var keel_lat := 8000.0
+var keel_v0 := 1.0
+var side_drag := 1800.0
+## Where the keel's centre of lateral resistance is (m forward of midships) and how deep (m below waterline).
+var clr_f := 2.7
+var clr_h := -1.3
+## Steering.
+var max_turn_rate_deg := 4.0      # at full rudder, with way on
+var rudder_full_speed := 2.5      # m/s of water flow for full rudder
+var min_rudder_authority := 0.35  # rudder never goes dead: sweeps, poling and the crew's shoulders still swing the bow when stuck
+var helm_gain := 0.06             # deg/s of turn per kN*m of sail yaw moment
+## Extra pull to windward (round up into the wind) as the ship leans over: kN*m per degree of heel.
+var heel_helm := 3.0
+var max_helm_rate_deg := 3.0
+var turn_lag := 2.5
+## Aerodynamics.
+var square_cl_max := 1.15
+var square_peak_deg := 24.0
+var square_k := 0.30
+var fa_cl_max := 1.40
+var fa_peak_deg := 20.0
+var fa_k := 0.17
+var cd0 := 0.08
+var stall_drag := 1.15
+var trim_alpha_deg := 17.0        # angle the crew trims fore-and-aft sails to
+var aback_factor := 0.85
+var min_wind_for_fill := 2.0
+
+# ---- state ----
+var sails: Array[Sail] = []
+var v_f := 0.0                    # velocity through the water, forward, m/s
+var v_s := 0.0                    # sideways, + starboard
+var yaw_rate := 0.0               # deg/s, + = to port (heading grows), same as ship_motion
+var heel := 0.0                   # radians, + = leaning to starboard (ship's starboard side down)
+var force_total := Vector2.ZERO
+var yaw_moment := 0.0             # N*m, + = bow to starboard
+var heel_moment := 0.0
+var apparent := Vector2.ZERO      # apparent wind, air velocity relative to the ship
+var drive := 0.0                  # net forward force from the sails (N)
+
+## Lift and drag coefficients at angle of attack a (radians, 0..pi/2) for a cloth wing.
+func coeffs(a: float, cl_max: float, peak_deg: float, k: float) -> Vector2:
+	var ad := rad_to_deg(a)
+	var cl: float
+	if ad <= peak_deg:
+		cl = cl_max * sin(deg_to_rad(90.0 * ad / peak_deg))
+	else:
+		var x := clampf((ad - peak_deg) / (90.0 - peak_deg), 0.0, 1.0)
+		cl = cl_max * pow(1.0 - x, 1.3)
+	cl *= smoothstep(1.5, 8.0, ad)          # below ~8 degrees the cloth collapses and shakes
+	var cd := cd0 + k * cl * cl + stall_drag * pow(sin(a), 2.0) * smoothstep(14.0, 50.0, ad)
+	return Vector2(cl, cd)
+
+## Force on one sail from the apparent wind (air velocity relative to the ship, (f, s)).
+func _sail_force(s: Sail, A: Vector2, speed: float, shelter: float) -> void:
+	s.force = Vector2.ZERO
+	s.fill = 0.0
+	s.luff = 0.0
+	if s.set_frac <= 0.001 or speed < 0.05:
+		return
+	var w := A / speed                      # unit vector the air moves along
+	var n: Vector2                          # sail plane's normal, pointing the way the sail is pushed
+	if s.kind == 0:
+		n = Vector2(cos(s.beta), -sin(s.beta))   # at beta 0 the yard is square and the normal points ahead
+		s.theta = 0.0
+		s.lee = 1.0
+	else:
+		# fore-and-aft: it sits to leeward; the crew trims it to a good angle of attack, as far as the sheet allows
+		var lee := 1.0 if w.y >= 0.0 else -1.0
+		var flow_ang := atan2(absf(w.y), -w.x)           # from the aft axis round to where the air is going
+		var th := clampf(flow_ang - deg_to_rad(trim_alpha_deg), deg_to_rad(4.0), s.max_swing)
+		s.theta = th
+		s.lee = lee
+		n = Vector2(sin(th), lee * cos(th))
+	var dn := w.dot(n)
+	var sigma := 1.0 if dn >= 0.0 else -1.0
+	var a := asin(clampf(absf(dn), 0.0, 1.0))
+	s.alpha = a * sigma
+	var cl_max := square_cl_max if s.kind == 0 else fa_cl_max
+	var peak := square_peak_deg if s.kind == 0 else fa_peak_deg
+	var k := square_k if s.kind == 0 else fa_k
+	var c := coeffs(a, cl_max, peak, k)
+	var perp := n - w * dn
+	var pl := perp.length()
+	var lhat := (perp / pl * sigma) if pl > 1e-4 else Vector2.ZERO
+	var q := 0.5 * RHO_AIR * speed * speed
+	var area := s.area * s.set_frac * shelter
+	var mag := q * area
+	var cl := c.x
+	var cd := c.y
+	if sigma < 0.0:
+		cl *= aback_factor
+		cd *= aback_factor
+	s.force = mag * (cd * w + cl * lhat)
+	# for the shader / HUD
+	var ad := rad_to_deg(a)
+	var attached := smoothstep(2.0, 10.0, ad) * (1.0 - smoothstep(38.0, 75.0, ad) * 0.35)
+	var strength := clampf(speed / 5.0, 0.25, 1.0)
+	s.luff = 1.0 - smoothstep(3.0, 11.0, ad) if sigma > 0.0 else 0.35
+	s.fill = sigma * clampf(0.18 + 0.82 * attached, 0.0, 1.0) * lerpf(0.5, 1.0, strength)
+	if sigma < 0.0:
+		s.fill = -clampf(0.4 + 0.5 * smoothstep(2.0, 12.0, ad), 0.0, 1.0)
+		s.luff = maxf(s.luff, 0.25)
+
+## Advance the ship by dt. wind = true wind in the ship's frame (where the air is going, (f, s)).
+## rudder = -1 hard to port .. +1 hard to starboard. motor_speed >= 0 overrides the sails (a test engine).
+func step(dt: float, wind: Vector2, rudder: float, motor_speed: float = -1.0) -> void:
+	apparent = wind - Vector2(v_f, v_s)
+	var speed := apparent.length()
+	# blanketing: with the wind aft, the forward sails work in the lee of the aft ones
+	var w_dir := apparent / maxf(speed, 0.001)
+	var aft := maxf(0.0, w_dir.x)
+	var fsum := Vector2.ZERO
+	var m_yaw := 0.0
+	var m_heel := 0.0
+	var cos_heel := cos(heel)
+	for s in sails:
+		var shelter := 1.0
+		if s.headsail:
+			shelter = 1.0 - 0.55 * aft * aft
+		elif s.group == 0:
+			shelter = 1.0 - 0.28 * aft
+		_sail_force(s, apparent, speed, shelter)
+		s.force *= Vector2(1.0, cos_heel)
+		fsum += s.force
+		m_yaw += s.force.y * (s.f - clr_f)
+		m_heel += s.force.y * (s.h - clr_h)
+	force_total = fsum
+	yaw_moment = m_yaw
+	heel_moment = m_heel
+	drive = fsum.x
+
+	# ---- hull ----
+	if motor_speed >= 0.0:
+		v_f = lerpf(v_f, motor_speed, 1.0 - exp(-dt / 1.5))
+		v_s = lerpf(v_s, 0.0, 1.0 - exp(-dt / 1.0))
+	else:
+		var vh := hull_speed
+		var r := hull_drag * v_f * absf(v_f) * (1.0 + pow(minf(absf(v_f) / vh, 2.5), 4.0) * wave_drag)
+		if v_f < 0.0:
+			r *= astern_drag_factor
+		var a_f := (fsum.x - r) / mass
+		v_f += a_f * dt
+		var res_s := (keel_lat * (absf(v_f) + keel_v0)) * v_s + side_drag * v_s * absf(v_s)
+		v_s += ((fsum.y - res_s) / mass) * dt
+	# heel from the sideways force, stiffened by the hull's stability
+	var arm := displacement * G * gm
+	# a force toward starboard leans the ship over to starboard (heel > 0 = starboard side down)
+	var target_heel := clampf(asin(clampf(m_heel / arm, -0.9, 0.9)), -max_heel, max_heel)
+	heel = lerpf(heel, target_heel, 1.0 - exp(-dt / 1.3))
+
+	# ---- steering ----
+	var authority := clampf(v_f / rudder_full_speed, -1.0, 1.0)
+	# never zero: a ship stopped or beached can still be turned (slowly) to get out. Going astern past the
+	# floor still reverses the rudder like a real ship; near standstill it steers the normal way.
+	if absf(authority) < min_rudder_authority:
+		authority = min_rudder_authority
+	var want := -clampf(rudder, -1.0, 1.0) * max_turn_rate_deg * authority
+	# the lean also swings the bow toward the wind (weather helm); the wind side is the side the force pushes away from
+	var m_total := m_yaw - signf(fsum.y) * heel_helm * 1000.0 * rad_to_deg(absf(heel))
+	var helm := clampf(-m_total * 0.001 * helm_gain * clampf(absf(v_f) / 1.5, 0.0, 1.0), -max_helm_rate_deg, max_helm_rate_deg)
+	want += helm
+	yaw_rate = lerpf(yaw_rate, want, 1.0 - exp(-dt / maxf(turn_lag, 0.05)))
+
+## Knots, for the HUD.
+func speed_knots() -> float:
+	return v_f / KNOTS

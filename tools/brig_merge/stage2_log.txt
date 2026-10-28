@@ -1,0 +1,143 @@
+=== stage2 start 11:30:00 file=C:\Users\Victus\Documents\GitHub\UnchartedOceans\tools\brig_merge\out\s01_static.blend
+READ Rudder: Rudder
+READ Rudder: RudderHead
+READ Rudder: RudderPort
+READ Rudder: PintlesGudgeons
+READ Rudder: verts=732 faces=648
+READ Wheel: Wheel
+READ Wheel: WheelBoss
+READ Wheel: WheelRope
+READ Wheel: verts=3500 faces=3334
+READ Door_Cabin: CabinDoorLeaf
+READ Door_Cabin: verts=72 faces=78
+READ Door_Room_Port: RoomDoorLeaves
+READ Door_Room_Port: verts=48 faces=26
+READ Door_Room_Stbd: RoomDoorLeaves
+READ Door_Room_Stbd: verts=48 faces=26
+READ Gun_0: GunCarriage0
+READ Gun_0: GunTrucks0
+READ Gun_0: Breeching0
+READ Gun_0: verts=1048 faces=962
+READ Gun_0_Barrel: GunBarrel0
+READ Gun_0_Barrel: verts=358 faces=364
+READ Gun_1: GunCarriage1
+READ Gun_1: GunTrucks1
+READ Gun_1: Breeching1
+READ Gun_1: verts=1048 faces=962
+READ Gun_1_Barrel: GunBarrel1
+READ Gun_1_Barrel: verts=358 faces=364
+READ Gun_2: GunCarriage2
+READ Gun_2: GunTrucks2
+READ Gun_2: Breeching2
+READ Gun_2: verts=1048 faces=962
+READ Gun_2_Barrel: GunBarrel2
+READ Gun_2_Barrel: verts=358 faces=364
+READ Gun_3: GunCarriage3
+READ Gun_3: GunTrucks3
+READ Gun_3: Breeching3
+READ Gun_3: verts=1048 faces=962
+READ Gun_3_Barrel: GunBarrel3
+READ Gun_3_Barrel: verts=358 faces=364
+READ Gun_4: GunCarriage4
+READ Gun_4: GunTrucks4
+READ Gun_4: Breeching4
+READ Gun_4: verts=1048 faces=962
+READ Gun_4_Barrel: GunBarrel4
+READ Gun_4_Barrel: verts=358 faces=364
+READ Gun_5: GunCarriage5
+READ Gun_5: GunTrucks5
+READ Gun_5: Breeching5
+READ Gun_5: verts=1048 faces=962
+READ Gun_5_Barrel: GunBarrel5
+READ Gun_5_Barrel: verts=358 faces=364
+READ Yard_Fore_0: Yards_Fore
+READ Yard_Fore_0: YardBands_Fore
+READ Yard_Fore_0: Footropes
+READ Yard_Fore_0: Stirrups
+READ Yard_Fore_0: Blocks
+READ Yard_Fore_0: verts=5864 faces=872
+READ Yard_Fore_1: Yards_Fore
+READ Yard_Fore_1: YardBands_Fore
+READ Yard_Fore_1: Footropes
+READ Yard_Fore_1: Stirrups
+READ Yard_Fore_1: Blocks
+READ Yard_Fore_1: verts=5864 faces=932
+READ Yard_Fore_2: Yards_Fore
+READ Yard_Fore_2: YardBands_Fore
+READ Yard_Fore_2: Footropes
+READ Yard_Fore_2: Stirrups
+READ Yard_Fore_2: Blocks
+READ Yard_Fore_2: verts=5864 faces=932
+READ Yard_Main_0: Yards_Main
+READ Yard_Main_0: YardBands_Main
+READ Yard_Main_0: Footropes
+READ Yard_Main_0: Stirrups
+READ Yard_Main_0: Blocks
+READ Yard_Main_0: verts=5864 faces=872
+READ Yard_Main_1: Yards_Main
+READ Yard_Main_1: YardBands_Main
+READ Yard_Main_1: Footropes
+READ Yard_Main_1: Stirrups
+READ Yard_Main_1: Blocks
+READ Yard_Main_1: verts=5864 faces=932
+READ Yard_Main_2: Yards_Main
+READ Yard_Main_2: YardBands_Main
+READ Yard_Main_2: Footropes
+READ Yard_Main_2: Stirrups
+READ Yard_Main_2: Blocks
+READ Yard_Main_2: verts=5864 faces=932
+READ ProvisionsSlate: ProvisionsSlate
+READ ProvisionsSlate: verts=8 faces=6
+READ Spanker_Boom: Boom
+READ Spanker_Boom: SpankerJaws
+READ Spanker_Boom: SpankerBlocks
+READ Spanker_Boom: verts=1168 faces=474
+READ Spanker_Gaff: Boom
+READ Spanker_Gaff: SpankerJaws
+READ Spanker_Gaff: SpankerBlocks
+READ Spanker_Gaff: SpankerRigging
+READ Spanker_Gaff: verts=1594 faces=800
+MADE Rudder: verts=732 tris=1392 at (0.0, 9.49, 0.56) mats=['M_Brig_Tar', 'M_Brig_HullClean', 'M_Brig_Iron']
+MADE Wheel: verts=3500 tris=6896 at (0.0, 6.79, 4.42) mats=['M_Brig_Walnut', 'M_Brig_Iron', 'M_Rope_Hemp']
+MADE Door_Cabin: verts=72 tris=132 at (-1.46, 5.3, 2.16) mats=['M_Brig_DarkWood']
+MADE Door_Room_Port: verts=24 tris=44 at (-1.4, 5.46, -0.58) mats=['M_Brig_Walnut']
+MADE Door_Room_Stbd: verts=24 tris=44 at (1.4, 5.46, -0.58) mats=['M_Brig_Walnut']
+MADE Gun_0: verts=1048 tris=2024 at (-1.63, -2.2, 1.71) mats=['M_Brig_Walnut', 'M_Rope_Hemp']
+MADE Gun_0_Barrel: verts=358 tris=708 at (-1.63, -2.2, 2.19) mats=['M_Brig_Iron']
+MADE Gun_1: verts=1048 tris=2024 at (-1.73, -0.4, 1.69) mats=['M_Brig_Walnut', 'M_Rope_Hemp']
+MADE Gun_1_Barrel: verts=358 tris=708 at (-1.73, -0.4, 2.17) mats=['M_Brig_Iron']
+MADE Gun_2: verts=1048 tris=2024 at (-1.78, 4.0, 1.72) mats=['M_Brig_Walnut', 'M_Rope_Hemp']
+MADE Gun_2_Barrel: verts=358 tris=708 at (-1.78, 4.0, 2.2) mats=['M_Brig_Iron']
+MADE Gun_3: verts=1048 tris=2024 at (1.63, -2.2, 1.71) mats=['M_Brig_Walnut', 'M_Rope_Hemp']
+MADE Gun_3_Barrel: verts=358 tris=708 at (1.63, -2.2, 2.19) mats=['M_Brig_Iron']
+MADE Gun_4: verts=1048 tris=2024 at (1.73, -0.4, 1.69) mats=['M_Brig_Walnut', 'M_Rope_Hemp']
+MADE Gun_4_Barrel: verts=358 tris=708 at (1.73, -0.4, 2.17) mats=['M_Brig_Iron']
+MADE Gun_5: verts=1048 tris=2024 at (1.78, 4.0, 1.72) mats=['M_Brig_Walnut', 'M_Rope_Hemp']
+MADE Gun_5_Barrel: verts=358 tris=708 at (1.78, 4.0, 2.2) mats=['M_Brig_Iron']
+MADE Yard_Fore_0: verts=884 tris=1624 at (0.0, -4.3, 7.35) mats=['M_Brig_MastOak', 'M_Brig_FlamedBlack', 'M_Brig_Iron', 'M_Rope_Tar', 'M_Brig_OakLight']
+MADE Yard_Fore_1: verts=936 tris=1724 at (0.0, -4.85, 12.67) mats=['M_Brig_MastOak', 'M_Brig_FlamedBlack', 'M_Brig_Iron', 'M_Rope_Tar', 'M_Brig_OakLight']
+MADE Yard_Fore_2: verts=936 tris=1724 at (0.0, -5.21, 15.05) mats=['M_Brig_MastOak', 'M_Brig_FlamedBlack', 'M_Brig_Iron', 'M_Rope_Tar', 'M_Brig_OakLight']
+MADE Yard_Main_0: verts=884 tris=1624 at (0.0, 1.6, 7.6) mats=['M_Brig_MastOak', 'M_Brig_FlamedBlack', 'M_Brig_Iron', 'M_Rope_Tar', 'M_Brig_OakLight']
+MADE Yard_Main_1: verts=936 tris=1724 at (0.0, 1.05, 13.3) mats=['M_Brig_MastOak', 'M_Brig_FlamedBlack', 'M_Brig_Iron', 'M_Rope_Tar', 'M_Brig_OakLight']
+MADE Yard_Main_2: verts=936 tris=1724 at (0.0, 0.69, 15.85) mats=['M_Brig_MastOak', 'M_Brig_FlamedBlack', 'M_Brig_Iron', 'M_Rope_Tar', 'M_Brig_OakLight']
+MADE Spanker_Boom: verts=506 tris=928 at (0.0, 1.6, 0.0) mats=['M_Brig_MastOak', 'M_Brig_Walnut', 'M_Brig_OakLight']
+MADE Spanker_Gaff: verts=832 tris=1556 at (0.0, 1.6, 0.0) mats=['M_Brig_MastOak', 'M_Brig_Walnut', 'M_Brig_OakLight', 'M_Rope_Hemp']
+MADE ProvisionsSlate: verts=8 tris=12 at (0, 0, 0) mats=['BR_SlateBoard']
+APPENDED ['Flag_Ensign', 'Flag_Pennant', 'Sail_ForeStaysail', 'Sail_Fore_0', 'Sail_Fore_1', 'Sail_Fore_2', 'Sail_Jib', 'Sail_Main_0', 'Sail_Main_1', 'Sail_Main_2', 'Sail_Spanker']
+PLACED Sail_Fore_0: parent=Yard_Fore_0 world=(0.0, -4.3, 7.35) (old (0.0, -4.3, 7.35)) shape_keys=['Basis', 'Furled', 'Reefed'] colors=['PinWeights']
+PLACED Sail_Fore_1: parent=Yard_Fore_1 world=(0.0, -4.85, 12.67) (old (0.0, -4.85, 12.67)) shape_keys=['Basis', 'Furled', 'Reefed'] colors=['PinWeights']
+PLACED Sail_Fore_2: parent=Yard_Fore_2 world=(0.0, -5.21, 15.05) (old (0.0, -5.21, 15.05)) shape_keys=['Basis', 'Furled'] colors=['PinWeights']
+PLACED Sail_Main_0: parent=Yard_Main_0 world=(0.0, 1.6, 7.6) (old (0.0, 1.6, 7.6)) shape_keys=['Basis', 'Furled', 'Reefed'] colors=['PinWeights']
+PLACED Sail_Main_1: parent=Yard_Main_1 world=(0.0, 1.05, 13.3) (old (0.0, 1.05, 13.3)) shape_keys=['Basis', 'Furled', 'Reefed'] colors=['PinWeights']
+PLACED Sail_Main_2: parent=Yard_Main_2 world=(0.0, 0.69, 15.85) (old (0.0, 0.69, 15.85)) shape_keys=['Basis', 'Furled'] colors=['PinWeights']
+PLACED Sail_Jib: parent=Brig world=(0.0, -17.61, 7.02) (old (0.0, -17.61, 7.02)) shape_keys=['Basis', 'Furled'] colors=['PinWeights']
+PLACED Sail_ForeStaysail: parent=Brig world=(0.0, -13.72, 5.62) (old (0.0, -13.72, 5.62)) shape_keys=['Basis', 'Furled'] colors=['PinWeights']
+PLACED Sail_Spanker: parent=Brig world=(0.0, 1.6, 6.1) (old (0.0, 1.6, 6.1)) shape_keys=['Basis', 'Furled'] colors=['PinWeights']
+PLACED Flag_Ensign: parent=Brig world=(0.0, 0.64, 16.93) (old (0.0, 0.64, 16.93)) shape_keys=None colors=['PinWeights']
+PLACED Flag_Pennant: parent=Brig world=(0.0, -5.26, 16.23) (old (0.0, -5.26, 16.23)) shape_keys=None colors=['PinWeights']
+unused appended material: M_Brig_Rig (users 6)
+unused appended material: M_Brig_Sails (users 0)
+unused appended material: M_Rope_Tar.001 (users 6)
+unused appended material: M_Rope_Boltrope.001 (users 0)
+SAVED C:\Users\Victus\Documents\GitHub\UnchartedOceans\tools\brig_merge\out\s02_animated.blend
+=== stage2 finished

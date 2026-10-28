@@ -1,0 +1,49 @@
+
+import bpy, os, re, json, time
+WORK = os.path.join(os.environ["BRIG_PROJECT"], "tools", "brig_merge")
+exec(open(os.path.join(WORK, "merge_lib.py")).read(), globals())
+LOG = open(os.path.join(WORK, "stage3_log.txt"), "a", encoding="utf-8")
+def L(m): LOG.write(m + "\n"); LOG.flush(); os.fsync(LOG.fileno())
+OUT = os.environ["MERGE_OUT"]; O = bpy.data.objects; PR = META["props"]
+exp = bpy.data.collections["Brig_Export"]; root = O["Brig"]
+L(f"=== stage3 start; objects={len(O)}")
+# 1) names: ours get the plain names, originals step aside as Src_*
+renamed = []
+for ob in list(exp.objects):
+    m = re.match(r"^(.*)\.\d{3}$", ob.name)
+    if m and m.group(1) in O and O[m.group(1)] not in exp.objects[:]:
+        base_name = m.group(1); orig = O[base_name]; orig.name = "Src_" + base_name; ob.name = base_name
+        if ob.data and ob.data.name.endswith(tuple(f".{i:03d}" for i in range(1, 10))): ob.data.name = base_name
+        renamed.append(base_name)
+L(f"renamed {len(renamed)}: {sorted(renamed)}")
+# 2) lights: parent to root, copy the old game properties
+KEEP = ("HammockSet_","HammockSlot_","Station_","SinkCheck_","CamPos_","CamTarget_","Pump","LogLine","Compass","CabinBookshelf","CabinBed","TableChart","Book_","LT_")
+moved_keep = []
+for ob in list(O):
+    if ob.name.startswith(KEEP) and ob not in exp.objects[:]:
+        for c in list(ob.users_collection): c.objects.unlink(ob)
+        exp.objects.link(ob); moved_keep.append(ob.name)
+        if ob.parent is None: ob.parent = root; ob.matrix_parent_inverse = Matrix.Identity(4)
+for ob in O:
+    if ob.name.startswith("LT_") and ob.name in PR:
+        for k, v in PR[ob.name].items(): ob[k] = v
+    elif ob.name.startswith("LT_"): ob["game_role"] = "light"
+L(f"moved into Brig_Export: {len(moved_keep)} objects")
+# 3) everything else that is not part of the export goes to a hidden Brig_Source
+src = coll("Brig_Source"); n_src = 0
+for ob in list(O):
+    if ob in exp.objects[:] or ob.name in ("Brig",): continue
+    for c in list(ob.users_collection):
+        if c.name != "Brig_Source": c.objects.unlink(ob)
+    if ob.name not in src.objects: src.objects.link(ob)
+    n_src += 1
+src.hide_viewport = True; src.hide_render = True
+for c in list(bpy.data.collections):
+    if c.name not in ("Brig_Export", "Brig_Source") and len(c.objects) == 0 and not c.children: bpy.data.collections.remove(c)
+L(f"to Brig_Source: {n_src}; collections now: {[c.name for c in bpy.data.collections]}")
+bad = [o.name for o in exp.objects if re.search(r"\.\d{3}$", o.name)]
+L(f"export objects with .001 style names: {bad}")
+tot = sum(tris(o.data) for o in exp.objects if o.type == 'MESH')
+L(f"Brig_Export: {len(exp.objects)} objects, {sum(1 for o in exp.objects if o.type=='MESH')} meshes, {tot} base tris (modifier-free ones; hammock/pump/book parts still carry modifiers)")
+bpy.data.orphans_purge(do_recursive=True)
+bpy.ops.wm.save_as_mainfile(filepath=OUT); L("SAVED " + OUT); L("=== stage3 finished")

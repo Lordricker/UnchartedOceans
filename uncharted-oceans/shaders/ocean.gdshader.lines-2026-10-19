@@ -1,0 +1,232 @@
+// Open-ocean surface: a sum of warped exponential sine waves (the "Acerola" approach,
+// after GPU Gems ch.1 sum-of-sines). Each wave is exp(peak * (sin(x) - 1)): sharp crests,
+// wide troughs. Each octave is sampled at a position nudged by the previous octaves'
+// slope (domain warping), so wave fronts bend into each other instead of running straight.
+//
+// The wave table (direction, wavenumber, amplitude, speed, phase) is built by ocean.gd and
+// shared with its CPU height sampler, so buoyancy uses exactly the waves you see.
+//  - The first `vertex_octaves` waves displace the mesh (the swells the ship rides).
+//  - `octaves` waves feed the per-pixel normal. Octaves smaller than about two pixels are
+//    faded out, so distant water doesn't shimmer.
+//
+// Stylized surface lines: thin white curving lines drawn along the contours of a slowly
+// drifting noise field, bent by the wave slope so they ride over the swells. They carry
+// most of the small-scale surface detail, so fewer per-pixel waves are needed.
+//
+// See-through: the water's opacity comes from how much water lies between the surface and
+// whatever is behind it (from the depth buffer), so the hull below the waterline shows
+// through, fading into the deep colour. Open ocean (nothing below) stays fully opaque.
+//
+// Also: crest foam, light scattering through crests, and the hull mask from the old sea
+// shader (no water drawn inside the ship).
+shader_type spatial;
+render_mode cull_back, depth_draw_always;
+
+const int MAX_WAVES = 32;
+
+// ---- wave table (set by ocean.gd) ----
+uniform int octaves = 16;
+uniform int vertex_octaves = 10;
+uniform float peak = 1.0;              // crest sharpness
+uniform float warp = 0.5;              // domain-warp strength
+uniform float height_offset = 0.0;     // keeps mean sea level at 0
+uniform float ocean_time = 0.0;
+uniform float sea_amplitude = 1.0;     // roughly the crest height of this sea state (for foam)
+uniform float w_dx[32];
+uniform float w_dz[32];
+uniform float w_k[32];                 // wavenumber 2*pi / wavelength
+uniform float w_a[32];                 // amplitude (m)
+uniform float w_w[32];                 // angular speed (deep-water dispersion)
+uniform float w_p[32];                 // phase
+uniform vec2 wind_dir = vec2(0.57, -0.82); // direction the wind blows toward (set by ocean.gd)
+
+// ---- look ----
+uniform vec3 deep_color : source_color = vec3(0.018, 0.07, 0.085);
+uniform vec3 shallow_color : source_color = vec3(0.06, 0.26, 0.26);
+uniform vec3 scatter_color : source_color = vec3(0.05, 0.28, 0.27);
+uniform vec3 foam_color : source_color = vec3(0.85, 0.88, 0.86);
+uniform float roughness_value = 0.06;
+uniform float scatter_strength = 1.2;
+uniform vec3 sun_dir = vec3(0.4, 0.6, 0.5); // points toward the sun (set by ocean.gd)
+uniform vec3 sun_color : source_color = vec3(1.0, 0.93, 0.82);
+uniform float foam_start = 0.5;        // fraction of sea_amplitude where crest foam begins
+uniform float foam_amount = 0.6;
+uniform sampler2D foam_noise : hint_default_white, filter_linear_mipmap, repeat_enable;
+
+// ---- see-through ----
+uniform float absorption : hint_range(0.05, 3.0) = 0.45;   // per metre; higher = murkier
+uniform sampler2D depth_tex : hint_depth_texture, filter_nearest;
+
+// ---- stylized surface lines ----
+uniform float line_amount : hint_range(0.0, 1.0) = 0.85;
+uniform vec3 line_color : source_color = vec3(0.92, 0.96, 0.97);
+uniform float line_scale = 0.2;        // noise frequency (1/m): lower = bigger swirls
+uniform float line_stretch = 2.2;      // >1 stretches the loops along the wave crests
+uniform float line_density = 9.0;      // contour levels per unit of noise: more = tighter rings
+uniform float line_levels = 2.0;       // how many nested rings each loop can have
+uniform float line_width = 0.05;       // line half-width (m)
+uniform float line_wobble = 0.22;      // squiggle in the line edges
+uniform float line_coverage = 0.56;    // noise level where loops start (lower = more lines)
+uniform float line_warp = 6.0;         // how much the wave slope bends the lines (m)
+uniform float line_speed = 0.6;        // drift with the wind (m/s)
+uniform float line_fade_distance = 140.0;
+
+// ---- hull mask (set by ship_motion.gd; same data as the old sea shader) ----
+uniform mat4 ship_inv;
+uniform float half_beam[43];
+uniform float y_min = -10.5;
+uniform float y_step = 0.5;
+uniform int sample_count = 0;
+uniform float inset = 0.02;
+
+varying vec2 world_xz;
+varying float wave_h;
+
+// Height and slope of the first `n` waves at p. Matches Ocean.get_height() in ocean.gd.
+vec3 waves(vec2 p, int n, float footprint) {
+	float h = 0.0;
+	vec2 grad = vec2(0.0);
+	for (int i = 0; i < MAX_WAVES; i++) {
+		if (i >= n) break;
+		float lambda = 6.2831853 / w_k[i];
+		// fade waves smaller than ~2-4 pixels (footprint = metres per pixel, 0 = no fade)
+		float fade = footprint > 0.0 ? clamp(lambda / footprint * 0.5 - 1.0, 0.0, 1.0) : 1.0;
+		if (fade <= 0.0) break;
+		vec2 d = vec2(w_dx[i], w_dz[i]);
+		float x = dot(d, p) * w_k[i] + ocean_time * w_w[i] + w_p[i];
+		float s = sin(x);
+		float c = cos(x);
+		float e = exp(peak * (s - 1.0));
+		float a = w_a[i] * fade;
+		h += a * e;
+		float dx = a * peak * e * c;   // dh/dx along d (per radian)
+		grad += d * dx * w_k[i];
+		p += d * dx * warp;            // domain warp: next wave sees a shifted position
+	}
+	return vec3(h + height_offset, grad);
+}
+
+// Smooth gradient noise computed in the shader (full float precision, so contours stay clean,
+// and it never repeats). Hash after Dave Hoskins' "hash without sine". Returns about -0.7..0.7.
+vec2 hash22(vec2 p) {
+	vec3 p3 = fract(vec3(p.xyx) * vec3(0.1031, 0.1030, 0.0973));
+	p3 += dot(p3, p3.yzx + 33.33);
+	return fract((p3.xx + p3.yz) * p3.zy) * 2.0 - 1.0;
+}
+float gnoise(vec2 p) {
+	vec2 i = floor(p);
+	vec2 f = fract(p);
+	vec2 u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+	float a = dot(hash22(i), f);
+	float b = dot(hash22(i + vec2(1.0, 0.0)), f - vec2(1.0, 0.0));
+	float c = dot(hash22(i + vec2(0.0, 1.0)), f - vec2(0.0, 1.0));
+	float d = dot(hash22(i + vec2(1.0, 1.0)), f - vec2(1.0, 1.0));
+	return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+}
+
+// Anti-aliased contour lines of a drifting noise field, drawn a fixed width in metres.
+// Only a narrow band of noise levels is drawn, so each bump in the noise gives one or two
+// separate loops instead of a full contour map. The noise is stretched along the wave
+// crests (across the wind), so the loops come out as long curling strands.
+float surface_lines(vec2 p, float px_size) {
+	vec2 along = wind_dir;
+	vec2 across = vec2(-wind_dir.y, wind_dir.x);
+	vec2 drift = wind_dir * ocean_time * line_speed;
+	vec2 r = p - drift;
+	vec2 a = vec2(dot(r, across), dot(r, along) * line_stretch) * line_scale;
+	// second layer: different scale, angle and speed, so the sum slowly changes shape
+	vec2 b = mat2(vec2(0.8, 0.6), vec2(-0.6, 0.8)) * a * 1.9
+		+ vec2(ocean_time * 0.011, -ocean_time * 0.008);
+	// wobble: bend the field with a finer noise so edges squiggle instead of staying smooth
+	a += vec2(gnoise(a * 2.7 + 17.3), gnoise(a * 2.7 - 9.1)) * line_wobble;
+	float n = 0.5 + gnoise(a) * 0.75 + gnoise(b) * 0.3;
+	float bands = (n - line_coverage) * line_density;
+	// distance to the nearest contour, converted to metres with the screen derivative
+	float per_px = max(fwidth(bands), 1e-5);
+	float d_m = abs(fract(bands + 0.5) - 0.5) / per_px * px_size;
+	float line = 1.0 - smoothstep(line_width - px_size, line_width + px_size, d_m);
+	// keep only the first couple of levels above the coverage threshold
+	line *= step(0.0, bands + 0.5) * (1.0 - smoothstep(line_levels - 0.5, line_levels, bands));
+	line *= 1.0 - smoothstep(0.25, 0.5, per_px);         // contours closer than ~3 px: fade out
+	return line;
+}
+
+void vertex() {
+	vec3 wp = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
+	world_xz = wp.xz;
+	float dist = length(wp.xz - CAMERA_POSITION_WORLD.xz);
+	// grid spacing grows with distance; skip swells too small for the mesh to show
+	float spacing = max(0.35, dist * 0.035);
+	vec3 w = waves(wp.xz, vertex_octaves, spacing * 2.0);
+	wave_h = w.x;
+	VERTEX.y += w.x;
+}
+
+void fragment() {
+	vec3 wpos = (INV_VIEW_MATRIX * vec4(VERTEX, 1.0)).xyz;
+
+	// hull mask
+	if (sample_count > 0) {
+		vec3 l = (ship_inv * vec4(wpos, 1.0)).xyz;
+		float f = (-l.z - y_min) / y_step;
+		if (f >= 0.0 && f <= float(sample_count - 1)) {
+			int i = int(floor(f));
+			int j = min(i + 1, sample_count - 1);
+			float hb = mix(half_beam[i], half_beam[j], fract(f));
+			if (abs(l.x) < hb - inset) discard;
+		}
+	}
+
+	float footprint = max(length(fwidth(world_xz)), 0.002);
+	vec3 w = waves(world_xz, octaves, footprint);
+	vec3 n_world = normalize(vec3(-w.y, 1.0, -w.z));
+	NORMAL = normalize((VIEW_MATRIX * vec4(n_world, 0.0)).xyz);
+
+	vec3 v_world = normalize(CAMERA_POSITION_WORLD - wpos);
+	vec3 l_world = normalize(sun_dir);
+	float cam_dist = length(CAMERA_POSITION_WORLD - wpos);
+
+	// how much water is behind this pixel (along the view ray), from the depth buffer
+	float scene_depth = texture(depth_tex, SCREEN_UV).r;
+#if CURRENT_RENDERER == RENDERER_COMPATIBILITY
+	vec3 ndc = vec3(SCREEN_UV, scene_depth) * 2.0 - 1.0;
+#else
+	vec3 ndc = vec3(SCREEN_UV * 2.0 - 1.0, scene_depth);
+#endif
+	vec4 scene_view = INV_PROJECTION_MATRIX * vec4(ndc, 1.0);
+	scene_view.xyz /= scene_view.w;
+	float thickness = max(VERTEX.z - scene_view.z, 0.0);
+	float clarity = exp(-thickness * absorption);          // 1 = clear, 0 = opaque
+
+	// light passing through wave crests toward the viewer (after the 'Atlas' GDC talk)
+	float h01 = clamp(wave_h / max(sea_amplitude, 0.05), 0.0, 1.0);
+	float through = pow(max(dot(l_world, -v_world), 0.0), 4.0) * pow(0.5 - 0.5 * dot(l_world, n_world), 3.0);
+	float facing = pow(max(dot(v_world, n_world), 0.0), 2.0);
+	float sss = (3.0 * h01 * through + 0.45 * facing * (0.3 + h01)) * scatter_strength;
+	vec3 scatter = scatter_color * sun_color * sss;
+
+	// crest foam, broken up by two scrolling noise layers at unrelated scales (hides tiling)
+	vec2 uv1 = world_xz * 0.071 + vec2(ocean_time * 0.011, ocean_time * 0.004);
+	vec2 uv2 = mat2(vec2(0.8, 0.6), vec2(-0.6, 0.8)) * world_xz * 0.193 - vec2(ocean_time * 0.007, 0.0);
+	float nz = texture(foam_noise, uv1).r * 0.6 + texture(foam_noise, uv2).r * 0.4;
+	// whitecaps where the wave is both high and steep; steepness alone adds streaks in rough seas
+	float steep = 1.0 - n_world.y;
+	float crest = smoothstep(foam_start, 1.0, h01 + (nz - 0.5) * 0.5 + steep * 1.5 * foam_amount);
+	float foam = clamp(crest * smoothstep(0.35, 0.75, nz + crest * 0.3) * foam_amount * 1.6, 0.0, 1.0);
+
+	// stylized lines, bent over the swells by the wave slope, fading with distance
+	float lines = line_amount * surface_lines(world_xz + w.yz * line_warp, footprint * 0.7);
+	lines *= 1.0 - smoothstep(line_fade_distance * 0.6, line_fade_distance, cam_dist);
+	float white = max(foam, lines);
+	vec3 white_color = mix(line_color, foam_color, step(lines, foam));
+
+	vec3 body = mix(deep_color, shallow_color, clarity);
+	ALBEDO = mix(body, white_color, white);
+	ROUGHNESS = mix(roughness_value, 0.85, white);
+	SPECULAR = 0.5;
+	EMISSION = scatter * (1.0 - white);
+
+	// see-through where the water is thin; reflections (grazing angles) and white stay opaque
+	float fresnel = pow(1.0 - max(dot(n_world, v_world), 0.0), 5.0);
+	ALPHA = clamp(max(max(1.0 - clarity, fresnel), white), 0.0, 1.0);
+}

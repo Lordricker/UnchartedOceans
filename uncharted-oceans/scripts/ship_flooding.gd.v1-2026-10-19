@@ -1,0 +1,758 @@
+class_name ShipFlooding
+extends Node3D
+## Flooding prototype. Put this node under the ShipRig (next to the Brig).
+##
+## In game (mouse captured):
+##   Left click   punch a hole in the hull where you're looking (within reach)
+##   Right click  plug the hole you're looking at
+##   P            pumps on/off
+##   Backspace    drain everything and remove all holes
+##
+## How it works
+## - The hold is a grid of columns (25 cm square) in the ship's own frame, found at startup
+##   by probing the ship's deck collision (ShipBody, layer 1): each column runs from the
+##   lower deck floor up to whatever is overhead. Columns outside the hull walls are dropped.
+## - Water is a depth per column, moved between neighbours with a "virtual pipe" shallow-water
+##   model. The driving force is the difference in surface height measured along real
+##   gravity, so when the ship rolls the water runs to the low side and sloshes back.
+## - It's drawn as one white box per wet column (one draw call), with cube seams drawn by
+##   the shader every 25 cm so it reads as stacked squares.
+## - Holes: inflow = discharge coefficient x area x sqrt(2 g head) (Torricelli), where head =
+##   sea height outside (Ocean.get_height) minus the higher of the hole and the water inside.
+##   A hole above the sea drains the hold back out. Holes near the waterline only take water
+##   when a wave covers them. Spray squares are visual only (the volume goes straight in).
+## - The water's volume and centre go to ship_motion.gd (load_offset), so the ship sinks,
+##   heels toward the side the water collects on, and trims.
+
+const G := 9.81
+
+@export var ocean_path: NodePath = ^"../../Ocean"
+@export var ship_path: NodePath = ^"../Brig"
+@export var reach := 6.0                  ## how far away you can punch or plug (m)
+
+@export_group("Hold grid")
+@export var cell := 0.25                  ## column size (m); also the size of the drawn cubes
+@export var grid_bottom := -0.9           ## ship-local height where the scan starts (below the lower deck floor)
+@export var grid_top := 1.6               ## ship-local height where it stops (just under the main deck)
+@export var grid_half_width := 3.3
+@export var grid_z_min := -10.0           ## bow end (ship-local, bow is -Z)
+@export var grid_z_max := 9.6
+## Only keep columns with a wall on both sides (drops cells between the hull wall and the
+## waterline outline). Turned off automatically if it leaves almost nothing.
+@export var require_side_walls := true
+
+@export_group("Flooding")
+## Multiplier on the real inflow so tests don't take ten minutes. 1 = real.
+@export var flood_speed := 4.0
+@export var hole_radius := 0.12           ## m
+@export var discharge_coef := 0.6
+@export var pump_rate := 0.6              ## m³/s removed with the pumps on
+@export var sim_rate := 30.0              ## water updates per second
+@export var flow_damping := 0.985         ## lower = water settles faster, less sloshing
+@export var min_flow_depth := 0.004       ## thinner films than this stop spreading (m)
+@export var draw_every := 2               ## redraw the water every Nth update (it's snapped anyway)
+
+@export_group("Ship response")
+@export var waterplane_area := 65.0       ## m²: sinkage = water volume / this
+@export var displacement := 180.0         ## m³ of hull underwater when dry
+@export var gm_transverse := 1.0          ## m: smaller = heels more from water off to one side
+@export var gm_longitudinal := 20.0
+@export var max_sink := 3.0
+
+@export_group("Look")
+@export var water_color := Color(0.86, 0.92, 0.93)
+@export var seam_color := Color(0.42, 0.6, 0.64)
+@export var spray_color := Color(0.95, 0.97, 0.98)
+@export var spray_per_m3 := 160.0         ## spray squares per m³ of inflow
+@export var spray_max_rate := 260.0       ## per hole, per second
+@export var max_spray := 900
+
+# --- read by the HUD ---
+var water_volume := 0.0                   ## m³ in the hold
+var pumps_on := false
+var last_sim_ms := 0.0
+var build_ms := 0.0
+var status := ""
+var status_time := 0.0
+
+class Hole:
+	var pos: Vector3          # ship-local
+	var normal: Vector3       # ship-local, pointing into the hold
+	var col: int
+	var flow := 0.0           # m³/s, negative = draining out
+	var speed := 0.0          # jet speed (m/s)
+	var submerged := false    # water inside is above the hole
+	var acc := 0.0
+	var marker: MeshInstance3D
+
+var _rig: Node3D
+var _motion: Node
+var _ocean: Ocean
+var _built := false
+var _acc := 0.0
+var _draw_tick := 0
+var _was_captured := false
+
+# grid
+var _nx := 0
+var _nz := 0
+var _col_of := PackedInt32Array()   # grid (ix + iz * nx) -> column index, -1 = not hold
+var _cx := PackedFloat32Array()     # column centre x (ship-local)
+var _cz := PackedFloat32Array()
+var _b := PackedFloat32Array()      # floor height
+var _cap := PackedFloat32Array()    # max depth (floor to whatever is overhead)
+var _nb := PackedInt32Array()       # 4 neighbours per column: +x, -x, +z, -z (-1 = none)
+var _d := PackedFloat32Array()      # water depth
+var _f := PackedFloat32Array()      # 4 outflows per column (m³/s), kept between steps (momentum)
+var _h := PackedFloat32Array()      # surface height along gravity, per step
+
+var _holes: Array[Hole] = []
+
+# spray squares (ship-local)
+var _pc := 0
+var _pp := PackedVector3Array()
+var _pv := PackedVector3Array()
+var _pa := PackedVector3Array()     # spin axis
+var _pl := PackedFloat32Array()     # life left
+var _ps := PackedFloat32Array()     # size
+var _pt := PackedFloat32Array()     # age
+
+var _water_mm: MultiMesh
+var _spray_mm: MultiMesh
+var _water_buf := PackedFloat32Array()
+var _spray_buf := PackedFloat32Array()
+var _marker_mat: StandardMaterial3D
+
+func _ready() -> void:
+	_rig = get_parent() as Node3D
+	_motion = _rig
+	_ocean = get_node_or_null(ocean_path) as Ocean
+	if _ocean == null:
+		push_warning("ship_flooding: no Ocean at %s; holes won't take water" % ocean_path)
+	add_to_group("ship_flooding")
+	_make_visuals()
+
+func _process(_delta: float) -> void:
+	_was_captured = Input.mouse_mode == Input.MOUSE_MODE_CAPTURED
+	if status_time > 0.0:
+		status_time -= _delta
+		if status_time <= 0.0:
+			status = ""
+
+func _unhandled_input(e: InputEvent) -> void:
+	if e is InputEventMouseButton and e.pressed:
+		if not _was_captured:
+			return              # this click is the one that recaptures the mouse
+		if e.button_index == MOUSE_BUTTON_LEFT:
+			_aim(true)
+		elif e.button_index == MOUSE_BUTTON_RIGHT:
+			_aim(false)
+	elif e is InputEventKey and e.pressed and not e.echo:
+		if e.physical_keycode == KEY_P:
+			pumps_on = not pumps_on
+			_say("pumps on" if pumps_on else "pumps off")
+		elif e.physical_keycode == KEY_BACKSPACE:
+			reset()
+			_say("hold drained, holes removed")
+
+func _physics_process(delta: float) -> void:
+	if not _built:
+		_built = true
+		_build_grid()
+		return
+	_acc += delta
+	var step := 1.0 / sim_rate
+	var t0 := Time.get_ticks_usec()
+	var stepped := false
+	var guard := 0
+	while _acc >= step and guard < 4:
+		_acc -= step
+		guard += 1
+		_sim_step(step)
+		stepped = true
+	if stepped:
+		_update_load()
+		_draw_tick += 1
+		if _draw_tick >= draw_every:
+			_draw_tick = 0
+			_draw_water()
+		last_sim_ms = (Time.get_ticks_usec() - t0) / 1000.0
+	_update_spray(delta)
+
+# ---------------------------------------------------------------- public
+
+func reset() -> void:
+	_d.fill(0.0)
+	_f.fill(0.0)
+	for h in _holes:
+		if h.marker:
+			h.marker.queue_free()
+	_holes.clear()
+	_pc = 0
+	water_volume = 0.0
+	_update_load()
+	_draw_water()
+	_draw_spray()
+
+func hole_count() -> int:
+	return _holes.size()
+
+func column_count() -> int:
+	return _d.size()
+
+## Punch a hole where the line from -> to (world space) first hits the ship.
+func punch_from_ray(from: Vector3, to: Vector3, exclude: Array[RID] = []) -> bool:
+	var hit := _world_ray(from, to, 3, exclude)
+	if hit.is_empty() or not _is_ship(hit["collider"]):
+		_say("no hull there")
+		return false
+	var inv := _rig.global_transform.affine_inverse()
+	var lp: Vector3 = inv * (hit["position"] as Vector3)
+	var ln: Vector3 = (_rig.global_transform.basis.inverse() * (hit["normal"] as Vector3)).normalized()
+	return punch_hole_local(lp, ln)
+
+## Punch a hole at a ship-local point on the hull (normal = surface normal, either side).
+func punch_hole_local(lp: Vector3, ln: Vector3) -> bool:
+	var ci := _nearest_column(lp, 1.2)
+	if ci < 0:
+		_say("too far from the hold")
+		return false
+	for h in _holes:
+		if h.pos.distance_to(lp) < 0.35:
+			_say("already holed there")
+			return false
+	var target := Vector3(_cx[ci], clampf(lp.y, _b[ci], _b[ci] + _cap[ci]), _cz[ci])
+	var inward := ln if ln.dot(target - lp) >= 0.0 else -ln
+	var h := Hole.new()
+	h.pos = lp
+	h.normal = inward
+	h.col = ci
+	h.marker = MeshInstance3D.new()
+	var bm := BoxMesh.new()
+	bm.size = Vector3(hole_radius * 2.4, hole_radius * 2.4, 0.06)
+	h.marker.mesh = bm
+	h.marker.material_override = _marker_mat
+	h.marker.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	var up := Vector3.UP if absf(inward.y) < 0.9 else Vector3.RIGHT
+	h.marker.transform = Transform3D(Basis.looking_at(inward, up), lp)
+	_rig.add_child(h.marker)
+	_holes.append(h)
+	_say("hole punched (%d)" % _holes.size())
+	return true
+
+## Plug the hole nearest to where the line from -> to hits the ship.
+func plug_from_ray(from: Vector3, to: Vector3, exclude: Array[RID] = []) -> bool:
+	var hit := _world_ray(from, to, 3, exclude)
+	if hit.is_empty():
+		return false
+	var lp: Vector3 = _rig.global_transform.affine_inverse() * (hit["position"] as Vector3)
+	var best := -1
+	var best_d := 0.7
+	for i in _holes.size():
+		var dd := _holes[i].pos.distance_to(lp)
+		if dd < best_d:
+			best_d = dd
+			best = i
+	if best < 0:
+		_say("no hole there")
+		return false
+	if _holes[best].marker:
+		_holes[best].marker.queue_free()
+	_holes.remove_at(best)
+	_say("hole plugged")
+	return true
+
+# ---------------------------------------------------------------- input helpers
+
+func _aim(punch: bool) -> void:
+	var cam := get_viewport().get_camera_3d()
+	if cam == null or not _built:
+		return
+	var from := cam.global_position
+	var to := from - cam.global_transform.basis.z * reach
+	var ex: Array[RID] = []
+	var n: Node = cam
+	while n:
+		if n is CollisionObject3D:
+			ex.append((n as CollisionObject3D).get_rid())
+		n = n.get_parent()
+	if punch:
+		punch_from_ray(from, to, ex)
+	else:
+		plug_from_ray(from, to, ex)
+
+func _say(s: String) -> void:
+	status = s
+	status_time = 2.5
+
+func _is_ship(o: Object) -> bool:
+	return o is Node and _rig.is_ancestor_of(o as Node)
+
+func _world_ray(from: Vector3, to: Vector3, mask: int, exclude: Array[RID] = []) -> Dictionary:
+	var q := PhysicsRayQueryParameters3D.create(from, to, mask, exclude)
+	return get_world_3d().direct_space_state.intersect_ray(q)
+
+# ---------------------------------------------------------------- grid
+
+func _build_grid() -> void:
+	var t0 := Time.get_ticks_usec()
+	_scan(require_side_walls, 1.0)
+	if _cx.size() < 50 and require_side_walls:
+		push_warning("ship_flooding: only %d hold columns found with side walls; scanning again without the wall check (inside 85%% of the waterline beam)" % _cx.size())
+		_scan(false, 0.85)
+	build_ms = (Time.get_ticks_usec() - t0) / 1000.0
+	print("ship_flooding: hold grid %d columns (%dx%d), built in %.0f ms" % [_cx.size(), _nx, _nz, build_ms])
+
+func _scan(walls: bool, beam_scale: float) -> void:
+	var space := get_world_3d().direct_space_state
+	var xf := _rig.global_transform
+	var box := BoxShape3D.new()
+	box.size = Vector3.ONE * cell * 0.8
+	var q := PhysicsShapeQueryParameters3D.new()
+	q.shape = box
+	q.collision_mask = 1
+	var hb := _waterline()
+	_nx = int(ceil(grid_half_width * 2.0 / cell))
+	_nz = int(ceil((grid_z_max - grid_z_min) / cell))
+	var ny := int(ceil((grid_top - grid_bottom) / cell))
+	_col_of.resize(_nx * _nz)
+	_col_of.fill(-1)
+	var blocked := PackedByteArray()
+	blocked.resize(ny)
+	var cx := []
+	var cz := []
+	var cb := []
+	var ccap := []
+	var side := grid_half_width + 0.5
+	for iz in _nz:
+		var z := grid_z_min + (iz + 0.5) * cell
+		var bound := grid_half_width
+		if not hb.is_empty():
+			bound = _half_beam(hb, z) * beam_scale
+		for ix in _nx:
+			var x := -grid_half_width + (ix + 0.5) * cell
+			if absf(x) > bound - cell * 0.25:
+				continue
+			for iy in ny:
+				var y := grid_bottom + (iy + 0.5) * cell
+				q.transform = xf * Transform3D(Basis(), Vector3(x, y, z))
+				blocked[iy] = 1 if _hits_ship(space.intersect_shape(q, 6)) else 0
+			# the lowest open run of cells that sits on something solid
+			var start := -1
+			for iy in range(1, ny):
+				if blocked[iy] == 0 and blocked[iy - 1] == 1:
+					start = iy
+					break
+			if start < 0:
+				continue
+			var end := start
+			while end + 1 < ny and blocked[end + 1] == 0:
+				end += 1
+			var cy := grid_bottom + (start + 0.5) * cell
+			var b := grid_bottom + start * cell
+			var down := _local_ray(space, xf, Vector3(x, cy, z), Vector3(x, cy - cell * 1.5, z))
+			if not down.is_empty():
+				b = (xf.affine_inverse() * (down["position"] as Vector3)).y
+			var top := grid_bottom + (end + 1) * cell
+			# must have a wall on both sides (drops cells between the hull wall and the bound)
+			if walls:
+				var ys := b + 0.12
+				if _local_ray(space, xf, Vector3(x, ys, z), Vector3(side, ys, z)).is_empty():
+					continue
+				if _local_ray(space, xf, Vector3(x, ys, z), Vector3(-side, ys, z)).is_empty():
+					continue
+			_col_of[ix + iz * _nx] = cx.size()
+			cx.append(x)
+			cz.append(z)
+			cb.append(b)
+			ccap.append(maxf(top - b, 0.05))
+	var n := cx.size()
+	_cx = PackedFloat32Array(cx)
+	_cz = PackedFloat32Array(cz)
+	_b = PackedFloat32Array(cb)
+	_cap = PackedFloat32Array(ccap)
+	_d.resize(n)
+	_d.fill(0.0)
+	_h.resize(n)
+	_f.resize(n * 4)
+	_f.fill(0.0)
+	_nb.resize(n * 4)
+	_nb.fill(-1)
+	for iz in _nz:
+		for ix in _nx:
+			var i := _col_of[ix + iz * _nx]
+			if i < 0:
+				continue
+			_nb[i * 4 + 0] = _link(i, ix + 1, iz)
+			_nb[i * 4 + 1] = _link(i, ix - 1, iz)
+			_nb[i * 4 + 2] = _link(i, ix, iz + 1)
+			_nb[i * 4 + 3] = _link(i, ix, iz - 1)
+	_water_mm.instance_count = maxi(n, 1)
+	_water_mm.visible_instance_count = 0
+	_water_buf.resize(maxi(n, 1) * 12)
+	_water_buf.fill(0.0)
+	for k in maxi(n, 1):
+		_water_buf[k * 12] = cell
+		_water_buf[k * 12 + 10] = cell
+
+func _link(i: int, ix: int, iz: int) -> int:
+	if ix < 0 or iz < 0 or ix >= _nx or iz >= _nz:
+		return -1
+	var j := _col_of[ix + iz * _nx]
+	if j < 0:
+		return -1
+	# the open spaces have to overlap vertically
+	if _b[j] >= _b[i] + _cap[i] or _b[i] >= _b[j] + _cap[j]:
+		return -1
+	return j
+
+func _hits_ship(results: Array) -> bool:
+	for r in results:
+		if _is_ship(r["collider"]):
+			return true
+	return false
+
+func _local_ray(space: PhysicsDirectSpaceState3D, xf: Transform3D, a: Vector3, b: Vector3) -> Dictionary:
+	var q := PhysicsRayQueryParameters3D.create(xf * a, xf * b, 1)
+	var hit := space.intersect_ray(q)
+	if hit.is_empty() or not _is_ship(hit["collider"]):
+		return {}
+	return hit
+
+func _waterline() -> Dictionary:
+	var ship := get_node_or_null(ship_path)
+	return _find_waterline(ship) if ship else {}
+
+func _find_waterline(n: Node) -> Dictionary:
+	if n.has_meta("extras"):
+		var e = n.get_meta("extras")
+		if e is Dictionary and e.has("waterline_half_beam"):
+			return e
+	for c in n.get_children():
+		var r := _find_waterline(c)
+		if not r.is_empty():
+			return r
+	return {}
+
+## Half-beam at the waterline at ship-local z (ship-local z = Blender y).
+func _half_beam(ex: Dictionary, z: float) -> float:
+	var hb := PackedFloat32Array(ex["waterline_half_beam"])
+	var f := (z - float(ex["waterline_y_min"])) / float(ex["waterline_y_step"])
+	if f < 0.0 or f > hb.size() - 1:
+		return 0.0
+	var i := int(floor(f))
+	var j := mini(i + 1, hb.size() - 1)
+	return lerpf(hb[i], hb[j], f - i)
+
+func _column_at(x: float, z: float) -> int:
+	var ix := int(floor((x + grid_half_width) / cell))
+	var iz := int(floor((z - grid_z_min) / cell))
+	if ix < 0 or iz < 0 or ix >= _nx or iz >= _nz:
+		return -1
+	return _col_of[ix + iz * _nx]
+
+func _nearest_column(lp: Vector3, max_dist: float) -> int:
+	var best := -1
+	var best_d := max_dist * max_dist
+	for i in _cx.size():
+		var y := clampf(lp.y, _b[i], _b[i] + _cap[i])
+		var dd := Vector3(_cx[i] - lp.x, y - lp.y, _cz[i] - lp.z).length_squared()
+		if dd < best_d:
+			best_d = dd
+			best = i
+	return best
+
+# ---------------------------------------------------------------- simulation
+
+func _sim_step(dt: float) -> void:
+	var n := _d.size()
+	if n == 0:
+		return
+	var area := cell * cell
+	_inflow(dt, area)
+	if pumps_on:
+		_pump(dt, area)
+	if water_volume <= 0.0 and _holes.is_empty():
+		return
+	# read-only locals (packed arrays are copy-on-write, so only alias ones we don't write)
+	var cx := _cx
+	var cz := _cz
+	var bb := _b
+	var cap := _cap
+	var nb := _nb
+	var up := (_rig.global_transform.basis.inverse() * Vector3.UP).normalized()
+	var ux := up.x
+	var uy := up.y
+	var uz := up.z
+	for i in n:
+		_h[i] = ux * cx[i] + uy * (bb[i] + _d[i]) + uz * cz[i]
+	var k := dt * G * cell
+	var damp := flow_damping
+	var max_scale := area / dt
+	# outflows from each wet column to its 4 neighbours (unrolled: GDScript loops are slow)
+	for i in n:
+		var base := i * 4
+		var di := _d[i]
+		if di <= min_flow_depth:
+			_f[base] = 0.0
+			_f[base + 1] = 0.0
+			_f[base + 2] = 0.0
+			_f[base + 3] = 0.0
+			continue
+		var hi := _h[i]
+		var j0 := nb[base]
+		var j1 := nb[base + 1]
+		var j2 := nb[base + 2]
+		var j3 := nb[base + 3]
+		var f0 := 0.0
+		var f1 := 0.0
+		var f2 := 0.0
+		var f3 := 0.0
+		if j0 >= 0 and _d[j0] < cap[j0]:
+			f0 = maxf(0.0, _f[base] * damp + k * (hi - _h[j0]))
+		if j1 >= 0 and _d[j1] < cap[j1]:
+			f1 = maxf(0.0, _f[base + 1] * damp + k * (hi - _h[j1]))
+		if j2 >= 0 and _d[j2] < cap[j2]:
+			f2 = maxf(0.0, _f[base + 2] * damp + k * (hi - _h[j2]))
+		if j3 >= 0 and _d[j3] < cap[j3]:
+			f3 = maxf(0.0, _f[base + 3] * damp + k * (hi - _h[j3]))
+		var total := f0 + f1 + f2 + f3
+		var maxout := di * max_scale
+		if total > maxout:
+			var sc := maxout / total
+			f0 *= sc
+			f1 *= sc
+			f2 *= sc
+			f3 *= sc
+		_f[base] = f0
+		_f[base + 1] = f1
+		_f[base + 2] = f2
+		_f[base + 3] = f3
+	# depth change = what flows in from the neighbours - what flows out
+	var to_depth := dt / area
+	var vol := 0.0
+	for i in n:
+		var base := i * 4
+		var net := -(_f[base] + _f[base + 1] + _f[base + 2] + _f[base + 3])
+		var j := nb[base]
+		if j >= 0:
+			net += _f[j * 4 + 1]
+		j = nb[base + 1]
+		if j >= 0:
+			net += _f[j * 4]
+		j = nb[base + 2]
+		if j >= 0:
+			net += _f[j * 4 + 3]
+		j = nb[base + 3]
+		if j >= 0:
+			net += _f[j * 4 + 2]
+		var di := _d[i]
+		if net != 0.0:
+			di = clampf(di + net * to_depth, 0.0, cap[i])
+			_d[i] = di
+		vol += di
+	water_volume = vol * area
+
+func _inflow(dt: float, area: float) -> void:
+	var xf := _rig.global_transform
+	var a := PI * hole_radius * hole_radius
+	for h in _holes:
+		var wp: Vector3 = xf * h.pos
+		var sea := _ocean.get_height(wp.x, wp.z) if _ocean else -1000.0
+		var ci := h.col
+		var inside_y := (xf * Vector3(_cx[ci], _b[ci] + _d[ci], _cz[ci])).y
+		var top := maxf(wp.y, inside_y)
+		var qf := 0.0
+		if sea > top:
+			qf = discharge_coef * a * sqrt(2.0 * G * (sea - top))
+		elif inside_y > wp.y and inside_y > sea:
+			qf = -discharge_coef * a * sqrt(2.0 * G * (inside_y - maxf(wp.y, sea)))
+		qf *= flood_speed
+		h.flow = qf
+		h.speed = sqrt(2.0 * G * maxf(sea - wp.y, 0.0))
+		h.submerged = inside_y > wp.y
+		_d[ci] = clampf(_d[ci] + qf * dt / area, 0.0, _cap[ci])
+
+func _pump(dt: float, area: float) -> void:
+	var total := 0.0
+	for i in _d.size():
+		total += _d[i]
+	total *= area
+	if total <= 0.0:
+		return
+	var keep := 1.0 - minf(1.0, pump_rate * dt / total)
+	for i in _d.size():
+		_d[i] *= keep
+
+func _update_load() -> void:
+	var area := cell * cell
+	var v := 0.0
+	var mx := 0.0
+	var mz := 0.0
+	for i in _d.size():
+		var w := _d[i] * area
+		v += w
+		mx += w * _cx[i]
+		mz += w * _cz[i]
+	water_volume = v
+	var off := Vector3.ZERO
+	if v > 0.0001:
+		var xc := mx / v
+		var zc := mz / v
+		off.x = -clampf(v / waterplane_area, 0.0, max_sink)
+		# weight at +x pushes +x down (ship_motion: +roll raises +X)
+		off.z = clampf(-atan(v * xc / (displacement * gm_transverse)), -0.6, 0.6)
+		# weight toward the bow (-z) pushes the bow down (ship_motion: +pitch raises the bow)
+		off.y = clampf(atan(v * zc / (displacement * gm_longitudinal)), -0.3, 0.3)
+	if _motion and "load_offset" in _motion:
+		_motion.set("load_offset", off)
+
+# ---------------------------------------------------------------- drawing
+
+func _make_visuals() -> void:
+	var wmat := ShaderMaterial.new()
+	wmat.shader = preload("res://shaders/water_cubes.gdshader")
+	wmat.set_shader_parameter("color", water_color)
+	wmat.set_shader_parameter("seam_color", seam_color)
+	wmat.set_shader_parameter("cell", cell)
+	var box := BoxMesh.new()
+	box.size = Vector3.ONE
+	box.material = wmat
+	_water_mm = MultiMesh.new()
+	_water_mm.transform_format = MultiMesh.TRANSFORM_3D
+	_water_mm.mesh = box
+	var wi := MultiMeshInstance3D.new()
+	wi.name = "FloodWater"
+	wi.multimesh = _water_mm
+	wi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_rig.add_child.call_deferred(wi)
+
+	var smat := StandardMaterial3D.new()
+	smat.albedo_color = spray_color
+	smat.emission_enabled = true
+	smat.emission = spray_color
+	smat.emission_energy_multiplier = 0.25
+	smat.roughness = 0.6
+	var sbox := BoxMesh.new()
+	sbox.size = Vector3.ONE
+	sbox.material = smat
+	_spray_mm = MultiMesh.new()
+	_spray_mm.transform_format = MultiMesh.TRANSFORM_3D
+	_spray_mm.mesh = sbox
+	_spray_mm.instance_count = max_spray
+	_spray_mm.visible_instance_count = 0
+	_spray_buf.resize(max_spray * 12)
+	var si := MultiMeshInstance3D.new()
+	si.name = "FloodSpray"
+	si.multimesh = _spray_mm
+	si.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_rig.add_child.call_deferred(si)
+	_pp.resize(max_spray)
+	_pv.resize(max_spray)
+	_pa.resize(max_spray)
+	_pl.resize(max_spray)
+	_ps.resize(max_spray)
+	_pt.resize(max_spray)
+
+	_marker_mat = StandardMaterial3D.new()
+	_marker_mat.albedo_color = Color(0.05, 0.04, 0.03)
+	_marker_mat.roughness = 1.0
+
+func _draw_water() -> void:
+	var count := 0
+	var step := cell * 0.25
+	var cx := _cx
+	var cz := _cz
+	var bb := _b
+	var cap := _cap
+	for i in _d.size():
+		var di := _d[i]
+		if di < 0.012:
+			continue
+		var hgt := clampf(maxf(snappedf(di, step), 0.03), 0.03, cap[i])
+		var o := count * 12
+		# x and z scale and the zeros are written once in _build_grid
+		_water_buf[o + 3] = cx[i]
+		_water_buf[o + 5] = hgt
+		_water_buf[o + 7] = bb[i] + hgt * 0.5
+		_water_buf[o + 11] = cz[i]
+		count += 1
+	if _d.size() > 0:
+		_water_mm.buffer = _water_buf
+	_water_mm.visible_instance_count = count
+
+func _update_spray(dt: float) -> void:
+	if _d.is_empty():
+		return
+	var grav := _rig.global_transform.basis.inverse() * Vector3(0.0, -G, 0.0)
+	# spawn
+	for h in _holes:
+		if h.flow <= 0.0 or h.speed <= 0.05:
+			continue
+		var rate := clampf(h.flow * spray_per_m3, 0.0, spray_max_rate)
+		if h.submerged:
+			rate *= 0.15
+		h.acc += rate * dt
+		var t1 := h.normal.cross(Vector3.UP if absf(h.normal.y) < 0.9 else Vector3.RIGHT).normalized()
+		var t2 := h.normal.cross(t1)
+		while h.acc >= 1.0:
+			h.acc -= 1.0
+			if _pc >= max_spray:
+				continue
+			var k := _pc
+			_pc += 1
+			var jit := (t1 * randf_range(-1.0, 1.0) + t2 * randf_range(-1.0, 1.0)) * hole_radius * 0.7
+			_pp[k] = h.pos + h.normal * 0.1 + jit
+			var dir := (h.normal + t1 * randf_range(-0.25, 0.25) + t2 * randf_range(-0.25, 0.25)).normalized()
+			_pv[k] = dir * h.speed * randf_range(0.65, 1.05)
+			_pa[k] = Vector3(randf_range(-1, 1), randf_range(-1, 1), randf_range(-1, 1)).normalized()
+			_pl[k] = 2.5
+			_ps[k] = randf_range(0.06, 0.13)
+			_pt[k] = 0.0
+	# move, land, die
+	var i := 0
+	while i < _pc:
+		_pv[i] += grav * dt
+		_pp[i] += _pv[i] * dt
+		_pt[i] += dt
+		_pl[i] -= dt
+		var p := _pp[i]
+		var dead := _pl[i] <= 0.0
+		if not dead and _pt[i] > 0.1:
+			var ci := _column_at(p.x, p.z)
+			if ci < 0:
+				dead = true
+			elif p.y <= _b[ci] + _d[ci] or p.y > _b[ci] + _cap[ci]:
+				dead = true
+		if dead:
+			_pc -= 1
+			_pp[i] = _pp[_pc]
+			_pv[i] = _pv[_pc]
+			_pa[i] = _pa[_pc]
+			_pl[i] = _pl[_pc]
+			_ps[i] = _ps[_pc]
+			_pt[i] = _pt[_pc]
+		else:
+			i += 1
+	_draw_spray()
+
+func _draw_spray() -> void:
+	for i in _pc:
+		var s := _ps[i] * clampf(_pl[i] / 0.3, 0.0, 1.0)
+		var bs := Basis(_pa[i], _pt[i] * 9.0).scaled(Vector3(s, s, s))
+		var p := _pp[i]
+		var o := i * 12
+		_spray_buf[o] = bs.x.x
+		_spray_buf[o + 1] = bs.y.x
+		_spray_buf[o + 2] = bs.z.x
+		_spray_buf[o + 3] = p.x
+		_spray_buf[o + 4] = bs.x.y
+		_spray_buf[o + 5] = bs.y.y
+		_spray_buf[o + 6] = bs.z.y
+		_spray_buf[o + 7] = p.y
+		_spray_buf[o + 8] = bs.x.z
+		_spray_buf[o + 9] = bs.y.z
+		_spray_buf[o + 10] = bs.z.z
+		_spray_buf[o + 11] = p.z
+	_spray_mm.buffer = _spray_buf
+	_spray_mm.visible_instance_count = _pc

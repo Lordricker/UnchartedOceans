@@ -1,0 +1,53 @@
+
+import bpy, os, sys, json, time
+WORK = os.path.join(os.environ["BRIG_PROJECT"], "tools", "brig_merge")
+exec(open(os.path.join(WORK, "merge_lib.py")).read(), globals())
+LOG = open(os.path.join(WORK, "merge_log.txt"), "a", encoding="utf-8")
+def L(m):
+    LOG.write(m + "\n"); LOG.flush(); os.fsync(LOG.fileno())
+skip = set(x for x in os.environ.get("MERGE_SKIP", "").split(",") if x)
+OUT = os.environ.get("MERGE_OUT")
+L(f"=== start {time.strftime('%H:%M:%S')} skip={sorted(skip)}")
+O = bpy.data.objects
+yard_parts = {p for k, v in A.items() if k.startswith("Yard_") for p in v}
+skip_coll = ("Brig_DeckSource", "Brig_Cutters")
+# 2026-10-26: the spanker's boom, gaff, jaws, blocks and the lines between them are built as their own nodes in step 02
+# (Spanker_Boom / Spanker_Gaff) so Godot can swing them with the sail; they leave the static groups here (islands listed in game_spanker.json)
+SP = json.load(open(os.path.join(WORK, "game_spanker.json")))
+SP_MOVED = {src: {i for lst in d.values() for i in lst} for src, d in SP.items()}
+def objs(names): return [O[n] for n in names if n in O and O[n].type == 'MESH' and not any(c.name in skip_coll for c in O[n].users_collection)]
+extra_interior = ["GalleyBarrel","Bunk_Port","Bunk_Stbd","BunkBedding_Port","BunkBedding_Stbd","RoomTable_Port","RoomTable_Stbd","ProvisionsSlateChalk","LowerStairPosts","GalleyUtensilRail"]
+extra_deck = ["AnchorCableInboard","CableManger","BinnacleBody","BinnaclePanels","BinnacleBrass"]
+plan = {
+ "Hull":         (objs(G["Hull"]),         {"vis_begin": 0.0, "vis_end": 60.0,  "game_role": "static"}),
+ "MainDeck":     (objs(G["Deck"]),         {"vis_begin": 0.0, "vis_end": 60.0,  "game_role": "static"}),
+ "DeckFittings": (objs(G["DeckFittings"]), {"vis_begin": 0.0, "vis_end": 60.0,  "game_role": "static"}),
+ "DeckExtras":   (objs(extra_deck),        {"vis_begin": 0.0, "vis_end": 35.0,  "game_role": "static"}),
+ "Rig_Spars":    (objs(G["Rig_Spars"]),    {"vis_begin": 0.0, "vis_end": 60.0,  "game_role": "static"}),
+ "Rig_Ropes":    (objs(G["Rig_Ropes"]),    {"vis_begin": 0.0, "vis_end": 150.0, "game_role": "static"}),
+ "Interiors":    (objs(G["Interiors"] + extra_interior), {"vis_begin": 0.0, "vis_end": 35.0, "game_role": "interior"}),
+}
+
+# ---- phase A: bake/read every source object BEFORE the scene is modified ----
+accs = {}
+for name, (ol, props) in plan.items():
+    L(f"-- read group {name}: {len(ol)} objects"); acc = Acc()
+    for o in ol:
+        if o.name in skip: L(f"SKIP {o.name}"); continue
+        L(f"START {o.name} mods={[m.type for m in o.modifiers]} v={len(o.data.vertices)}")
+        flt = (lambda idx, o=o: f"__{o.name}__{idx:03d}" not in yard_parts) if o.name == "Blocks" else None
+        if o.name in SP_MOVED: flt = (lambda idx, s=SP_MOVED[o.name]: idx not in s)
+        n = add_obj(acc, o, island_ok=flt); L(f"OK {o.name} polys={n}")
+    accs[name] = acc; L(f"READ {name}: verts={len(acc.verts)} faces={len(acc.faces)}")
+# ---- phase B: create the merged objects ----
+exp = coll("Brig_Export")
+if "Brig" in O: bpy.data.objects.remove(O["Brig"])
+root = bpy.data.objects.new("Brig", None); root.empty_display_type = 'PLAIN_AXES'; root.empty_display_size = 1.0; exp.objects.link(root)
+for k, v in META["brig"].items(): root[k] = v
+root["source_file"] = "MerchantBrigShipMaster.blend (via MerchantBrigShipGame_next.blend)"
+for name, (ol, props) in plan.items():
+    acc = accs[name]; me = make_mesh(acc, name); make_obj(name, me, parent=root, props=props)
+    L(f"DONE {name}: verts={len(me.vertices)} tris={tris(me)} mats={[m.name if m else None for m in me.materials]}")
+if OUT:
+    bpy.ops.wm.save_as_mainfile(filepath=OUT); L("SAVED " + OUT)
+L("=== finished")

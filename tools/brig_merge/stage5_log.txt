@@ -1,0 +1,9 @@
+=== stage5c start 11:30:10
+READ Rig: 20274 faces, 6 materials
+PREP Rig_LOD1: 21698 tris -> ratio 0.313
+PREP Rig_LOD2: 21698 tris -> ratio 0.157
+EVAL Rig_LOD1: 6799 tris
+EVAL Rig_LOD2: 3400 tris
+MADE Rig_LOD1: 6589 tris
+MADE Rig_LOD2: 2904 tris
+SAVED C:\Users\Victus\Documents\GitHub\UnchartedOceans\tools\brig_merge\out\s05_rig_lods.blend

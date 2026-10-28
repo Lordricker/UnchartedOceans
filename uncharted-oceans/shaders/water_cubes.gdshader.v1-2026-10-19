@@ -1,0 +1,42 @@
+// Flood water in the hold: one box per water column (from ship_flooding.gd's MultiMesh),
+// drawn as stacked white cubes. The box is one cell wide, so the square outline on top and
+// the vertical edges come from the box itself; the horizontal seams on the sides are drawn
+// every `cell` metres up from the floor.
+shader_type spatial;
+render_mode cull_back;
+
+uniform vec3 color : source_color = vec3(0.86, 0.92, 0.93);
+uniform vec3 seam_color : source_color = vec3(0.42, 0.6, 0.64);
+uniform float cell = 0.25;
+uniform float seam_width = 0.009;        // m
+uniform float emission_strength = 0.12;  // keeps it readable in a dark hold
+
+varying vec3 box_pos;     // position inside the unit box, -0.5..0.5
+varying vec3 box_normal;  // face normal in the box's own space
+varying vec3 box_size;    // this instance's size in metres
+
+void vertex() {
+	box_pos = VERTEX;
+	box_normal = NORMAL;
+	box_size = vec3(length(MODEL_MATRIX[0].xyz), length(MODEL_MATRIX[1].xyz), length(MODEL_MATRIX[2].xyz));
+}
+
+void fragment() {
+	vec3 p = (box_pos + 0.5) * box_size;   // metres from the box's lower corner
+	vec3 an = abs(box_normal);
+	float e = 1e3;                         // distance to the nearest drawn edge (m)
+	if (an.x < 0.5) e = min(e, min(p.x, box_size.x - p.x));
+	if (an.z < 0.5) e = min(e, min(p.z, box_size.z - p.z));
+	if (an.y < 0.5) {
+		float fy = mod(p.y, cell);
+		e = min(e, min(fy, cell - fy));
+		e = min(e, box_size.y - p.y);
+	}
+	float aa = max(fwidth(e), 1e-4);
+	float seam = 1.0 - smoothstep(seam_width, seam_width + aa * 1.5, e);
+	vec3 c = mix(color, seam_color, seam * 0.7);
+	ALBEDO = c;
+	ROUGHNESS = 0.35;
+	SPECULAR = 0.5;
+	EMISSION = c * emission_strength;
+}

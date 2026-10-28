@@ -1,0 +1,513 @@
+class_name ShipHarbor
+extends Node3D
+## Where the ship meets the land (made by ship_motion.gd at startup, like the wheel and sails).
+##
+##  - Running aground: the keel is sampled against the island's sea floor. Touching it kills the ship's
+##    speed (friction, plus the part of the motion that points into the shallows) and eases her back out
+##    to deeper water. Waves count, so a trough can ground you where a crest would not.
+##  - The pier: the hull is a rectangle that cannot pass through the pier. Hitting it slows the ship and
+##    reports the impact speed.
+##  - Mooring (E): alongside the pier on the port side, heading about north, slower than 1 m/s. The lines
+##    go on, the ship is hauled in against the fenders and held, and a gangway comes out to the pier.
+##    E again casts off (not while someone is standing on the gangway).
+##  - B (testing): jump the ship to the cove's mouth, heading for the pier.
+## Shows the water under the keel and the berth state at the top of the screen when the island is near.
+
+@export var key_moor := KEY_E
+@export var key_teleport := KEY_B
+## Largest speed (m/s) and misalignment at which the lines can be put on.
+@export var moor_max_speed := 1.0
+@export var moor_max_lateral := 2.5
+@export var moor_max_along := 7.0
+@export var moor_max_heading := 20.0
+## Seconds the ship takes to be hauled in against the pier.
+@export var haul_time := 1.4
+@export var gangway_z := 1.7
+
+## (ship-local x, z, keel depth below the waterline). The brig's keel is about 2.3 m down amidships.
+const FOOT: Array[Vector3] = [
+	Vector3(0, -10.0, 0.9), Vector3(0, -7.0, 1.7), Vector3(0, -3.5, 2.2), Vector3(0, 0, 2.3),
+	Vector3(0, 3.5, 2.3), Vector3(0, 7.0, 2.0), Vector3(0, 9.5, 1.4),
+	Vector3(-2.2, -5.0, 1.2), Vector3(2.2, -5.0, 1.2), Vector3(-2.6, 0.0, 1.5), Vector3(2.6, 0.0, 1.5),
+	Vector3(-2.2, 5.0, 1.2), Vector3(2.2, 5.0, 1.2),
+	Vector3(-3.3, -2.0, 0.4), Vector3(3.3, -2.0, 0.4), Vector3(-3.3, 3.0, 0.4), Vector3(3.3, 3.0, 0.4),
+]
+## Mooring cleats on the port rail (ship-local) and the bollard each line goes to (index into
+## Island.bollards_world(): 0 = northernmost).
+const LINES := [
+	[Vector3(-3.05, 2.5, -7.0), 0],    # bow line
+	[Vector3(-3.05, 2.5, -3.2), 2],    # forward spring, leads aft
+	[Vector3(-3.05, 2.5, 3.4), 1],     # after spring, leads forward
+	[Vector3(-3.05, 2.5, 6.8), 3],     # stern line
+]
+
+var ship: Node3D
+var island: Island
+var moored := false
+var settle := 0.0               ## seconds the ship has been at rest against the pier
+var aground := false
+var clearance := 99.0           ## water under the keel at the shallowest sampled point (m)
+var message := ""
+
+var _msg_time := 0.0
+var _label: Label
+var _rope_mesh: ImmediateMesh
+var _rope_node: MeshInstance3D
+var _gang: Node3D
+var _gang_body: AnimatableBody3D
+var _gang_shapes: Array[CollisionShape3D] = []
+var _gang_out := false
+var _hit_cool := 0.0
+var _last_slope := 0.1
+
+func _ready() -> void:
+	add_to_group("ship_harbor")
+	ship = get_parent() as Node3D
+	_make_label()
+	_make_ropes()
+	_make_gangway()
+
+func _unhandled_input(e: InputEvent) -> void:
+	if e is InputEventKey and e.pressed and not e.echo:
+		if e.physical_keycode == key_moor:
+			toggle_moor()
+		elif e.physical_keycode == key_teleport:
+			teleport_to_approach()
+
+# ------------------------------------------------------------------ helpers
+
+func _model() -> SailModel:
+	var s = ship.get("sails")
+	return s.model if s != null else null
+
+func _basis_vectors() -> Array:
+	var yaw := deg_to_rad(float(ship.get("heading_deg")))
+	return [Vector2(-sin(yaw), -cos(yaw)), Vector2(cos(yaw), -sin(yaw))]   # fwd, right (world xz)
+
+func _velocity() -> Vector2:
+	var m := _model()
+	if m == null:
+		return Vector2.ZERO
+	var b := _basis_vectors()
+	return b[0] * m.v_f + b[1] * m.v_s
+
+func _set_velocity(v: Vector2) -> void:
+	var m := _model()
+	if m == null:
+		return
+	var b := _basis_vectors()
+	m.v_f = v.dot(b[0])
+	m.v_s = v.dot(b[1])
+
+func _say(text: String, seconds := 3.0) -> void:
+	message = text
+	_msg_time = seconds
+
+func _find_island() -> void:
+	if island == null or not is_instance_valid(island):
+		island = get_tree().get_first_node_in_group("islands") as Island
+
+# ------------------------------------------------------------------ per tick
+
+func _physics_process(delta: float) -> void:
+	_find_island()
+	if island == null or ship == null:
+		return
+	_hit_cool = maxf(_hit_cool - delta, 0.0)
+	_msg_time = maxf(_msg_time - delta, 0.0)
+	if moored:
+		_hold(delta)
+		clearance = _keel_clearance()
+	else:
+		_ground(delta)
+		_pier_collide(delta)
+	_update_gangway()
+	_update_ropes()
+	_update_label()
+
+## Water under the keel at the shallowest sampled point.
+func _keel_clearance() -> float:
+	var b := _basis_vectors()
+	var base := Vector2(ship.global_position.x, ship.global_position.z)
+	var y := ship.global_position.y
+	var clear := 99.0
+	for f in FOOT:
+		var w: Vector2 = base + (b[1] as Vector2) * f.x - (b[0] as Vector2) * f.y
+		clear = minf(clear, (y - f.z) - island.height_at(w.x, w.y))
+	return clear
+
+## Keel against the sea floor.
+func _ground(delta: float) -> void:
+	var b := _basis_vectors()
+	var fwd: Vector2 = b[0]
+	var right: Vector2 = b[1]
+	var base := Vector2(ship.global_position.x, ship.global_position.z)
+	var y := ship.global_position.y
+	var worst := 0.0
+	var push := Vector2.ZERO
+	var clear := 99.0
+	for f in FOOT:
+		var w := base + right * f.x - fwd * f.y
+		var g := island.height_at(w.x, w.y)
+		var keel_y := y - f.z
+		clear = minf(clear, keel_y - g)
+		var pen := g - keel_y
+		if pen > 0.0:
+			var n := island.normal_at(w.x, w.y)
+			var nh := Vector2(n.x, n.z)
+			_last_slope = maxf(nh.length() / maxf(n.y, 0.1), 0.05)
+			if nh.length() < 0.01:
+				nh = (base - Vector2(island.global_position.x, island.global_position.z))
+			push += nh.normalized() * pen
+			worst = maxf(worst, pen)
+	clearance = clear
+	if worst <= 0.0:
+		if aground:
+			aground = false
+		return
+	var dir := push.normalized() if push.length() > 0.001 else -fwd
+	var v := _velocity()
+	var vn := v.dot(dir)
+	if vn < 0.0:
+		if -vn > 0.8 and not aground:
+			_say("Aground! (%.1f knots)" % (-vn / 0.5144))
+		v -= dir * vn * 1.1
+	aground = true
+	v *= exp(-delta * (0.7 + 2.5 * clampf(worst, 0.0, 1.0)))
+	_set_velocity(v)
+	var m := _model()
+	if m == null and bool(ship.get("underway")):
+		ship.set("underway", false)
+	# ease back out toward deeper water: the slope converts depth to distance
+	var move := dir * minf(worst / _last_slope, 2.5) * (1.0 - exp(-delta * 4.0))
+	ship.global_position += Vector3(move.x, 0.0, move.y)
+
+## The hull (a rectangle) against the pier (a rectangle); separating-axis test.
+func _pier_collide(delta: float) -> void:
+	if not island.harbor:
+		return
+	var rect := island.pier_rect_world().grow(island.fender_gap)
+	var pc := rect.get_center()
+	var ph := rect.size * 0.5
+	var b := _basis_vectors()
+	var a1: Vector2 = b[0]
+	var a2: Vector2 = b[1]
+	var c := Vector2(ship.global_position.x, ship.global_position.z)
+	var hl := 9.5
+	var hb := island.ship_half_beam
+	var best := 1.0e9
+	var best_n := Vector2.ZERO
+	for u in [Vector2(1, 0), Vector2(0, 1), a1, a2]:
+		var rs: float = hl * absf(u.dot(a1)) + hb * absf(u.dot(a2))
+		var rp: float = ph.x * absf(u.x) + ph.y * absf(u.y)
+		var d := (c - pc).dot(u)
+		var overlap: float = rs + rp - absf(d)
+		if overlap <= 0.0:
+			return
+		if overlap < best:
+			best = overlap
+			best_n = u * (1.0 if d >= 0.0 else -1.0)
+	ship.global_position += Vector3(best_n.x, 0.0, best_n.y) * best
+	var v := _velocity()
+	var vn := v.dot(best_n)
+	if vn < 0.0:
+		if -vn > 0.5 and _hit_cool <= 0.0:
+			_say("Bumped the pier (%.1f m/s)" % -vn)
+			_hit_cool = 1.0
+		v -= best_n * vn * 1.2
+	v -= (v - best_n * v.dot(best_n)) * (1.0 - exp(-0.8 * delta))
+	_set_velocity(v)
+
+# ------------------------------------------------------------------ mooring
+
+## How the ship sits against the berth: lateral and along offsets (m), heading error (deg), speed (m/s).
+func berth_state() -> Dictionary:
+	var bw := island.berth_world()
+	var p := Vector2(ship.global_position.x - bw.x, ship.global_position.z - bw.z)
+	var dh := fposmod(float(ship.get("heading_deg")) + 180.0, 360.0) - 180.0
+	return {"lat": p.x, "along": p.y, "heading": dh, "speed": _velocity().length()}
+
+func can_moor() -> bool:
+	if island == null or not island.harbor:
+		return false
+	var s := berth_state()
+	return absf(s.lat) <= moor_max_lateral and absf(s.along) <= moor_max_along \
+		and absf(s.heading) <= moor_max_heading and s.speed <= moor_max_speed
+
+func toggle_moor() -> void:
+	_find_island()
+	if island == null or not island.harbor:
+		return
+	if moored:
+		cast_off()
+	elif can_moor():
+		moored = true
+		settle = 0.0
+		ship.set("underway", false)
+		_say("Lines ashore")
+	else:
+		var s := berth_state()
+		if s.speed > moor_max_speed:
+			_say("Too fast to moor (%.1f m/s, under %.1f)" % [s.speed, moor_max_speed])
+		else:
+			_say("Not alongside the pier")
+
+func cast_off() -> void:
+	if not moored:
+		return
+	if _player_on_gangway():
+		_say("Get off the gangway first")
+		return
+	moored = false
+	settle = 0.0
+	var m := _model()
+	if m:
+		m.v_s = 0.6        # drift off the pier (starboard is away from it)
+		m.v_f = 0.0
+	_say("Cast off")
+
+## Hold the ship against the pier: haul her to the berth point and heading, no way on.
+func _hold(delta: float) -> void:
+	ship.set("underway", false)
+	var bw := island.berth_world()
+	var p := ship.global_position
+	var err := Vector3(bw.x - p.x, 0.0, bw.z - p.z)
+	var k := 1.0 - exp(-delta / maxf(haul_time * 0.5, 0.05))
+	ship.global_position += err * k
+	var h := float(ship.get("heading_deg"))
+	var dh := fposmod(0.0 - h + 180.0, 360.0) - 180.0
+	ship.set("heading_deg", fposmod(h + dh * k, 360.0))
+	var m := _model()
+	if m:
+		m.v_f = 0.0
+		m.v_s = 0.0
+		m.yaw_rate = 0.0
+	if err.length() < 0.12 and absf(dh) < 1.0:
+		settle += delta
+	else:
+		settle = 0.0
+
+# ------------------------------------------------------------------ test teleport
+
+## Put the ship (and the player, if aboard) at the mouth of the cove heading for the pier.
+func teleport_to_approach() -> void:
+	_find_island()
+	if island == null or not island.harbor:
+		return
+	var bw := island.berth_world()
+	var from := ship.global_position
+	var to := Vector3(bw.x + 1.5, from.y, bw.z + 75.0)
+	moored = false
+	ship.global_position = to
+	ship.set("heading_deg", 0.0)
+	ship.set("underway", false)
+	var m := _model()
+	if m:
+		m.v_f = 0.0
+		m.v_s = 0.0
+		m.yaw_rate = 0.0
+	ship.set("_xf_prev", ship.global_transform)
+	var pl := get_tree().get_first_node_in_group("player") as Node3D
+	if pl and pl.global_position.distance_to(from) < 40.0:
+		pl.global_position += to - from
+		if "velocity" in pl:
+			pl.velocity = Vector3.ZERO
+	_say("Approach: sail north into the cove, pier on the port side")
+
+# ------------------------------------------------------------------ gangway
+
+func _make_gangway() -> void:
+	_gang = Node3D.new()
+	_gang.name = "Gangway"
+	_gang.visible = false
+	add_child(_gang)
+	_gang_body = AnimatableBody3D.new()
+	_gang_body.name = "GangwayBody"
+	_gang_body.sync_to_physics = false
+	_gang_body.collision_layer = Island.LAYER_BIT
+	_gang_body.collision_mask = 0
+	_gang.add_child(_gang_body)
+	var wood := StandardMaterial3D.new()
+	wood.albedo_color = Color(0.5, 0.38, 0.24)
+	wood.roughness = 0.9
+	var pts := [Vector2(-4.8, 1.9), Vector2(-3.35, 2.82), Vector2(-2.35, 2.82), Vector2(-1.2, 1.86)]
+	for i in 3:
+		var a: Vector2 = pts[i]
+		var bpt: Vector2 = pts[i + 1]
+		var d := bpt - a
+		var ang := atan2(d.y, d.x)
+		var mid := (a + bpt) * 0.5
+		var nrm := Vector2(-sin(ang), cos(ang))
+		var basis := Basis(Vector3.BACK, ang)
+		var width := 1.1
+		var xf := Transform3D(basis, Vector3(mid.x - nrm.x * 0.05, mid.y - nrm.y * 0.05, gangway_z))
+		var mi := MeshInstance3D.new()
+		var bm := BoxMesh.new()
+		bm.size = Vector3(d.length(), 0.1, width)
+		mi.mesh = bm
+		mi.material_override = wood
+		mi.transform = xf
+		_gang.add_child(mi)
+		var cs := CollisionShape3D.new()
+		var bs := BoxShape3D.new()
+		bs.size = bm.size
+		cs.shape = bs
+		cs.transform = xf
+		cs.disabled = true
+		_gang_body.add_child(cs)
+		_gang_shapes.append(cs)
+		for sz in [-1.0, 1.0]:
+			var side := MeshInstance3D.new()
+			var sm := BoxMesh.new()
+			sm.size = Vector3(d.length(), 0.2, 0.05)
+			side.mesh = sm
+			side.material_override = wood
+			side.transform = Transform3D(basis, Vector3(mid.x + nrm.x * 0.1, mid.y + nrm.y * 0.1, gangway_z + sz * (width * 0.5 - 0.02)))
+			_gang.add_child(side)
+		# cleats across the ramp so there is something to grip
+		var steps := int(d.length() / 0.4)
+		for s in steps:
+			var t := (float(s) + 0.5) / steps
+			var cp := a.lerp(bpt, t)
+			var cleat := MeshInstance3D.new()
+			var cm := BoxMesh.new()
+			cm.size = Vector3(0.04, 0.03, width - 0.1)
+			cleat.mesh = cm
+			cleat.material_override = wood
+			cleat.transform = Transform3D(basis, Vector3(cp.x + nrm.x * 0.03, cp.y + nrm.y * 0.03, gangway_z))
+			_gang.add_child(cleat)
+
+func _update_gangway() -> void:
+	var want := moored and settle > 0.8
+	if want == _gang_out:
+		return
+	_gang_out = want
+	_gang.visible = want
+	for cs in _gang_shapes:
+		cs.disabled = not want
+
+func _player_on_gangway() -> bool:
+	if not _gang_out:
+		return false
+	var pl := get_tree().get_first_node_in_group("player") as Node3D
+	if pl == null:
+		return false
+	var l := ship.global_transform.affine_inverse() * pl.global_position
+	return l.x < -1.0 and l.z > 0.8 and l.z < 2.6 and l.y > 1.6
+
+# ------------------------------------------------------------------ ropes
+
+func _make_ropes() -> void:
+	_rope_mesh = ImmediateMesh.new()
+	_rope_node = MeshInstance3D.new()
+	_rope_node.name = "MooringLines"
+	_rope_node.mesh = _rope_mesh
+	_rope_node.top_level = true
+	_rope_node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_rope_node.extra_cull_margin = 40.0
+	var mat := StandardMaterial3D.new()
+	mat.albedo_color = Color(0.7, 0.58, 0.38)
+	mat.roughness = 0.95
+	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	_rope_node.material_override = mat
+	add_child(_rope_node)
+
+func _update_ropes() -> void:
+	_rope_mesh.clear_surfaces()
+	_rope_node.visible = moored
+	if not moored:
+		return
+	var bol := island.bollards_world()
+	_rope_mesh.surface_begin(Mesh.PRIMITIVE_TRIANGLES)
+	for ln in LINES:
+		var a: Vector3 = ship.global_transform * (ln[0] as Vector3)
+		var b: Vector3 = bol[ln[1]]
+		var slack := clampf(1.0 - settle / 0.8, 0.0, 1.0)
+		_tube(a, b, 0.05 + 0.9 * slack)
+	_rope_mesh.surface_end()
+
+func _tube(a: Vector3, b: Vector3, sag: float) -> void:
+	const N := 10
+	const R := 0.035
+	var pts: Array[Vector3] = []
+	for i in N + 1:
+		var t := float(i) / N
+		pts.append(a.lerp(b, t) + Vector3.DOWN * sag * 4.0 * t * (1.0 - t))
+	var prev_ring: Array[Vector3] = []
+	var prev_n: Array[Vector3] = []
+	for i in N + 1:
+		var dir := (pts[mini(i + 1, N)] - pts[maxi(i - 1, 0)]).normalized()
+		var u := dir.cross(Vector3.UP)
+		if u.length() < 0.01:
+			u = dir.cross(Vector3.RIGHT)
+		u = u.normalized()
+		var v := dir.cross(u).normalized()
+		var ring: Array[Vector3] = []
+		var rn: Array[Vector3] = []
+		for s in 4:
+			var ang := TAU * float(s) / 4.0 + PI * 0.25
+			var nn := u * cos(ang) + v * sin(ang)
+			ring.append(pts[i] + nn * R)
+			rn.append(nn)
+		if i > 0:
+			for s in 4:
+				var s2 := (s + 1) % 4
+				_rope_mesh.surface_set_normal(prev_n[s]); _rope_mesh.surface_add_vertex(prev_ring[s])
+				_rope_mesh.surface_set_normal(rn[s]); _rope_mesh.surface_add_vertex(ring[s])
+				_rope_mesh.surface_set_normal(prev_n[s2]); _rope_mesh.surface_add_vertex(prev_ring[s2])
+				_rope_mesh.surface_set_normal(prev_n[s2]); _rope_mesh.surface_add_vertex(prev_ring[s2])
+				_rope_mesh.surface_set_normal(rn[s]); _rope_mesh.surface_add_vertex(ring[s])
+				_rope_mesh.surface_set_normal(rn[s2]); _rope_mesh.surface_add_vertex(ring[s2])
+		prev_ring = ring
+		prev_n = rn
+
+# ------------------------------------------------------------------ prompt
+
+func _make_label() -> void:
+	var layer := CanvasLayer.new()
+	layer.layer = 5
+	add_child(layer)
+	_label = Label.new()
+	_label.set_anchors_preset(Control.PRESET_CENTER_TOP)
+	_label.grow_horizontal = Control.GROW_DIRECTION_BOTH
+	_label.offset_top = 36.0
+	_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_label.add_theme_font_size_override("font_size", 20)
+	_label.add_theme_color_override("font_color", Color(1, 0.97, 0.9))
+	_label.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.9))
+	_label.add_theme_constant_override("outline_size", 6)
+	layer.add_child(_label)
+
+func status_text() -> String:
+	if island == null:
+		return ""
+	var bw := island.berth_world()
+	var dist := Vector2(ship.global_position.x - bw.x, ship.global_position.z - bw.z).length()
+	var lines := PackedStringArray()
+	if dist < 140.0 or aground:
+		lines.append("under keel %.1f m   shore %d m" % [
+			clearance, roundi(island.shore_distance(ship.global_position.x, ship.global_position.z))])
+	if island.harbor:
+		if moored:
+			lines.append("MOORED - E to cast off" if settle > 0.8 else "Hauling in the lines...")
+		elif dist < 90.0:
+			var s := berth_state()
+			if can_moor():
+				lines.append("E: put the lines ashore")
+			else:
+				var hints := PackedStringArray()
+				if s.speed > moor_max_speed:
+					hints.append("slow down (%.1f m/s)" % s.speed)
+				if absf(s.heading) > moor_max_heading:
+					hints.append("head north")
+				if absf(s.lat) > moor_max_lateral:
+					hints.append("%s the pier" % ("closer to" if s.lat > 0.0 else "away from"))
+				if absf(s.along) > moor_max_along:
+					hints.append("%d m %s" % [roundi(absf(s.along)), "forward" if s.along > 0.0 else "aft"])
+				lines.append("Berth: " + ", ".join(hints) if hints.size() > 0 else "Berth: ease alongside")
+	if _msg_time > 0.0:
+		lines.append(message)
+	return "\n".join(lines)
+
+func _update_label() -> void:
+	_label.text = status_text()

@@ -1,0 +1,39 @@
+
+import bpy, bmesh, os
+from mathutils import Vector
+WORK = os.path.join(os.environ["BRIG_PROJECT"], "tools", "brig_merge"); BASE = os.environ["BRIG_PROJECT"]
+exec(open(os.path.join(WORK, "merge_lib.py")).read(), globals())
+LOG = open(os.path.join(WORK, "stage7_log.txt"), "a", encoding="utf-8")
+def L(m): LOG.write(m + "\n"); LOG.flush(); os.fsync(LOG.fileno())
+O = bpy.data.objects; exp = bpy.data.collections["Brig_Export"]; root = O["Brig"]
+# boxes for the new things (world-space bounding boxes of the source objects), read BEFORE the scene changes
+def wbox(o):
+    ws = [o.matrix_world @ Vector(c) for c in o.bound_box]; return Vector((min(w.x for w in ws), min(w.y for w in ws), min(w.z for w in ws))), Vector((max(w.x for w in ws), max(w.y for w in ws), max(w.z for w in ws)))
+want = ["Bunk_Port", "Bunk_Stbd", "GalleyBarrel", "Pump_Body"] + [n for n in O.keys() if n in ("CabinBookshelf_Frame", "Bookshelf_Frame", "BookshelfFrame", "Shelf_Frame") ]
+boxes = {}
+for n in want:
+    if n in O: boxes[n] = wbox(O[n]); L(f"BOX {n}: {tuple(round(x,2) for x in boxes[n][0])} .. {tuple(round(x,2) for x in boxes[n][1])}")
+    else: L(f"MISSING {n}")
+sh = [n for n in O.keys() if "shelf" in n.lower() and not n.startswith(("Book_", "Src_")) and n not in boxes]
+L(f"other shelf-like objects: {sh}")
+# append the six old collision meshes
+with bpy.data.libraries.load(os.path.join(WORK, "source", "MerchantBrigShipGame_source.blend"), link=False) as (df, dt): dt.objects = [n for n in df.objects if n.startswith("Col_")]
+col_objs = [o for o in dt.objects if o is not None]
+for o in col_objs:
+    exp.objects.link(o); o.parent = root; o.matrix_parent_inverse = o.matrix_parent_inverse.Identity(4)
+    if "cycles" in o.keys(): del o["cycles"]
+    L(f"APPENDED {o.name}: {len(o.data.vertices)} verts")
+ob = next(o for o in col_objs if o.name.startswith("Col_Obstacles"))
+bm = bmesh.new(); bm.from_mesh(ob.data)
+# drop the old centre-line pump boxes (the pump is now a starboard brake pump)
+dead = [v for v in bm.verts if abs(v.co.x) < 0.7 and 2.9 < v.co.y < 4.3 and v.co.z < 3.2]
+bmesh.ops.delete(bm, geom=dead, context='VERTS'); L(f"removed {len(dead)} verts of the old centre pump boxes")
+for n, (lo, hi) in boxes.items():
+    c = (lo + hi) / 2; s = hi - lo
+    r = bmesh.ops.create_cube(bm, size=1.0)
+    for v in r["verts"]: v.co = (v.co.x * s.x + c.x, v.co.y * s.y + c.y, v.co.z * s.z + c.z)
+    L(f"ADDED box {n}: centre {tuple(round(x,2) for x in c)} size {tuple(round(x,2) for x in s)}")
+bm.to_mesh(ob.data); bm.free(); ob.data.update()
+for o in list(bpy.data.objects):
+    if o.name.startswith("Brig") and o.name != "Brig" and o.type == 'EMPTY': bpy.data.objects.remove(o)
+bpy.data.orphans_purge(do_recursive=True); bpy.ops.wm.save_as_mainfile(filepath=os.environ["MERGE_OUT"]); L("SAVED"); L(f"Col_Obstacles now {len(ob.data.vertices)} verts")

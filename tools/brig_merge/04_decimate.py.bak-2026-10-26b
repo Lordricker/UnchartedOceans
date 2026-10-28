@@ -1,0 +1,91 @@
+
+import bpy, bmesh, os, time, math
+WORK = os.path.join(os.environ["BRIG_PROJECT"], "tools", "brig_merge")
+exec(open(os.path.join(WORK, "merge_lib.py")).read(), globals())
+LOG = open(os.path.join(WORK, "stage4_log.txt"), "a", encoding="utf-8")
+def L(m): LOG.write(m + "\n"); LOG.flush(); os.fsync(LOG.fileno())
+OUT = os.environ["MERGE_OUT"]; O = bpy.data.objects
+ROPEM = {"M_Rope_Tar", "M_Rope_Hemp", "M_Rope_Boltrope"}
+# name -> (ratio, symmetric, decimate_ropes_too)
+TARGETS = {"Hull": (0.55, True, False), "Interiors": (0.55, False, False), "DeckFittings": (0.58, False, False), "Rig_Spars": (0.55, False, False),
+           "Rig_Ropes": (0.33, False, True), "Wheel": (0.40, False, False)}
+for i in range(6): TARGETS[f"Gun_{i}"] = (0.42, False, False)
+def tri_of(me): return sum(len(p.vertices) - 2 for p in me.polygons)
+
+# ---- Ropes ----------------------------------------------------------------------------------------------------------
+# COLLAPSE decimation wrecks thin, curved ropes: ratlines, seizings and shroud ends turn into angular, kinked, flattened
+# strips (this was the "crooked ropes" in Godot; Master and the old Game.blend ropes look fine). So the ropes you see from
+# the poop deck (every rope piece whose centre is aft of ROPE_FULL_Y: main mast, shrouds, backstays, spanker) are NOT
+# collapsed. They only lose rings that add nothing (limited dissolve), which keeps every curve (worst case ~0.7 cm off
+# on a 1-3 cm rope). Pieces forward of ROPE_FULL_Y still go through the collapse below.
+# Cost: Rig_Ropes ~14.8k tris -> ~21k. For the whole ship set ROPE_FULL_Y = -999 (~30k tris); to switch it off, set it to 999.
+ROPE_FULL_Y = -999       # 2026-10-26: whole ship (was -3.0 = aft of the foremast only; forward ropes came out crooked)
+ROPE_FULL_ANGLE = 0.6     # degrees: faces flatter than this are merged
+
+def rope_aft_faces(me, ob):
+    """Indices of the faces of every connected rope piece whose centre is aft of ROPE_FULL_Y."""
+    bm = bmesh.new(); bm.from_mesh(me); bm.verts.ensure_lookup_table(); bm.faces.ensure_lookup_table()
+    mw = ob.matrix_world; seen = set(); keep = set()
+    for v0 in bm.verts:
+        if v0.index in seen or not v0.link_faces: continue
+        stack = [v0]; seen.add(v0.index); comp = []
+        while stack:
+            a = stack.pop(); comp.append(a)
+            for e in a.link_edges:
+                b = e.other_vert(a)
+                if b.index not in seen: seen.add(b.index); stack.append(b)
+        if sum((mw @ v.co).y for v in comp) / len(comp) >= ROPE_FULL_Y:
+            for v in comp:
+                for f in v.link_faces: keep.add(f.index)
+    bm.free(); return keep
+
+def rope_dissolve(bm):
+    bmesh.ops.dissolve_limit(bm, angle_limit=math.radians(ROPE_FULL_ANGLE), verts=list(bm.verts), edges=list(bm.edges), use_dissolve_boundaries=False, delimit={'MATERIAL'})
+    bmesh.ops.triangulate(bm, faces=bm.faces[:])
+L(f"=== stage4 start {time.strftime('%H:%M:%S')}")
+# ---------- phase 1: split + attach decimate modifiers (all scene changes happen here) ----------
+jobs = {}; tmp_col = coll("__tmp")
+for name, (ratio, sym, rope_too) in TARGETS.items():
+    ob = O[name]; me0 = ob.data; before = tri_of(me0)
+    rope_idx = {i for i, m in enumerate(me0.materials) if m and m.name in ROPEM} if not rope_too else set()
+    keep_faces = rope_aft_faces(me0, ob) if name == "Rig_Ropes" else None      # rope pieces kept out of the collapse (see ROPE_FULL_Y)
+    parts = []
+    for keep_rope in (False, True):
+        if keep_rope and not rope_idx and not keep_faces: continue
+        m_ = me0.copy(); m_.name = f"__{name}_{'rope' if keep_rope else 'rest'}"
+        bm = bmesh.new(); bm.from_mesh(m_)
+        if keep_faces is not None: dead = [f for f in bm.faces if ((f.index in keep_faces) != keep_rope)]
+        else: dead = [f for f in bm.faces if ((f.material_index in rope_idx) != keep_rope)]
+        if dead: bmesh.ops.delete(bm, geom=dead, context='FACES')
+        bmesh.ops.delete(bm, geom=[v for v in bm.verts if not v.link_faces], context='VERTS')
+        if keep_rope and keep_faces is not None: rope_dissolve(bm)
+        bm.to_mesh(m_); bm.free(); parts.append((keep_rope, m_))
+    rest = next(m for k, m in parts if not k); rope = next((m for k, m in parts if k), None)
+    tmp = bpy.data.objects.new(f"__dec_{name}", rest); tmp_col.objects.link(tmp)
+    md = tmp.modifiers.new("dec", 'DECIMATE'); md.decimate_type = 'COLLAPSE'; md.ratio = ratio; md.use_collapse_triangulate = True
+    if sym: md.use_symmetry = True; md.symmetry_axis = 'X'
+    jobs[name] = {"obj": ob, "tmp": tmp, "rope": rope, "before": before, "ratio": ratio}
+    L(f"PREP {name}: {before} tris, ratio {ratio}, rope-preserved faces={len(rope.polygons) if rope else 0}")
+# ---------- phase 2: evaluate everything (no scene changes between evaluations) ----------
+dg = bpy.context.evaluated_depsgraph_get(); baked = {}
+for name, j in jobs.items():
+    L(f"EVAL {name}"); baked[name] = bpy.data.meshes.new_from_object(j["tmp"].evaluated_get(dg)); L(f"EVAL {name} ok: {tri_of(baked[name])} tris")
+# ---------- phase 3: put the decimated meshes back ----------
+for name, j in jobs.items():
+    bm = bmesh.new(); bm.from_mesh(baked[name])
+    if j["rope"] is not None: bm.from_mesh(j["rope"])
+    ob = j["obj"]; old = ob.data; new = bpy.data.meshes.new(old.name + "_dec"); bm.to_mesh(new); bm.free()
+    for m in old.materials: new.materials.append(m)
+    # material indices of the decimated copy follow the original slot order, so they carry over unchanged
+    for p in new.polygons:
+        if p.material_index >= len(new.materials): p.material_index = 0
+    for pl in new.polygons: pl.use_smooth = True
+    ob.data = new; new.name = old.name
+    L(f"DONE {name}: {j['before']} -> {tri_of(new)} tris ({round(100*tri_of(new)/max(j['before'],1))}%) | mats {[m.name if m else None for m in new.materials][:6]}...")
+for name, j in jobs.items():
+    bpy.data.objects.remove(j["tmp"])
+for m in list(bpy.data.meshes):
+    if m.name.startswith("__") or (m.users == 0 and m.name.endswith("_dec")): bpy.data.meshes.remove(m)
+bpy.data.collections.remove(tmp_col)
+tot = sum(tri_of(o.data) for o in bpy.data.collections["Brig_Export"].all_objects if o.type == 'MESH'); L(f"TOTAL base tris now {tot}")
+bpy.data.orphans_purge(do_recursive=True); bpy.ops.wm.save_as_mainfile(filepath=OUT); L("SAVED " + OUT); L("=== stage4 finished")

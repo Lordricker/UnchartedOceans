@@ -1,0 +1,94 @@
+extends CharacterBody3D
+## First-person walker for testing the ship.
+## WASD move, Shift run, Space jump, mouse look. Esc frees the mouse, click to recapture.
+## Steps up small ledges (coamings, thresholds) automatically up to step_height.
+
+@export var walk_speed := 3.0
+@export var run_speed := 5.5
+@export var jump_velocity := 3.6
+@export var mouse_sensitivity := 0.0025
+@export var accel := 12.0
+@export var step_height := 0.35
+## Standing height in metres. The capsule and eye height follow it (eyes at 93%).
+@export_range(0.8, 2.0, 0.01) var player_height := 1.02
+@export_range(0.15, 0.4, 0.01) var player_radius := 0.22
+
+@onready var head: Node3D = $Head
+var gravity: float = ProjectSettings.get_setting("physics/3d/default_gravity")
+var spawn: Transform3D
+## Optional scripted input for automated tests: Vector2(x, y) like WASD.
+var auto_input := Vector2.ZERO
+var use_auto := false
+
+func _ready() -> void:
+	_apply_height()
+	spawn = global_transform
+	floor_max_angle = deg_to_rad(55.0)   # stair ramps are ~42-49 degrees
+	floor_snap_length = 0.4
+	floor_constant_speed = true
+	floor_stop_on_slope = true
+	if not use_auto:
+		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+
+func _apply_height() -> void:
+	var cs := get_node_or_null("CollisionShape3D") as CollisionShape3D
+	if cs and cs.shape is CapsuleShape3D:
+		var cap := (cs.shape as CapsuleShape3D).duplicate() as CapsuleShape3D
+		cap.radius = player_radius
+		cap.height = player_height
+		cs.shape = cap
+		cs.position = Vector3(0.0, player_height * 0.5, 0.0)
+	head.position = Vector3(0.0, player_height * 0.93, 0.0)
+
+func _unhandled_input(e: InputEvent) -> void:
+	if e is InputEventMouseMotion and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
+		rotate_y(-e.relative.x * mouse_sensitivity)
+		head.rotate_x(-e.relative.y * mouse_sensitivity)
+		head.rotation.x = clamp(head.rotation.x, deg_to_rad(-85.0), deg_to_rad(85.0))
+	elif e is InputEventKey and e.pressed and e.physical_keycode == KEY_ESCAPE:
+		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+	elif e is InputEventMouseButton and e.pressed:
+		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+
+func _key(k: Key) -> float:
+	return 1.0 if Input.is_physical_key_pressed(k) else 0.0
+
+func _physics_process(delta: float) -> void:
+	var on_floor_before := is_on_floor()
+	if not on_floor_before:
+		velocity.y -= gravity * delta
+	elif not use_auto and Input.is_physical_key_pressed(KEY_SPACE):
+		velocity.y = jump_velocity
+	var input := auto_input if use_auto else Vector2(_key(KEY_D) - _key(KEY_A), _key(KEY_S) - _key(KEY_W))
+	var dir := global_transform.basis * Vector3(input.x, 0.0, input.y)
+	dir.y = 0.0
+	if dir.length() > 0.0:
+		dir = dir.normalized()
+	var speed := run_speed if (not use_auto and Input.is_physical_key_pressed(KEY_SHIFT)) else walk_speed
+	var target := dir * speed
+	velocity.x = move_toward(velocity.x, target.x, accel * speed * delta)
+	velocity.z = move_toward(velocity.z, target.z, accel * speed * delta)
+	move_and_slide()
+	if dir != Vector3.ZERO and on_floor_before and is_on_wall():
+		_try_step_up(dir, speed, delta)
+	if global_position.y < -10.0:
+		global_transform = spawn
+		velocity = Vector3.ZERO
+
+func _try_step_up(dir: Vector3, speed: float, delta: float) -> void:
+	var start := global_transform
+	var up := up_direction * step_height
+	if test_move(start, up):
+		return                                   # no headroom
+	var raised := start.translated(up)
+	var probe: Vector3 = dir * maxf(0.12, speed * delta)
+	if test_move(raised, probe):
+		return                                   # still blocked: it's a wall, not a step
+	var ahead := raised.translated(probe)
+	var col := KinematicCollision3D.new()
+	if not test_move(ahead, -up * 1.05, col):
+		return                                   # nothing to stand on
+	if col.get_normal().angle_to(up_direction) > floor_max_angle:
+		return
+	global_position = ahead.origin + col.get_travel()
+	apply_floor_snap()

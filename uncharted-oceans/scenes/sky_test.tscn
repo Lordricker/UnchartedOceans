@@ -1,0 +1,31 @@
+[gd_scene format=3]
+
+[ext_resource type="Script" path="res://scripts/sky_test.gd" id="1_test"]
+[ext_resource type="Script" path="res://scripts/sky_system.gd" id="2_sky"]
+[ext_resource type="PackedScene" uid="uid://d2usvdb32io83" path="res://assets/ships/brig/Brig.glb" id="3_brig"]
+
+[sub_resource type="Environment" id="Env"]
+background_mode = 2
+
+[node name="SkyTest" type="Node3D"]
+script = ExtResource("1_test")
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+environment = SubResource("Env")
+
+[node name="Sun" type="DirectionalLight3D" parent="."]
+shadow_enabled = true
+directional_shadow_max_distance = 150.0
+
+[node name="SkySystem" type="Node" parent="."]
+script = ExtResource("2_sky")
+world_environment = NodePath("../WorldEnvironment")
+sun = NodePath("../Sun")
+
+[node name="Brig" parent="." instance=ExtResource("3_brig")]
+transform = Transform3D(-1, 0, 2.5351817e-06, 0, 1, 0, -2.5351817e-06, 0, -1, 0, 0, 0)
+
+[node name="Camera3D" type="Camera3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1.3, 3.5, -3.2)
+current = true
+far = 60000.0

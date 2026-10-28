@@ -14,3 +14,10 @@ export_credentials.cfg
 .mono/
 data_*/
 mono_crash.*.json
+
+# Blender auto-backups
+*.blend1
+
+# brig merge pipeline: generated intermediates and the scratch folder
+_to_delete/
+tools/brig_merge/out/

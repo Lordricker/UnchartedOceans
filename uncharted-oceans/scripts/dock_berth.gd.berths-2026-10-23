@@ -1,0 +1,173 @@
+class_name DockBerth
+extends Node3D
+## One berth on a pier. Put one beside each place a ship can lie.
+##
+## Its frame: the origin is the point on the pier's face at the middle of the berth (at sea level).
+## Local +X points away from the pier, which is the docked ship's starboard side (the ships lie port side to
+## the pier). Local -Z is the way the docked ship points. berth_heading sets that turn, in ship heading
+## degrees (0 = north, 90 = west).
+##
+## A glowing rectangle on the water shows the docking zone. It is sized for the ship that is sailing
+## (ShipClasses), always quite a bit bigger than the hull, and appears as the ship comes near. It is amber
+## until the ship is inside it, slow enough and lined up (green: press E, ship_harbor.gd). Once the ship is
+## moored it fades out. ship_harbor.gd drives the docking itself; this node does the geometry and the light.
+
+## Biggest ship class this berth takes (ShipClasses.Size). Smaller ships fit too.
+@export_enum("Small", "Medium", "Large") var max_ship_class := 1
+## Gap kept between the hull and the pier's face (the fenders), metres.
+@export var gap := 0.25
+@export_range(0.0, 360.0) var berth_heading := 0.0
+## The light shows up inside this distance (m) and fades in over the outer 40 m.
+@export var show_distance := 130.0
+
+var _mesh: MeshInstance3D
+var _mat: ShaderMaterial
+var _plane: PlaneMesh
+var _fade := 0.0
+var _ready_amt := 0.0
+var _want_fade := 0.0
+var _want_ready := 0.0
+var _zone_class := -1
+var _ocean: Ocean
+var _ocean_searched := false
+
+const SHADER := """
+shader_type spatial;
+render_mode unshaded, blend_add, cull_disabled, depth_draw_never, shadows_disabled;
+uniform vec2 size = vec2(14.0, 30.0);
+uniform vec3 tint : source_color = vec3(1.0, 0.78, 0.3);
+uniform vec3 ready_tint : source_color = vec3(0.35, 1.0, 0.5);
+uniform float strength = 1.0;
+uniform float ready_amt = 0.0;
+varying vec2 p;
+void vertex() {
+	p = (UV - 0.5) * size;
+}
+void fragment() {
+	vec2 hs = size * 0.5;
+	float d = min(hs.x - abs(p.x), hs.y - abs(p.y));        // metres to the nearest edge
+	float edge = (1.0 - smoothstep(0.22, 0.42, d)) * step(0.0, d);
+	float glow = exp(-max(d, 0.0) * 0.9) * 0.28;
+	// chevrons pointing the way the ship should face (-Z), drifting forward
+	float t = (p.y - 0.9 * abs(p.x)) / 3.2 + TIME * 0.35;
+	float line = 1.0 - smoothstep(0.0, 0.09, abs(fract(t) - 0.5));
+	line *= smoothstep(0.8, 3.0, d) * 0.28;
+	float pulse = 0.88 + 0.12 * sin(TIME * 2.2);
+	vec3 col = mix(tint, ready_tint, ready_amt);
+	float a = (edge + glow + 0.05 + line) * pulse * strength;
+	ALBEDO = col;
+	ALPHA = clamp(a, 0.0, 1.0);
+}
+"""
+
+func _ready() -> void:
+	add_to_group("dock_berths")
+	rotation.y = deg_to_rad(berth_heading)
+	_plane = PlaneMesh.new()
+	_mat = ShaderMaterial.new()
+	var sh := Shader.new()
+	sh.code = SHADER
+	_mat.shader = sh
+	_mat.render_priority = 64        # the sea is see-through too: draw the light after it, on top
+	_mesh = MeshInstance3D.new()
+	_mesh.name = "DockZoneLight"
+	_mesh.mesh = _plane
+	_mesh.material_override = _mat
+	_mesh.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_mesh.extra_cull_margin = 60.0
+	_mesh.visible = false
+	add_child(_mesh)
+
+# ------------------------------------------------------------------ geometry (world xz)
+
+func forward2() -> Vector2:
+	var y := deg_to_rad(berth_heading)
+	return Vector2(-sin(y), -cos(y))
+
+func right2() -> Vector2:
+	var y := deg_to_rad(berth_heading)
+	return Vector2(cos(y), -sin(y))
+
+## Where the docked ship's origin rests, for a ship of this class.
+func slot_position(cls: int) -> Vector3:
+	var d := ShipClasses.data(cls)
+	var r := right2() * (float(d.beam) * 0.5 + gap)
+	return global_position + Vector3(r.x, 0.0, r.y)
+
+## How a ship stands against the berth. lat / along are the centre's offsets from the slot (m):
+## lat > 0 = too far from the pier, along > 0 = too far aft (still has to go forward).
+## out_lat / out_fwd are how far the hull sticks out of the light sideways / lengthways (<= 0 = inside).
+func evaluate(ship_pos: Vector3, heading_deg: float, speed: float, cls: int) -> Dictionary:
+	var d := ShipClasses.data(cls)
+	var zone := ShipClasses.zone_size(cls)
+	var slot := slot_position(cls)
+	var f2 := forward2()
+	var r2 := right2()
+	var rel := Vector2(ship_pos.x - slot.x, ship_pos.z - slot.z)
+	var lat := rel.dot(r2)
+	var along := -rel.dot(f2)
+	var dh := fposmod(heading_deg - berth_heading + 180.0, 360.0) - 180.0
+	# the hull as a rectangle: are all four corners inside the light?
+	var h := deg_to_rad(heading_deg)
+	var sf := Vector2(-sin(h), -cos(h))
+	var sr := Vector2(cos(h), -sin(h))
+	var hb := float(d.beam) * 0.5
+	var hl := float(d.length) * 0.5
+	var out_lat := -1.0e9
+	var out_fwd := -1.0e9
+	for sx: float in [-1.0, 1.0]:
+		for sz: float in [-1.0, 1.0]:
+			var c: Vector2 = Vector2(ship_pos.x, ship_pos.z) + sr * (sx * hb) + sf * (sz * hl) - Vector2(slot.x, slot.z)
+			out_lat = maxf(out_lat, absf(c.dot(r2)) - zone.x * 0.5)
+			out_fwd = maxf(out_fwd, absf(c.dot(f2)) - zone.y * 0.5)
+	var inside := out_lat <= 0.0 and out_fwd <= 0.0
+	var speed_ok := speed <= float(d.max_speed)
+	var heading_ok := absf(dh) <= float(d.max_heading)
+	return {
+		"lat": lat, "along": along, "heading": dh, "speed": speed,
+		"out_lat": out_lat, "out_fwd": out_fwd,
+		"inside": inside, "speed_ok": speed_ok, "heading_ok": heading_ok,
+		"max_speed": float(d.max_speed), "max_heading": float(d.max_heading),
+		"ok": inside and speed_ok and heading_ok,
+	}
+
+# ------------------------------------------------------------------ the light
+
+## Called every physics tick by ship_harbor.gd. ready = the ship could moor right now.
+func set_light(ship_pos: Vector3, cls: int, can_dock: bool, moored: bool) -> void:
+	var slot := slot_position(cls)
+	var dist := Vector2(ship_pos.x - slot.x, ship_pos.z - slot.z).length()
+	var fits := cls <= max_ship_class
+	if moored or not fits:
+		_want_fade = 0.0
+	else:
+		_want_fade = clampf((show_distance - dist) / 40.0, 0.0, 1.0)
+	_want_ready = 1.0 if can_dock else 0.0
+	if cls != _zone_class:
+		_zone_class = cls
+		var z := ShipClasses.zone_size(cls)
+		_plane.size = z
+		_mat.set_shader_parameter("size", z)
+
+## Only the nearest berth shows its light; ship_harbor.gd tells the others to go dark.
+func hide_light() -> void:
+	_want_fade = 0.0
+	_want_ready = 0.0
+
+func _process(delta: float) -> void:
+	_fade = move_toward(_fade, _want_fade, delta * 1.5)
+	_ready_amt = move_toward(_ready_amt, _want_ready, delta * 4.0)
+	_mesh.visible = _fade > 0.01 and _zone_class >= 0
+	if not _mesh.visible:
+		return
+	_mat.set_shader_parameter("strength", _fade)
+	_mat.set_shader_parameter("ready_amt", _ready_amt)
+	# ride just above the water at the middle of the rectangle
+	if _ocean == null and not _ocean_searched:
+		_ocean_searched = true
+		var found := get_tree().root.find_children("*", "Ocean", true, false)
+		if found.size() > 0:
+			_ocean = found[0] as Ocean
+	var c := slot_position(_zone_class)
+	var y := (_ocean.get_height(c.x, c.z) if _ocean else 0.0) + 0.2
+	_mesh.global_position = Vector3(c.x, y, c.z)

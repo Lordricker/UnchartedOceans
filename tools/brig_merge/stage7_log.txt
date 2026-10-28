@@ -1,0 +1,22 @@
+BOX Bunk_Port: (-2.52, 6.46, -0.6) .. (-1.06, 8.57, 0.15)
+BOX Bunk_Stbd: (1.05, 6.47, -0.6) .. (2.5, 8.58, 0.15)
+BOX GalleyBarrel: (0.95, -6.08, -0.6) .. (1.35, -5.68, -0.04)
+BOX Pump_Body: (0.41, 1.47, -0.56) .. (0.99, 1.82, 2.84)
+BOX CabinBookshelf_Frame: (0.12, 5.28, 2.15) .. (1.16, 5.61, 3.55)
+other shelf-like objects: ['CabinBookshelf']
+APPENDED Col_Walls-colonly: 1571 verts
+APPENDED Col_Stairs-colonly: 48 verts
+APPENDED Col_Railings-colonly: 2396 verts
+APPENDED Col_Obstacles-colonly: 232 verts
+APPENDED Col_HullShape-convcolonly: 114 verts
+APPENDED Col_Floors-colonly: 604 verts
+removed 16 verts of the old centre pump boxes
+ADDED box Bunk_Port: centre (-1.79, 7.52, -0.23) size (1.46, 2.11, 0.75)
+ADDED box Bunk_Stbd: centre (1.77, 7.52, -0.23) size (1.45, 2.11, 0.75)
+ADDED box GalleyBarrel: centre (1.15, -5.88, -0.32) size (0.4, 0.4, 0.56)
+ADDED box Pump_Body: centre (0.7, 1.64, 1.14) size (0.58, 0.35, 3.4)
+ADDED box CabinBookshelf_Frame: centre (0.64, 5.44, 2.85) size (1.04, 0.32, 1.4)
+RAMP cabin door: x -1.96..-0.94  y 4.4..5.25  z 1.760 -> 2.16
+RAMP poop stair foot: x 1.86..2.8  y 4.15..5.33  z 1.727 -> 2.285
+SAVED
+Col_Obstacles now 256 verts

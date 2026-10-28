@@ -1,0 +1,142 @@
+@tool
+extends EditorScenePostImport
+## Post-import script for Brig.glb (exported from MerchantBrigShipmerge.blend).
+## Godot 4.3+ (reads glTF "extras" that Godot stores as node metadata).
+## Use: select Brig.glb in the FileSystem dock > Import tab > Import Script = this file > Reimport.
+##
+## Driven by Blender custom properties exported as glTF extras:
+##   vis_begin / vis_end   -> GeometryInstance3D visibility range (HLOD + interior culling)
+##   game_role             -> groups: sails, flags, yards, guns, doors, wheel, rudder, lod, interior,
+##                            hammock_sets, hammocks, hammock_slots, stations, sink_checks, camera_markers (others: role_<name>)
+##   interaction           -> group "interactable" + meta "interaction" (e.g. "provisions")
+##   godot_energy/_range/_shadow on lights
+## Collision: Godot turns "-colonly"/"-convcolonly" meshes into StaticBody3D nodes; this script
+## moves those shapes into two moving bodies so they ride with the ship:
+##   ShipBody (AnimatableBody3D, layer 1)  floors, stairs, walls, railings, obstacles (walkable decks)
+##   HullBody (AnimatableBody3D, layer 2)  convex hull for ship-vs-ship / shot / water queries
+
+const FADE := 6.0
+const LAYER_DECKS := 1
+const LAYER_HULL := 2
+
+func _post_import(scene: Node) -> Object:
+	var statics: Array[StaticBody3D] = []
+	for n in _all(scene):
+		var ex: Dictionary = _extras(n)
+		var role := str(ex.get("game_role", ""))
+
+		if n is GeometryInstance3D and (ex.has("vis_begin") or ex.has("vis_end")):
+			var g := n as GeometryInstance3D
+			var b := float(ex.get("vis_begin", 0.0))
+			var e := float(ex.get("vis_end", 0.0))
+			g.visibility_range_begin = b
+			g.visibility_range_begin_margin = FADE if b > 0.0 else 0.0
+			g.visibility_range_end = e
+			g.visibility_range_end_margin = FADE if e > 0.0 else 0.0
+			g.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
+
+		match role:
+			"sail":
+				n.add_to_group("sails", true)
+				_no_vertex_albedo(n)
+			"flag":
+				n.add_to_group("flags", true)
+				_no_vertex_albedo(n)
+			"yard": n.add_to_group("yards", true)
+			"gun": n.add_to_group("guns", true)
+			"door": n.add_to_group("doors", true)
+			"wheel": n.add_to_group("wheel", true)
+			"rudder": n.add_to_group("rudder", true)
+			"interior": n.add_to_group("interior", true)
+			"lod": n.add_to_group("lod", true)
+			# --- roles added by the 2026-10 brig merge ---
+			"hammock_set": n.add_to_group("hammock_sets", true)       # one 3-hammock module, show/hide per crew slot
+			"hammock": n.add_to_group("hammocks", true)               # pivot per hammock (swing about local Y)
+			"hammock_slot": n.add_to_group("hammock_slots", true)     # marker: where a module goes (extras: slot_index, side, hammocks)
+			"station": n.add_to_group("stations", true)               # sailor / gun / pump work spots
+			"sink_check": n.add_to_group("sink_checks", true)         # rail-top markers (extras: trigger_seconds, rule)
+			"camera_marker": n.add_to_group("camera_markers", true)   # CamPos_* / CamTarget_* pairs
+			"collision", "ship_root", "static", "":
+				pass
+			_:
+				n.add_to_group("role_" + role, true)                  # any future role is still findable
+
+		if ex.has("interaction"):
+			n.add_to_group("interactable", true)
+			n.set_meta("interaction", ex["interaction"])
+
+		if n is OmniLight3D:
+			var l := n as OmniLight3D
+			if ex.has("godot_energy"): l.light_energy = float(ex["godot_energy"])
+			if ex.has("godot_range"): l.omni_range = float(ex["godot_range"])
+			l.shadow_enabled = bool(ex.get("godot_shadow", false))
+			l.distance_fade_enabled = true
+			l.distance_fade_begin = 40.0
+			l.distance_fade_length = 10.0
+
+		if n is StaticBody3D:
+			statics.append(n as StaticBody3D)
+
+	if statics.size() > 0:
+		var deck_body := _body("ShipBody", LAYER_DECKS)
+		var hull_body := _body("HullBody", LAYER_HULL)
+		scene.add_child(deck_body); deck_body.owner = scene
+		scene.add_child(hull_body); hull_body.owner = scene
+		for sb in statics:
+			var group := String(sb.name).get_slice("-", 0)
+			var target := hull_body if group.begins_with("Col_HullShape") else deck_body
+			var xf := _xf_to(sb, scene)
+			for c in sb.get_children():
+				if c is CollisionShape3D:
+					var cs := c as CollisionShape3D
+					cs.owner = null
+					sb.remove_child(cs)
+					target.add_child(cs)
+					cs.owner = scene
+					cs.transform = xf * cs.transform
+					cs.name = group
+					cs.set_meta("collision_group", group)
+					if cs.shape is ConcavePolygonShape3D:
+						(cs.shape as ConcavePolygonShape3D).backface_collision = true
+			sb.get_parent().remove_child(sb)
+			sb.free()
+	return scene
+
+func _body(body_name: String, layer: int) -> AnimatableBody3D:
+	var b := AnimatableBody3D.new()
+	b.name = body_name
+	# off: the ship is moved through its parent rig, and sync_to_physics only follows
+	# the body's own local transform (the collision would stay behind)
+	b.sync_to_physics = false
+	b.collision_layer = 1 << (layer - 1)
+	b.collision_mask = 0
+	return b
+
+func _extras(n: Node) -> Dictionary:
+	if n.has_meta("extras"):
+		var e = n.get_meta("extras")
+		if e is Dictionary: return e
+	return {}
+
+func _no_vertex_albedo(n: Node) -> void:
+	if not (n is MeshInstance3D): return
+	var mesh := (n as MeshInstance3D).mesh
+	if mesh == null: return
+	for i in mesh.get_surface_count():
+		var m := mesh.surface_get_material(i)
+		if m is BaseMaterial3D:
+			(m as BaseMaterial3D).vertex_color_use_as_albedo = false
+
+func _xf_to(n: Node3D, root: Node) -> Transform3D:
+	var xf := Transform3D.IDENTITY
+	var cur: Node = n
+	while cur != null and cur != root:
+		if cur is Node3D: xf = (cur as Node3D).transform * xf
+		cur = cur.get_parent()
+	return xf
+
+func _all(n: Node) -> Array[Node]:
+	var out: Array[Node] = [n]
+	for c in n.get_children():
+		out.append_array(_all(c))
+	return out

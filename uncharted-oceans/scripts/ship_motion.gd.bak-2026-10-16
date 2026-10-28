@@ -1,0 +1,63 @@
+extends Node3D
+## Gentle roll / pitch / heave so we can test walking on a moving deck.
+## Press R in game to toggle. The deck collision (ShipBody, an AnimatableBody3D)
+## follows this node, so the player is carried along.
+## Also feeds the sea shader the ship transform so no water is drawn inside the hull.
+
+@export var rolling := false
+@export var roll_deg := 6.0
+@export var roll_period := 9.0
+@export var pitch_deg := 2.0
+@export var pitch_period := 7.0
+@export var heave_m := 0.35
+@export var heave_period := 5.5
+@export var sea_path: NodePath
+@export var ship_path: NodePath = ^"Brig"
+
+var t := 0.0
+var amount := 0.0
+var _sea_mat: ShaderMaterial
+var _ship: Node3D
+
+func _ready() -> void:
+	_ship = get_node_or_null(ship_path)
+	var sea := get_node_or_null(sea_path) as MeshInstance3D
+	if sea and _ship:
+		_sea_mat = sea.get_surface_override_material(0) as ShaderMaterial
+		var ex := _find_waterline(_ship)
+		if _sea_mat and not ex.is_empty():
+			var hb := PackedFloat32Array(ex["waterline_half_beam"])
+			_sea_mat.set_shader_parameter("half_beam", hb)
+			_sea_mat.set_shader_parameter("sample_count", hb.size())
+			_sea_mat.set_shader_parameter("y_min", float(ex["waterline_y_min"]))
+			_sea_mat.set_shader_parameter("y_step", float(ex["waterline_y_step"]))
+		elif ex.is_empty():
+			push_warning("ship_motion: no waterline data found on the ship; sea will show inside the hull")
+
+func _find_waterline(n: Node) -> Dictionary:
+	if n.has_meta("extras"):
+		var e = n.get_meta("extras")
+		if e is Dictionary and e.has("waterline_half_beam"):
+			return e
+	for c in n.get_children():
+		var r := _find_waterline(c)
+		if not r.is_empty():
+			return r
+	return {}
+
+func _unhandled_input(e: InputEvent) -> void:
+	if e is InputEventKey and e.pressed and not e.echo and e.physical_keycode == KEY_R:
+		rolling = not rolling
+
+func _physics_process(delta: float) -> void:
+	amount = move_toward(amount, 1.0 if rolling else 0.0, delta * 0.3)   # ease in/out
+	t += delta
+	rotation = Vector3(
+		deg_to_rad(pitch_deg) * sin(TAU * t / pitch_period) * amount,
+		0.0,
+		deg_to_rad(roll_deg) * sin(TAU * t / roll_period) * amount)
+	position.y = heave_m * sin(TAU * t / heave_period) * amount
+
+func _process(_delta: float) -> void:
+	if _sea_mat and _ship:
+		_sea_mat.set_shader_parameter("ship_inv", Projection(_ship.global_transform.affine_inverse()))

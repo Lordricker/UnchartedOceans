@@ -1,0 +1,86 @@
+extends Label
+## Corner readout for performance tests: FPS, frame time, sea state and the keys.
+## C cycles the frame cap (60 / 120 / uncapped / 30). The default cap is set in Project
+## Settings > Application > Run > Max FPS.
+
+@export var ocean_path: NodePath = ^"../../Ocean"
+@export var ship_path: NodePath = ^"../../ShipRig"
+
+var _ocean: Ocean
+var _ship: Node
+var _flood: ShipFlooding
+const CAPS := [60, 120, 0, 30]
+
+var _hint: Label
+
+func _ready() -> void:
+	# hidden until you press H; a small reminder sits in the bottom left
+	visible = false
+	Engine.set_meta("debug_ui", false)       # the other on-screen readouts (ship_wheel, ship_sails, ship_harbor, world_hud) follow this
+	var layer := CanvasLayer.new()
+	layer.layer = 4
+	_hint = Label.new()
+	_hint.text = "H  debug"
+	_hint.set_anchors_and_offsets_preset(Control.PRESET_BOTTOM_LEFT)
+	_hint.offset_left = 14.0
+	_hint.offset_top = -34.0
+	_hint.modulate = Color(1, 1, 1, 0.55)
+	_hint.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_hint.add_theme_font_size_override("font_size", 14)
+	_hint.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.9))
+	_hint.add_theme_constant_override("outline_size", 4)
+	layer.add_child(_hint)
+	get_tree().root.add_child.call_deferred(layer)
+	_ocean = get_node_or_null(ocean_path) as Ocean
+	_ship = get_node_or_null(ship_path)
+	RenderingServer.viewport_set_measure_render_time(get_viewport().get_viewport_rid(), true)
+
+func _process(_delta: float) -> void:
+	var fps := Engine.get_frames_per_second()
+	var sea := "?"
+	if _ocean:
+		sea = ["calm", "moderate", "rough", "storm"][_ocean.sea_state]
+		if _ocean.storm_note != "":
+			sea += "  (" + _ocean.storm_note + ")"
+	var ahead := "stopped"
+	if _ship and _ship.get("underway"):
+		ahead = "test engine"
+	var vp := get_viewport().get_viewport_rid()
+	var gpu := RenderingServer.viewport_get_measured_render_time_gpu(vp)
+	var cpu := RenderingServer.viewport_get_measured_render_time_cpu(vp)
+	var vsync := "on" if DisplayServer.window_get_vsync_mode() != DisplayServer.VSYNC_DISABLED else "off"
+	var cap := "uncapped" if Engine.max_fps == 0 else "%d" % Engine.max_fps
+	text = "%d fps  (cap %s)   GPU %.2f ms   render CPU %.2f ms   vsync %s\nsea: %s   ship: %s\n1-4 wind/sea by hand (4 only away from ports)   \\ back to the weather   F test engine   R waves on/off   C frame cap   H hide" % [
+		fps, cap, gpu, cpu, vsync, sea, ahead]
+	var sl := get_tree().get_first_node_in_group("ship_sails")
+	if sl and sl.has_method("status_text"):
+		text += "\n" + sl.status_text()
+	var an := get_tree().get_first_node_in_group("ship_anchor")
+	if an and an.has_method("status_text"):
+		text += "\n" + an.status_text()
+	var wx := get_tree().get_first_node_in_group("weather")
+	if wx and wx.has_method("status_text"):
+		text += "\n" + wx.status_text()
+	var amb := get_tree().get_first_node_in_group("ambience")
+	if amb and amb.has_method("status_text"):
+		text += "\n" + amb.status_text()
+	var pl := get_tree().get_first_node_in_group("player")
+	if pl and pl.has_method("state_text"):
+		text += "\nplayer: " + pl.state_text()
+	if _flood == null:
+		_flood = get_tree().get_first_node_in_group("ship_flooding") as ShipFlooding
+	if _flood:
+		text += "\nhold water %.1f m³ (%.1f t)   holes %d   pumps %s   flood sim %.2f ms\nLeft click punch hole   Right click plug   P pumps   Backspace drain + clear   G grid view" % [
+			_flood.water_volume, _flood.water_volume * 1.025, _flood.hole_count(),
+			"on" if _flood.pumps_on else "off", _flood.last_sim_ms]
+		if _flood.status != "":
+			text += "\n> " + _flood.status
+
+func _unhandled_input(e: InputEvent) -> void:
+	if e is InputEventKey and e.pressed and not e.echo and e.physical_keycode == KEY_H:
+		visible = not visible
+		Engine.set_meta("debug_ui", visible)
+		_hint.text = "H  hide debug" if visible else "H  debug"
+	elif e is InputEventKey and e.pressed and not e.echo and e.physical_keycode == KEY_C:
+		var i := CAPS.find(Engine.max_fps)
+		Engine.max_fps = CAPS[(i + 1) % CAPS.size()]

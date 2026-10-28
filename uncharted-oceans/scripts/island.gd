@@ -1,0 +1,576 @@
+class_name Island
+extends Node3D
+## A test island built from a generated heightmap: coastlines only, no real interior.
+##
+## One heightmap (metres above/below sea level, sea floor included) drives everything:
+##  - the render mesh (island.gdshader colours it by height and slope),
+##  - a coarse trimesh collider (only the part near the water line),
+##  - a float texture the ocean shader reads: R = height, G = wave shelter (1 = open sea,
+##    low inside the harbour), B = signed shore distance (+ water, - land),
+##  - height_at() / depth_at() / wave_scale() / shore_distance() for gameplay (ocean.gd uses
+##    wave_scale() so the waves shoal and the ship still rides what you see; ship_harbor.gd
+##    uses height_at() for running aground).
+## Also builds a cove with a pier, bollards and fenders on the south coast, and a few trees.
+##
+## Don't rotate this node (the ocean shader and the lookups assume the heightmap is axis aligned).
+## Layout: island-local +X east, -Z north, +Z south. The pier runs north-south on the south coast.
+
+const LAYER_BIT := 1 << 3        ## physics layer 4: island terrain, pier, gangway
+const DEEP := 28.0               ## sea floor depth far from the island (m)
+const SHOAL_DEPTH := 12.0        ## waves are full size at this depth and deeper
+const SHOAL_POW := 0.6           ## how fast they shrink toward the shore
+
+@export var domain_size := 400.0
+@export var cells := 200
+@export var island_radius := 100.0
+@export var peak_height := 18.0
+@export var coast_wobble := 0.30
+@export var island_seed := 11
+@export var trees := true
+@export var tree_count := 260
+@export var ocean_path: NodePath = ^"../Ocean"
+@export_group("Harbor")
+@export var harbor := true
+@export var pier_x := 0.0                    ## island-local x of the pier's centre line
+@export var pier_width := 4.5
+@export var pier_length := 30.0
+@export var pier_deck_y := 1.85              ## deck height above sea level (the brig's main deck is 1.8)
+@export var bay_depth := 4.5                 ## dredged depth in the cove (the brig draws about 2.3 m)
+@export var bay_center := Vector2(22.0, 8.0) ## relative to (pier_x, raw shoreline z at pier_x)
+@export var bay_radius := Vector2(36.0, 50.0)
+@export var ship_half_beam := 3.5
+@export var fender_gap := 0.25
+
+## Set by _ready(): ocean shader inputs and harbour geometry (island-local).
+var texture: ImageTexture
+var pier_z0 := 0.0          ## land end of the pier
+var pier_z1 := 0.0          ## sea end
+var berth_local := Vector3.ZERO    ## where the ship's origin rests when moored (island-local, y = 0)
+var bay_c := Vector2.ZERO
+
+var _res := 200
+var _cell := 2.0
+var _half := 200.0
+var _h := PackedFloat32Array()
+var _g := PackedFloat32Array()
+var _sd := PackedFloat32Array()
+var _nc: FastNoiseLite
+var _nl: FastNoiseLite
+var _nh: FastNoiseLite
+var _terrain_mat: ShaderMaterial
+
+func _ready() -> void:
+	add_to_group("islands")
+	_setup_noise()
+	_generate()
+	_build_texture()
+	_build_mesh()
+	_build_collision()
+	if trees:
+		_build_trees()
+	if harbor:
+		_build_pier()
+	var oc := get_node_or_null(ocean_path)
+	if oc and oc.has_method("register_island"):
+		oc.register_island(self)
+
+# ---------------------------------------------------------------- queries (world space)
+
+## Sea floor / ground height at world (x, z): negative under water.
+func height_at(x: float, z: float) -> float:
+	return _sample(_h, x, z, -DEEP)
+
+## Water depth (0 on land).
+func depth_at(x: float, z: float) -> float:
+	return maxf(-height_at(x, z), 0.0)
+
+## Signed distance to the shoreline in metres: positive over water, negative on land.
+func shore_distance(x: float, z: float) -> float:
+	return _sample(_sd, x, z, 200.0)
+
+## Multiplier for the wave height here: shoaling (shallower = smaller) times harbour shelter.
+## Same maths as the ocean shader.
+func wave_scale(x: float, z: float) -> float:
+	var d := clampf(-_sample(_h, x, z, -DEEP) / SHOAL_DEPTH, 0.0, 1.0)
+	return pow(d, SHOAL_POW) * _sample(_g, x, z, 1.0)
+
+## Upward normal of the ground at world (x, z).
+func normal_at(x: float, z: float) -> Vector3:
+	var e := _cell
+	var dx := height_at(x + e, z) - height_at(x - e, z)
+	var dz := height_at(x, z + e) - height_at(x, z - e)
+	return Vector3(-dx, 2.0 * e, -dz).normalized()
+
+func berth_world() -> Vector3:
+	return global_position + berth_local
+
+## The pier's footprint in world xz: Rect2(position = (x, z) of the north-west corner, size).
+func pier_rect_world() -> Rect2:
+	var p := global_position
+	return Rect2(Vector2(p.x + pier_x - pier_width * 0.5, p.z + pier_z0), Vector2(pier_width, pier_z1 - pier_z0))
+
+## World positions of the four mooring bollards, from north to south.
+func bollards_world() -> PackedVector3Array:
+	var out := PackedVector3Array()
+	var x := pier_x + pier_width * 0.5 - 0.35
+	for dz in [-9.0, -3.0, 3.0, 9.0]:
+		out.append(global_position + Vector3(x, pier_deck_y + 0.5, berth_local.z + dz))
+	return out
+
+func _sample(arr: PackedFloat32Array, x: float, z: float, outside: float) -> float:
+	var fx := (x - global_position.x + _half) / _cell
+	var fz := (z - global_position.z + _half) / _cell
+	if fx < 0.0 or fz < 0.0 or fx > _res or fz > _res:
+		return outside
+	var i := mini(int(fx), _res - 1)
+	var j := mini(int(fz), _res - 1)
+	var tx := fx - i
+	var tz := fz - j
+	var w := _res + 1
+	var a := arr[j * w + i]
+	var b := arr[j * w + i + 1]
+	var c := arr[(j + 1) * w + i]
+	var d := arr[(j + 1) * w + i + 1]
+	return lerpf(lerpf(a, b, tx), lerpf(c, d, tx), tz)
+
+# ---------------------------------------------------------------- generation
+
+func _setup_noise() -> void:
+	_nc = FastNoiseLite.new()
+	_nc.seed = island_seed
+	_nc.frequency = 0.011
+	_nc.fractal_octaves = 3
+	_nl = FastNoiseLite.new()
+	_nl.seed = island_seed + 1
+	_nl.frequency = 0.0045
+	_nh = FastNoiseLite.new()
+	_nh.seed = island_seed + 2
+	_nh.frequency = 0.022
+	_nh.fractal_octaves = 3
+
+func _raw_height(x: float, z: float) -> float:
+	var d := Vector2(x, z).length() / island_radius
+	var n := _nc.get_noise_2d(x, z) * coast_wobble + _nl.get_noise_2d(x + 300.0, z) * 0.25
+	var m := 1.0 - (d + n)
+	if m > 0.0:
+		var land := peak_height * pow(m, 1.3)
+		var hills := _nh.get_noise_2d(x, z) * 5.0 * smoothstep(0.12, 0.4, m) * m
+		return land + hills
+	# sea floor: a gentle shelf (about 1:11 near the beach) that steepens, capped at DEEP
+	var s := -m * island_radius
+	return -minf(0.09 * s + 0.0009 * s * s, DEEP)
+
+## First z (scanning north from the south edge) where the raw ground is above water, at x.
+func _raw_shore_z(x: float) -> float:
+	var z := _half - 1.0
+	while z > -_half:
+		if _raw_height(x, z) > 0.0:
+			return z
+		z -= 0.5
+	return 0.0
+
+func _grid_shore_z(x: float) -> float:
+	var z := _half - 1.0
+	while z > -_half:
+		if _sample_local(_h, x, z) > 0.0:
+			return z
+		z -= 0.5
+	return 0.0
+
+func _sample_local(arr: PackedFloat32Array, x: float, z: float) -> float:
+	var fx := clampf((x + _half) / _cell, 0.0, _res - 0.001)
+	var fz := clampf((z + _half) / _cell, 0.0, _res - 0.001)
+	var i := int(fx)
+	var j := int(fz)
+	var tx := fx - i
+	var tz := fz - j
+	var w := _res + 1
+	return lerpf(lerpf(arr[j * w + i], arr[j * w + i + 1], tx),
+		lerpf(arr[(j + 1) * w + i], arr[(j + 1) * w + i + 1], tx), tz)
+
+func _generate() -> void:
+	_res = cells
+	_cell = domain_size / cells
+	_half = domain_size * 0.5
+	var w := _res + 1
+	_h.resize(w * w)
+	_g.resize(w * w)
+	_sd.resize(w * w)
+	_g.fill(1.0)
+	for j in w:
+		for i in w:
+			_h[j * w + i] = _raw_height(i * _cell - _half, j * _cell - _half)
+	if harbor:
+		var shore0 := _raw_shore_z(pier_x)
+		bay_c = Vector2(pier_x + bay_center.x, shore0 + bay_center.y)
+		for j in w:
+			for i in w:
+				var x := i * _cell - _half
+				var z := j * _cell - _half
+				var r := Vector2((x - bay_c.x) / bay_radius.x, (z - bay_c.y) / bay_radius.y).length()
+				var f := 1.0 - smoothstep(0.55, 1.0, r)
+				var k := j * w + i
+				if f > 0.0:
+					_h[k] = lerpf(_h[k], minf(_h[k], -bay_depth), f)
+				# the cove is sheltered: waves shrink to a quarter inside, back to full outside
+				_g[k] = 1.0 - 0.75 * (1.0 - smoothstep(0.8, 1.35, r))
+		pier_z0 = _grid_shore_z(pier_x) - 5.0
+		pier_z1 = pier_z0 + pier_length
+		berth_local = Vector3(pier_x + pier_width * 0.5 + fender_gap + ship_half_beam, 0.0, pier_z1 - 11.0)
+	_compute_sdf()
+
+## Signed shore distance by a two-pass chamfer transform (good enough for foam and AI).
+func _compute_sdf() -> void:
+	var w := _res + 1
+	var big := 1.0e6
+	var to_land := PackedFloat32Array()
+	var to_water := PackedFloat32Array()
+	to_land.resize(w * w)
+	to_water.resize(w * w)
+	for k in w * w:
+		to_land[k] = 0.0 if _h[k] > 0.0 else big
+		to_water[k] = 0.0 if _h[k] <= 0.0 else big
+	for arr in [to_land, to_water]:
+		for j in w:
+			for i in w:
+				var k := j * w + i
+				var v: float = arr[k]
+				if i > 0: v = minf(v, arr[k - 1] + 1.0)
+				if j > 0:
+					v = minf(v, arr[k - w] + 1.0)
+					if i > 0: v = minf(v, arr[k - w - 1] + 1.4142)
+					if i < w - 1: v = minf(v, arr[k - w + 1] + 1.4142)
+				arr[k] = v
+		for j in range(w - 1, -1, -1):
+			for i in range(w - 1, -1, -1):
+				var k := j * w + i
+				var v: float = arr[k]
+				if i < w - 1: v = minf(v, arr[k + 1] + 1.0)
+				if j < w - 1:
+					v = minf(v, arr[k + w] + 1.0)
+					if i < w - 1: v = minf(v, arr[k + w + 1] + 1.4142)
+					if i > 0: v = minf(v, arr[k + w - 1] + 1.4142)
+				arr[k] = v
+	for k in w * w:
+		if _h[k] > 0.0:
+			_sd[k] = -maxf(to_water[k] - 0.5, 0.0) * _cell
+		else:
+			_sd[k] = minf(maxf(to_land[k] - 0.5, 0.0) * _cell, 200.0)
+
+# ---------------------------------------------------------------- ocean texture
+
+func _build_texture() -> void:
+	var w := _res + 1
+	var img := Image.create_empty(w, w, false, Image.FORMAT_RGBAH)
+	for j in w:
+		for i in w:
+			var k := j * w + i
+			img.set_pixel(i, j, Color(_h[k], _g[k], _sd[k], 0.0))
+	texture = ImageTexture.create_from_image(img)
+
+# ---------------------------------------------------------------- render mesh and collision
+
+func _vertex_normal(i: int, j: int) -> Vector3:
+	var w := _res + 1
+	var il := maxi(i - 1, 0)
+	var ir := mini(i + 1, _res)
+	var jl := maxi(j - 1, 0)
+	var jr := mini(j + 1, _res)
+	var dx := (_h[j * w + ir] - _h[j * w + il]) / ((ir - il) * _cell)
+	var dz := (_h[jr * w + i] - _h[jl * w + i]) / ((jr - jl) * _cell)
+	return Vector3(-dx, 1.0, -dz).normalized()
+
+func _build_mesh() -> void:
+	var w := _res + 1
+	var verts := PackedVector3Array()
+	var norms := PackedVector3Array()
+	verts.resize(w * w)
+	norms.resize(w * w)
+	for j in w:
+		for i in w:
+			verts[j * w + i] = Vector3(i * _cell - _half, _h[j * w + i], j * _cell - _half)
+			norms[j * w + i] = _vertex_normal(i, j)
+	var idx := PackedInt32Array()
+	idx.resize(_res * _res * 6)
+	var n := 0
+	for j in _res:
+		for i in _res:
+			var a := j * w + i
+			var b := a + 1
+			var c := a + w
+			var d := c + 1
+			# alternate the diagonal so slopes don't show a grain
+			if (i + j) % 2 == 0:
+				idx[n] = a; idx[n + 1] = b; idx[n + 2] = c
+				idx[n + 3] = b; idx[n + 4] = d; idx[n + 5] = c
+			else:
+				idx[n] = a; idx[n + 1] = b; idx[n + 2] = d
+				idx[n + 3] = a; idx[n + 4] = d; idx[n + 5] = c
+			n += 6
+	var arr := []
+	arr.resize(Mesh.ARRAY_MAX)
+	arr[Mesh.ARRAY_VERTEX] = verts
+	arr[Mesh.ARRAY_NORMAL] = norms
+	arr[Mesh.ARRAY_INDEX] = idx
+	var am := ArrayMesh.new()
+	am.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr)
+	_terrain_mat = ShaderMaterial.new()
+	_terrain_mat.shader = load("res://shaders/island.gdshader")
+	var mi := MeshInstance3D.new()
+	mi.name = "Terrain"
+	mi.mesh = am
+	mi.material_override = _terrain_mat
+	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	add_child(mi)
+
+func _build_collision() -> void:
+	var w := _res + 1
+	var faces := PackedVector3Array()
+	for j in _res:
+		for i in _res:
+			var a := j * w + i
+			var hmax := maxf(maxf(_h[a], _h[a + 1]), maxf(_h[a + w], _h[a + w + 1]))
+			if hmax < -1.5:
+				continue      # deep sea floor: nothing walks or swims there
+			var pa := Vector3(i * _cell - _half, _h[a], j * _cell - _half)
+			var pb := Vector3((i + 1) * _cell - _half, _h[a + 1], j * _cell - _half)
+			var pc := Vector3(i * _cell - _half, _h[a + w], (j + 1) * _cell - _half)
+			var pd := Vector3((i + 1) * _cell - _half, _h[a + w + 1], (j + 1) * _cell - _half)
+			if (i + j) % 2 == 0:
+				faces.append_array([pa, pb, pc, pb, pd, pc])
+			else:
+				faces.append_array([pa, pb, pd, pa, pd, pc])
+	var shape := ConcavePolygonShape3D.new()
+	shape.set_faces(faces)
+	shape.backface_collision = true
+	var body := StaticBody3D.new()
+	body.name = "TerrainBody"
+	body.collision_layer = LAYER_BIT
+	body.collision_mask = 0
+	var cs := CollisionShape3D.new()
+	cs.shape = shape
+	body.add_child(cs)
+	add_child(body)
+
+# ---------------------------------------------------------------- trees
+
+func _build_trees() -> void:
+	var tree := _tree_mesh()
+	var rng := RandomNumberGenerator.new()
+	rng.seed = island_seed * 31 + 7
+	var xf: Array[Transform3D] = []
+	var cols: Array[Color] = []
+	var tries := 0
+	while xf.size() < tree_count and tries < tree_count * 40:
+		tries += 1
+		var x := rng.randf_range(-island_radius * 1.1, island_radius * 1.1)
+		var z := rng.randf_range(-island_radius * 1.1, island_radius * 1.1)
+		var h := _sample_local(_h, x, z)
+		if h < 2.2 or h > 13.0:
+			continue
+		var nrm := _vertex_normal(clampi(int((x + _half) / _cell), 0, _res), clampi(int((z + _half) / _cell), 0, _res))
+		if nrm.y < 0.88:
+			continue
+		if harbor and absf(x - pier_x) < 8.0 and z > pier_z0 - 10.0:
+			continue      # keep the road to the pier clear
+		var s := rng.randf_range(0.8, 1.6)
+		var b := Basis(Vector3.UP, rng.randf() * TAU).scaled(Vector3(s, s * rng.randf_range(0.9, 1.3), s))
+		xf.append(Transform3D(b, Vector3(x, h - 0.1, z)))
+		cols.append(Color.from_hsv(rng.randf_range(0.27, 0.36), rng.randf_range(0.5, 0.65), rng.randf_range(0.38, 0.58)))
+	var mm := MultiMesh.new()
+	mm.transform_format = MultiMesh.TRANSFORM_3D
+	mm.use_colors = true
+	mm.mesh = tree
+	mm.instance_count = xf.size()
+	for i in xf.size():
+		mm.set_instance_transform(i, xf[i])
+		mm.set_instance_color(i, cols[i])
+	var mmi := MultiMeshInstance3D.new()
+	mmi.name = "Trees"
+	mmi.multimesh = mm
+	mmi.visibility_range_end = 450.0
+	add_child(mmi)
+
+func _tree_mesh() -> ArrayMesh:
+	var trunk_m := CylinderMesh.new()
+	trunk_m.top_radius = 0.09
+	trunk_m.bottom_radius = 0.15
+	trunk_m.height = 1.8
+	trunk_m.radial_segments = 6
+	trunk_m.rings = 1
+	var st_t := SurfaceTool.new()
+	st_t.append_from(trunk_m, 0, Transform3D(Basis.IDENTITY, Vector3(0, 0.9, 0)))
+	var st_f := SurfaceTool.new()
+	var y := 1.3
+	for r_h in [[1.5, 2.2], [1.2, 1.9], [0.85, 1.6]]:
+		var cone := CylinderMesh.new()
+		cone.top_radius = 0.0
+		cone.bottom_radius = r_h[0]
+		cone.height = r_h[1]
+		cone.radial_segments = 7
+		cone.rings = 1
+		cone.cap_top = false
+		st_f.append_from(cone, 0, Transform3D(Basis.IDENTITY, Vector3(0, y + r_h[1] * 0.5, 0)))
+		y += r_h[1] * 0.55
+	var m := ArrayMesh.new()
+	st_t.commit(m)
+	st_f.commit(m)
+	var tm := StandardMaterial3D.new()
+	tm.albedo_color = Color(0.32, 0.22, 0.14)
+	tm.vertex_color_use_as_albedo = true
+	tm.roughness = 1.0
+	var fm := StandardMaterial3D.new()
+	fm.albedo_color = Color(1, 1, 1)
+	fm.vertex_color_use_as_albedo = true
+	fm.roughness = 0.95
+	m.surface_set_material(0, tm)
+	m.surface_set_material(1, fm)
+	return m
+
+# ---------------------------------------------------------------- pier
+
+func _plank_texture() -> ImageTexture:
+	var img := Image.create(64, 64, false, Image.FORMAT_RGB8)
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 5
+	var base := PackedColorArray()
+	for p in 8:
+		var t := rng.randf_range(0.85, 1.1)
+		base.append(Color(0.42 * t, 0.31 * t, 0.2 * t))
+	for y in 64:
+		for x in 64:
+			var p := x / 8
+			var c := base[p]
+			if x % 8 == 0:
+				c = c * 0.55          # seam between planks
+			c *= 1.0 + 0.06 * sin(float(y) * 0.7 + float(p) * 3.0)
+			img.set_pixel(x, y, c)
+	img.generate_mipmaps()
+	return ImageTexture.create_from_image(img)
+
+func _build_pier() -> void:
+	var root := Node3D.new()
+	root.name = "Pier"
+	add_child(root)
+	var len := pier_z1 - pier_z0
+	var zc := pier_z0 + len * 0.5
+	# the docking berth on the pier's east face: ships lie here heading north, port side to the pier
+	var berth := DockBerth.new()
+	berth.name = "Berth"
+	berth.position = Vector3(pier_x + pier_width * 0.5, 0.0, pier_z1 - 11.0)
+	berth.gap = fender_gap
+	berth.berth_heading = 0.0
+	berth.max_ship_class = ShipClasses.Size.MEDIUM
+	add_child(berth)
+	var wood := StandardMaterial3D.new()
+	wood.albedo_texture = _plank_texture()
+	wood.uv1_triplanar = true
+	wood.uv1_scale = Vector3(0.4, 0.4, 0.4)
+	wood.roughness = 0.9
+	var dark := StandardMaterial3D.new()
+	dark.albedo_color = Color(0.2, 0.15, 0.1)
+	dark.roughness = 1.0
+	var iron := StandardMaterial3D.new()
+	iron.albedo_color = Color(0.1, 0.1, 0.11)
+	iron.roughness = 0.6
+	iron.metallic = 0.3
+	var rubber := StandardMaterial3D.new()
+	rubber.albedo_color = Color(0.04, 0.04, 0.04)
+	rubber.roughness = 0.9
+
+	# deck
+	var deck := MeshInstance3D.new()
+	deck.name = "Deck"
+	var bm := BoxMesh.new()
+	bm.size = Vector3(pier_width, 0.24, len)
+	deck.mesh = bm
+	deck.material_override = wood
+	deck.position = Vector3(pier_x, pier_deck_y - 0.12, zc)
+	root.add_child(deck)
+
+	# pilings and stringers
+	var piles := MultiMesh.new()
+	piles.transform_format = MultiMesh.TRANSFORM_3D
+	var cyl := CylinderMesh.new()
+	cyl.top_radius = 0.2
+	cyl.bottom_radius = 0.22
+	cyl.height = 9.0
+	cyl.radial_segments = 8
+	cyl.rings = 1
+	piles.mesh = cyl
+	var pos: Array[Vector3] = []
+	var z := pier_z0 + 1.0
+	while z <= pier_z1 - 0.5:
+		for sx in [-1.0, 1.0]:
+			pos.append(Vector3(pier_x + sx * (pier_width * 0.5 - 0.3), pier_deck_y - 0.24 - 4.5 + 0.6, z))
+		z += 3.5
+	piles.instance_count = pos.size()
+	for i in pos.size():
+		piles.set_instance_transform(i, Transform3D(Basis.IDENTITY, pos[i]))
+	var pm := MultiMeshInstance3D.new()
+	pm.name = "Pilings"
+	pm.multimesh = piles
+	pm.material_override = dark
+	root.add_child(pm)
+	for sx in [-1.0, 1.0]:
+		var rail := MeshInstance3D.new()
+		var rb := BoxMesh.new()
+		rb.size = Vector3(0.3, 0.3, len)
+		rail.mesh = rb
+		rail.material_override = dark
+		rail.position = Vector3(pier_x + sx * (pier_width * 0.5 - 0.15), pier_deck_y - 0.39, zc)
+		root.add_child(rail)
+
+	# bollards on the east edge (the ship lies on this side)
+	for b in bollards_world():
+		var local := b - global_position
+		var bol := MeshInstance3D.new()
+		var cm := CylinderMesh.new()
+		cm.top_radius = 0.17
+		cm.bottom_radius = 0.2
+		cm.height = 0.5
+		cm.radial_segments = 10
+		bol.mesh = cm
+		bol.material_override = iron
+		bol.position = Vector3(local.x, pier_deck_y + 0.25, local.z)
+		root.add_child(bol)
+		var cap := MeshInstance3D.new()
+		var capm := CylinderMesh.new()
+		capm.top_radius = 0.26
+		capm.bottom_radius = 0.2
+		capm.height = 0.1
+		capm.radial_segments = 10
+		cap.mesh = capm
+		cap.material_override = iron
+		cap.position = Vector3(local.x, pier_deck_y + 0.55, local.z)
+		root.add_child(cap)
+
+	# fenders: rubber tubes hanging down the east face
+	var fx := pier_x + pier_width * 0.5 + 0.1
+	var fz := pier_z0 + 3.0
+	while fz < pier_z1 - 1.0:
+		var f := MeshInstance3D.new()
+		var fcm := CylinderMesh.new()
+		fcm.top_radius = 0.16
+		fcm.bottom_radius = 0.16
+		fcm.height = 1.5
+		fcm.radial_segments = 8
+		fcm.rings = 1
+		f.mesh = fcm
+		f.material_override = rubber
+		f.position = Vector3(fx, pier_deck_y - 0.9, fz)
+		root.add_child(f)
+		fz += 3.5
+
+	# walking collision for the deck (player layer 4)
+	var body := StaticBody3D.new()
+	body.name = "PierBody"
+	body.collision_layer = LAYER_BIT
+	body.collision_mask = 0
+	var cs := CollisionShape3D.new()
+	var bs := BoxShape3D.new()
+	bs.size = Vector3(pier_width, 0.24, len)
+	cs.shape = bs
+	cs.position = Vector3(pier_x, pier_deck_y - 0.12, zc)
+	body.add_child(cs)
+	root.add_child(body)

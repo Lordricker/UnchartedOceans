@@ -1,0 +1,215 @@
+class_name Ocean
+extends MeshInstance3D
+## Open ocean: builds a camera-following radial grid, generates the wave table for the
+## current sea state, feeds it to ocean.gdshader, and answers get_height() on the CPU
+## with the same math, so ships float on exactly the waves you see.
+##
+## Keys (in game): 1 / 2 / 3 / 4 = calm / moderate / rough / storm.
+
+enum SeaState { CALM, MODERATE, ROUGH, STORM }
+
+@export var sea_state: SeaState = SeaState.MODERATE:
+	set(v):
+		sea_state = v
+		if is_inside_tree():
+			_apply_sea_state()
+## Direction the wind (and the main swell) travels toward, in degrees around Y. 0 = toward -Z.
+@export_range(0.0, 360.0) var wind_heading_deg := 35.0
+## How far the waves' directions spread around the wind, in degrees.
+@export_range(0.0, 90.0) var direction_spread_deg := 55.0
+@export var wave_seed := 7
+@export var sun_path: NodePath = ^"../Sun"
+## Waves used for per-pixel detail (the main GPU cost). The surface lines carry most of the
+## fine detail now, so 16 is plenty; 28 = the old full detail, 12 = cheapest.
+@export_range(10, 32) var detail_octaves := 16
+@export_group("Mesh")
+@export var radius := 2500.0
+@export var segments := 320
+@export var first_ring := 0.35     ## radial spacing next to the camera (m)
+@export var ring_growth := 1.035   ## each ring this much wider than the last
+
+const MAX_WAVES := 32
+const G := 9.81
+
+# per sea state: base wavelength (m), base amplitude (m), peak, warp, foam amount,
+# amplitude falloff per octave (higher = more energy in the shorter, steeper waves)
+const PRESETS := {
+	SeaState.CALM:     [38.0, 0.22, 0.8, 0.35, 0.0, 0.80],
+	SeaState.MODERATE: [62.0, 0.70, 1.0, 0.50, 0.3, 0.82],
+	SeaState.ROUGH:    [85.0, 1.40, 1.35, 0.60, 0.7, 0.845],
+	SeaState.STORM:    [105.0, 2.30, 1.7, 0.70, 1.0, 0.865],
+}
+const WAVELENGTH_FALLOFF := 1.18   ## each octave's wavelength = previous / this
+
+var time := 0.0
+var octaves := 16
+var vertex_octaves := 10
+var peak := 1.0
+var warp := 0.5
+var height_offset := 0.0
+var sea_amplitude := 1.0
+
+var _dx := PackedFloat32Array()
+var _dz := PackedFloat32Array()
+var _k := PackedFloat32Array()
+var _a := PackedFloat32Array()
+var _w := PackedFloat32Array()
+var _p := PackedFloat32Array()
+var _mat: ShaderMaterial
+var _sun: DirectionalLight3D
+
+func _ready() -> void:
+	# grab the material first: replacing the mesh drops surface override materials
+	_mat = material_override as ShaderMaterial
+	if _mat == null and get_surface_override_material_count() > 0:
+		_mat = get_surface_override_material(0) as ShaderMaterial
+	mesh = _build_mesh()
+	material_override = _mat
+	# the sea never needs to cast shadows; casting would redraw this 100k-tri mesh into
+	# every shadow cascade each frame
+	cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_sun = get_node_or_null(sun_path) as DirectionalLight3D
+	_apply_sea_state()
+
+func get_ocean_material() -> ShaderMaterial:
+	return _mat
+
+func _unhandled_input(e: InputEvent) -> void:
+	if e is InputEventKey and e.pressed and not e.echo:
+		match e.physical_keycode:
+			KEY_1: sea_state = SeaState.CALM
+			KEY_2: sea_state = SeaState.MODERATE
+			KEY_3: sea_state = SeaState.ROUGH
+			KEY_4: sea_state = SeaState.STORM
+
+func _process(delta: float) -> void:
+	time += delta
+	var cam := get_viewport().get_camera_3d()
+	if cam:
+		var c := cam.global_position
+		global_position = Vector3(c.x, 0.0, c.z)
+	if _mat:
+		_mat.set_shader_parameter("ocean_time", time)
+		if _sun:
+			_mat.set_shader_parameter("sun_dir", _sun.global_transform.basis.z)
+
+## Water surface height at world (x, z). Uses the mesh (swell) octaves only, which is what
+## a hull feels; the finer octaves are normal detail.
+func get_height(x: float, z: float, n: int = -1) -> float:
+	if n < 0:
+		n = vertex_octaves
+	var px := x
+	var pz := z
+	var h := 0.0
+	for i in mini(n, _k.size()):
+		var xx := (_dx[i] * px + _dz[i] * pz) * _k[i] + time * _w[i] + _p[i]
+		var s := sin(xx)
+		var e := exp(peak * (s - 1.0))
+		h += _a[i] * e
+		var d := _a[i] * peak * e * cos(xx)
+		px += _dx[i] * d * warp
+		pz += _dz[i] * d * warp
+	return h + height_offset
+
+func _apply_sea_state() -> void:
+	var pr: Array = PRESETS[sea_state]
+	var lambda0: float = pr[0]
+	var amp0: float = pr[1]
+	peak = pr[2]
+	warp = pr[3]
+	var foam: float = pr[4]
+	var amp_falloff: float = pr[5]
+	octaves = detail_octaves
+	vertex_octaves = 10
+
+	var rng := RandomNumberGenerator.new()
+	rng.seed = wave_seed
+	_dx.resize(MAX_WAVES); _dz.resize(MAX_WAVES); _k.resize(MAX_WAVES)
+	_a.resize(MAX_WAVES); _w.resize(MAX_WAVES); _p.resize(MAX_WAVES)
+	var wind := deg_to_rad(wind_heading_deg)
+	var spread := deg_to_rad(direction_spread_deg)
+	var lam := lambda0
+	var amp := amp0
+	var mean := 0.0
+	var m := _exp_sine_mean(peak)
+	for i in MAX_WAVES:
+		# small waves are pushed around by local gusts, so they spread wider
+		var ang := wind + rng.randf_range(-1.0, 1.0) * spread * (0.6 + 0.6 * float(i) / MAX_WAVES)
+		_dx[i] = sin(ang)
+		_dz[i] = -cos(ang)
+		_k[i] = TAU / lam
+		_a[i] = amp
+		_w[i] = sqrt(G * _k[i])          # deep-water dispersion: long waves travel faster
+		_p[i] = rng.randf() * TAU
+		if i < vertex_octaves:
+			mean += amp * m
+		lam /= WAVELENGTH_FALLOFF
+		amp *= amp_falloff
+	height_offset = -mean
+	# rough crest height above mean level, for foam and scatter
+	sea_amplitude = 0.0
+	for i in vertex_octaves:
+		sea_amplitude += _a[i] * (1.0 - m)
+	sea_amplitude *= 0.5
+
+	if _mat:
+		_mat.set_shader_parameter("w_dx", _dx)
+		_mat.set_shader_parameter("w_dz", _dz)
+		_mat.set_shader_parameter("w_k", _k)
+		_mat.set_shader_parameter("w_a", _a)
+		_mat.set_shader_parameter("w_w", _w)
+		_mat.set_shader_parameter("w_p", _p)
+		_mat.set_shader_parameter("octaves", octaves)
+		_mat.set_shader_parameter("vertex_octaves", vertex_octaves)
+		_mat.set_shader_parameter("peak", peak)
+		_mat.set_shader_parameter("warp", warp)
+		_mat.set_shader_parameter("height_offset", height_offset)
+		_mat.set_shader_parameter("sea_amplitude", sea_amplitude)
+		_mat.set_shader_parameter("foam_amount", foam)
+		_mat.set_shader_parameter("wind_dir", Vector2(sin(wind), -cos(wind)))
+
+## Mean of exp(k*(sin x - 1)) over a cycle = e^-k * I0(k).
+static func _exp_sine_mean(k: float) -> float:
+	var i0 := 1.0
+	var term := 1.0
+	for j in range(1, 12):
+		term *= (k * 0.5) * (k * 0.5) / float(j * j)
+		i0 += term
+	return exp(-k) * i0
+
+func _build_mesh() -> ArrayMesh:
+	var radii := PackedFloat32Array([0.0])
+	var step := first_ring
+	while radii[radii.size() - 1] < radius:
+		radii.append(radii[radii.size() - 1] + step)
+		step *= ring_growth
+	var verts := PackedVector3Array()
+	var idx := PackedInt32Array()
+	verts.append(Vector3.ZERO)
+	for r in range(1, radii.size()):
+		for s in segments:
+			var a := TAU * float(s) / segments
+			verts.append(Vector3(cos(a) * radii[r], 0.0, sin(a) * radii[r]))
+	# centre fan
+	for s in segments:
+		var s2 := (s + 1) % segments
+		idx.append_array([0, 1 + s, 1 + s2])
+	# rings
+	for r in range(1, radii.size() - 1):
+		var b0 := 1 + (r - 1) * segments
+		var b1 := 1 + r * segments
+		for s in segments:
+			var s2 := (s + 1) % segments
+			idx.append_array([b0 + s, b1 + s, b0 + s2, b0 + s2, b1 + s, b1 + s2])
+	var normals := PackedVector3Array()
+	normals.resize(verts.size())
+	normals.fill(Vector3.UP)
+	var arr := []
+	arr.resize(Mesh.ARRAY_MAX)
+	arr[Mesh.ARRAY_VERTEX] = verts
+	arr[Mesh.ARRAY_NORMAL] = normals
+	arr[Mesh.ARRAY_INDEX] = idx
+	var am := ArrayMesh.new()
+	am.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr)
+	am.custom_aabb = AABB(Vector3(-radius, -20.0, -radius), Vector3(radius * 2.0, 40.0, radius * 2.0))
+	return am

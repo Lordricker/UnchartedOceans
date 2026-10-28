@@ -1,0 +1,393 @@
+class_name ShipBookshelf
+extends Node
+## The brig's bookshelf in the upper cabin. Created by ship_motion.gd (bookshelf_enabled).
+##
+##   Look at the shelf (it is outlined in white) and click: the camera moves to face it and you can't walk
+##   (the mouse is free).
+##   Move the mouse over a book: it is outlined, slides out a little and its title shows.
+##   Click a book: it comes off the shelf, settles in front of you, opens, and you read it
+##     (arrow keys, A / D, wheel or clicks turn the pages; see book_reader.gd).
+##   Esc closes the book (pages turn back, cover shuts) and it goes back on the shelf.
+##   Esc or right click at the shelf steps back from it.
+##
+## Books are the Book_* nodes under CabinBookshelf in the brig. Each has a book_id (glTF extra) that is looked
+## up in data/book/books.json: {"title": ..., "file": "res://data/book/x.md", "color": "#5a2d14"} or
+## {"title": ..., "text": "markdown"}. To write a chapter: add the .md file and give its book a "file" entry.
+
+const Outline := preload("res://scripts/interact_outline.gd")
+
+@export var books_json := "res://data/book/books.json"
+@export var shelf_name := "CabinBookshelf"
+@export var frame_name := "CabinBookshelf_Frame"
+## How far away you can click the shelf (m, along your line of sight).
+@export var reach := 2.2
+## Where the camera stands at the shelf and what it looks at, in the shelf's frame (its front is -Z).
+@export var view_offset := Vector3(0.0, 0.72, -1.05)
+@export var view_target := Vector3(0.0, 0.70, -0.15)
+## How far a hovered book slides out (m).
+@export var pull_out := 0.08
+## The book in your hands: scale, where it sits in front of the camera, and how far it leans back.
+@export var reader_scale := 2.2
+@export var reader_pos := Vector3(0.0, -0.12, -0.55)
+@export var reader_tilt_deg := 78.0
+## How fast the camera moves to and from the shelf.
+@export var follow_rate := 6.0
+
+enum S { IDLE, SHELF, BUSY, READING }
+
+var _state := S.IDLE
+var _shelf: Node3D
+var _frame: MeshInstance3D
+var _books: Array[MeshInstance3D] = []
+var _ids: Array[String] = []
+var _base: Array[Vector3] = []
+var _data := {}
+var _hover := -1
+var _outlined_book := -1
+var _frame_outlined := false
+var _player: Node
+var _cam: Camera3D
+var _head: Node3D
+var _cam_rest := Transform3D.IDENTITY
+var _cam_moved := false
+var _hint: Label
+var _title: Label
+var _reader: Node3D
+var _reading := -1
+var _hands_were_visible := true
+
+func _ready() -> void:
+	var ship := get_parent()
+	_shelf = ship.find_child(shelf_name, true, false) as Node3D
+	if _shelf == null:
+		push_warning("ShipBookshelf: no %s in the ship; bookshelf left alone" % shelf_name)
+		set_process(false)
+		set_process_input(false)
+		return
+	_frame = _shelf.find_child(frame_name, true, false) as MeshInstance3D
+	for c in _shelf.get_children():
+		if c is MeshInstance3D and String(c.name).begins_with("Book_"):
+			_books.append(c)
+			_base.append(c.position)
+			_ids.append(_book_id(c))
+	var f := FileAccess.open(books_json, FileAccess.READ)
+	if f:
+		var parsed = JSON.parse_string(f.get_as_text())
+		if parsed is Dictionary:
+			_data = parsed
+	_add_missing_books()
+	_make_ui()
+
+
+## A book in books.json that has no Book_* node on the shelf (a new chapter) is added: a copy of a book already on the
+## shelf, set down in the row with the fewest books, next to the end of that row (the other end if the first has no
+## room left). Give it its own mesh in the model later and this does nothing for it.
+func _add_missing_books() -> void:
+	if _books.is_empty() or _frame == null:
+		return
+	var fb := _frame.transform * _frame.get_aabb()          # the frame, in the shelf's space
+	var rows := {}
+	for i in _books.size():
+		var key := roundi(_base[i].y / 0.03)
+		if not rows.has(key):
+			rows[key] = []
+		rows[key].append(i)
+	for id in _data.keys():
+		if _ids.has(String(id)) or String(id) == "logbook":
+			continue
+		var best_key := 0
+		var best_n := 1 << 30
+		for key in rows:
+			var n: int = rows[key].size()
+			if n < best_n or (n == best_n and key > best_key):
+				best_n = n
+				best_key = key
+		var row: Array = rows[best_key]
+		var lo: int = row[0]
+		var hi: int = row[0]
+		for i in row:
+			if _base[i].x < _base[lo].x:
+				lo = i
+			if _base[i].x > _base[hi].x:
+				hi = i
+		var tmpl := _books[hi]
+		var bb := tmpl.transform * tmpl.get_aabb()
+		var w := bb.size.x + 0.004
+		var span_lo := fb.position.x + 0.03
+		var span_hi := fb.end.x - 0.03
+		var pos := _base[hi] + Vector3(w, 0.0, 0.0)
+		if bb.end.x + w > span_hi:
+			tmpl = _books[lo]
+			bb = tmpl.transform * tmpl.get_aabb()
+			pos = _base[lo] - Vector3(bb.size.x + 0.004, 0.0, 0.0)
+			if bb.position.x - bb.size.x - 0.004 < span_lo:
+				push_warning("ShipBookshelf: no room on the shelf for the book '%s'" % id)
+				continue
+		var nb := tmpl.duplicate() as MeshInstance3D
+		nb.name = "Book_%s" % String(id)
+		nb.set_meta("extras", {"book_id": String(id)})
+		nb.position = pos
+		_shelf.add_child(nb)
+		_books.append(nb)
+		_base.append(pos)
+		_ids.append(String(id))
+		row.append(_books.size() - 1)
+
+func _book_id(n: Node) -> String:
+	if n.has_meta("extras"):
+		var e = n.get_meta("extras")
+		if e is Dictionary and e.has("book_id"):
+			return String(e["book_id"])
+	return String(n.name).trim_prefix("Book_").to_lower()
+
+func _entry(i: int) -> Dictionary:
+	var id := _ids[i]
+	if _data.has(id) and _data[id] is Dictionary:
+		return _data[id]
+	var nm := id.replace("_", " ").capitalize()
+	return {"title": nm, "text": "# %s\n\n*Nothing has been written in this book yet.*" % nm}
+
+## The text of a book that has no chapter file: what books.json says. The Ship's Log also takes a section from every
+## node in the group "logbook_source" (each has logbook_markdown() -> String, and a number logbook_order: lower comes
+## earlier), written fresh each time the book is opened. The weather node gives the date and the weather; the quests and
+## the accounts will each be a source of their own. A scene with no sources just shows the owners' orders.
+func _book_text(i: int, entry: Dictionary) -> String:
+	var text := String(entry.get("text", ""))
+	if _ids[i] == "logbook":
+		var sources := get_tree().get_nodes_in_group("logbook_source")
+		sources.sort_custom(func(a: Node, b: Node) -> bool: return _log_order(a) < _log_order(b))
+		for s in sources:
+			if s.has_method("logbook_markdown"):
+				text += "\n\n" + String(s.call("logbook_markdown"))
+	return text
+
+func _log_order(n: Node) -> float:
+	var o = n.get("logbook_order")
+	return float(o) if o != null else 0.0
+
+func _make_ui() -> void:
+	var layer := CanvasLayer.new()
+	layer.layer = 6
+	add_child(layer)
+	var fnt: Font = null
+	if ResourceLoader.exists("res://assets/fonts/Ferrum-ExtraCondensed.otf"):
+		fnt = load("res://assets/fonts/Ferrum-ExtraCondensed.otf") as Font
+	_hint = Label.new()
+	# along the top of the screen, so it never covers the shelf or the open book
+	_hint.set_anchors_preset(Control.PRESET_CENTER_TOP)
+	_hint.grow_horizontal = Control.GROW_DIRECTION_BOTH
+	_hint.grow_vertical = Control.GROW_DIRECTION_END
+	_hint.offset_top = 28.0
+	_hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_hint.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_hint.visible = false
+	_style(_hint, fnt, 24)
+	layer.add_child(_hint)
+	_title = Label.new()
+	_title.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_title.visible = false
+	_style(_title, fnt, 30)
+	layer.add_child(_title)
+
+func _style(l: Label, fnt: Font, size: int) -> void:
+	if fnt:
+		l.add_theme_font_override("font", fnt)
+	l.add_theme_font_size_override("font_size", size)
+	l.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.9))
+	l.add_theme_constant_override("outline_size", 6)
+
+# ---------------------------------------------------------------- camera
+
+func _camera() -> Camera3D:
+	if _cam == null or not is_instance_valid(_cam):
+		_player = get_tree().get_first_node_in_group("player")
+		if _player:
+			_head = _player.get_node_or_null("Head") as Node3D
+			_cam = _player.get_node_or_null("Head/Camera3D") as Camera3D
+			if _cam:
+				_cam_rest = _cam.transform
+	return _cam
+
+func _shelf_view() -> Transform3D:
+	var d := (view_target - view_offset).normalized()
+	var up := Vector3.UP if absf(d.y) < 0.98 else Vector3.BACK
+	return _shelf.global_transform * Transform3D(Basis.looking_at(d, up), view_offset)
+
+func _move_camera(delta: float) -> void:
+	var at_shelf := _state != S.IDLE
+	if not at_shelf and not _cam_moved:
+		return
+	var rest := _head.global_transform * _cam_rest
+	var want := _shelf_view() if at_shelf else rest
+	_cam_moved = true
+	var a := 1.0 - exp(-delta * follow_rate)
+	var next := _cam.global_transform.interpolate_with(want, a)
+	_cam.global_transform = next
+	if not at_shelf:
+		var ang := next.basis.get_rotation_quaternion().angle_to(rest.basis.get_rotation_quaternion())
+		if next.origin.distance_to(rest.origin) < 0.004 and ang < 0.01:
+			_cam.transform = _cam_rest
+			_cam_moved = false
+
+# ---------------------------------------------------------------- frame
+
+func _process(delta: float) -> void:
+	if _camera() == null or _head == null:
+		return
+	_move_camera(delta)
+	var hint := ""
+	var aimed := false
+	if _state == S.IDLE:
+		aimed = _aimed()
+		pass                                  # the white outline is the prompt
+	elif _state == S.SHELF:
+		_hover = _pick()
+		hint = "Click a book to read it      Esc: step back"
+	elif _state == S.READING:
+		hint = "A / D, arrows or wheel: turn pages      Esc: close the book"
+	_hint.text = hint
+	_hint.visible = hint != ""
+	# outlines: the shelf while you can click it, the book under the mouse once you're at it
+	if aimed != _frame_outlined:
+		_frame_outlined = aimed
+		Outline.set_on(_frame, aimed)
+	var want_book := _hover if _state == S.SHELF else -1
+	if want_book != _outlined_book:
+		if _outlined_book >= 0:
+			Outline.set_on(_books[_outlined_book], false)
+		if want_book >= 0:
+			Outline.set_on(_books[want_book], true)
+		_outlined_book = want_book
+	# books slide out under the mouse
+	var k := 1.0 - exp(-delta * 14.0)
+	for i in _books.size():
+		if _books[i].visible:
+			var target := _base[i] + Vector3(0.0, 0.0, -pull_out if (i == _hover and _state == S.SHELF) else 0.0)
+			_books[i].position = _books[i].position.lerp(target, k)
+	var show_title := _state == S.SHELF and _hover >= 0
+	_title.visible = show_title
+	if show_title:
+		_title.text = String(_entry(_hover).get("title", ""))
+		_title.position = get_viewport().get_mouse_position() + Vector2(22.0, 18.0)
+
+## True while you're looking at the shelf from close enough, free to click it.
+func _aimed() -> bool:
+	if _frame == null or Input.mouse_mode != Input.MOUSE_MODE_CAPTURED:
+		return false
+	var wheel := get_parent().get_node_or_null("ShipWheel")
+	if wheel != null and bool(wheel.get("held")):
+		return false
+	if _player != null and bool(_player.get_meta("grab_busy", false)):
+		return false
+	var o := _cam.global_position
+	var d := -_cam.global_transform.basis.z
+	var inv := _frame.global_transform.affine_inverse()
+	var hit = _frame.get_aabb().grow(0.04).intersects_ray(inv * o, (inv.basis * d).normalized())
+	return hit != null and o.distance_to(_frame.global_transform * (hit as Vector3)) <= reach
+
+## The book under the mouse, or -1.
+func _pick() -> int:
+	var mp := get_viewport().get_mouse_position()
+	var ro := _cam.project_ray_origin(mp)
+	var rd := _cam.project_ray_normal(mp)
+	var best := -1
+	var best_d := INF
+	for i in _books.size():
+		var b := _books[i]
+		if not b.visible:
+			continue
+		var inv := b.global_transform.affine_inverse()
+		var hit = b.get_aabb().grow(0.004).intersects_ray(inv * ro, (inv.basis * rd).normalized())
+		if hit != null:
+			var d := ro.distance_to(b.global_transform * (hit as Vector3))
+			if d < best_d:
+				best_d = d
+				best = i
+	return best
+
+# ---------------------------------------------------------------- input
+
+## _input, not _unhandled_input: a click here must not also punch a hole in the hull or recapture the mouse.
+func _input(e: InputEvent) -> void:
+	if _camera() == null:
+		return
+	match _state:
+		S.IDLE:
+			if e is InputEventMouseButton and e.pressed and e.button_index == MOUSE_BUTTON_LEFT and _aimed():
+				_enter()
+		S.SHELF:
+			if e is InputEventKey and e.pressed and not e.echo and e.physical_keycode == KEY_ESCAPE:
+				_leave()
+			elif e is InputEventMouseButton and e.pressed:
+				if e.button_index == MOUSE_BUTTON_RIGHT:
+					_leave()
+				elif e.button_index == MOUSE_BUTTON_LEFT:
+					if _hover >= 0:
+						_open_book(_hover)
+					get_viewport().set_input_as_handled()
+
+func _enter() -> void:
+	_player.set("input_locked", true)
+	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+	var h = _player.get("hands")
+	if h is Node3D:
+		_hands_were_visible = h.visible
+		h.visible = false
+	_state = S.SHELF
+	get_viewport().set_input_as_handled()
+
+func _leave() -> void:
+	_hover = -1
+	_player.set("input_locked", false)
+	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+	var h = _player.get("hands")
+	if h is Node3D:
+		h.visible = _hands_were_visible
+	_state = S.IDLE
+	get_viewport().set_input_as_handled()
+
+# ---------------------------------------------------------------- reading
+
+func _open_book(i: int) -> void:
+	_state = S.BUSY
+	_reading = i
+	_hover = -1
+	var entry := _entry(i)
+	var book := _books[i]
+	_reader = load("res://scripts/book_reader.gd").new() as Node3D
+	if entry.has("color"):
+		_reader.set("cover_color", Color.html(String(entry["color"])))
+	_reader.visible = false
+	_cam.add_child(_reader)
+	if entry.has("file"):
+		await _reader.open_file(String(entry["file"]))
+	else:
+		await _reader.show_text(_book_text(i, entry))
+	# it starts where the book sat on the shelf
+	var rel := _cam.global_transform.affine_inverse() * book.global_transform
+	_reader.transform = Transform3D(rel.basis.orthonormalized().scaled(Vector3.ONE * 0.6), rel.origin)
+	_reader.visible = true
+	book.visible = false
+	var target := Transform3D(Basis(Vector3.RIGHT, deg_to_rad(reader_tilt_deg)).scaled(Vector3.ONE * reader_scale), reader_pos)
+	var tw := create_tween()
+	tw.tween_property(_reader, "transform", target, 0.7).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+	await tw.finished
+	_state = S.READING
+	_reader.connect("close_requested", _close_book)
+	_reader.open()
+
+func _close_book() -> void:
+	if _state != S.READING or _reader == null:
+		return
+	_state = S.BUSY
+	await _reader.close()
+	var book := _books[_reading]
+	var back := _cam.global_transform.affine_inverse() * book.global_transform
+	var tw := create_tween()
+	tw.tween_property(_reader, "transform", Transform3D(back.basis.orthonormalized().scaled(Vector3.ONE * 0.6), back.origin), 0.5).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+	await tw.finished
+	_reader.queue_free()
+	_reader = null
+	book.visible = true
+	_reading = -1
+	_state = S.SHELF

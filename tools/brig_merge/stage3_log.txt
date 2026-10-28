@@ -1,0 +1,8 @@
+=== stage3 start; objects=500
+renamed 10: ['Gun_0', 'Gun_1', 'Gun_2', 'Gun_3', 'Gun_4', 'Gun_5', 'Hull', 'ProvisionsSlate', 'Rudder', 'Wheel']
+moved into Brig_Export: 132 objects
+to Brig_Source: 323; collections now: ['Brig', 'Brig_Export', 'Brig_Source']
+export objects with .001 style names: []
+Brig_Export: 177 objects, 84 meshes, 340347 base tris (modifier-free ones; hammock/pump/book parts still carry modifiers)
+SAVED C:\Users\Victus\Documents\GitHub\UnchartedOceans\tools\brig_merge\out\s03_organized.blend
+=== stage3 finished

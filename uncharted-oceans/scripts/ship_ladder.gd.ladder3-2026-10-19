@@ -1,0 +1,35 @@
+class_name ShipLadder
+extends Area3D
+## Climbing zone. Give it a CollisionShape3D child with a BoxShape3D and size/move that box in
+## the editor to cover where you want to climb. While the player's centre is inside the box:
+##   W climbs up, S climbs down, A/D shift sideways, Space jumps off (away from the ship).
+## Orientation: the node's green arrow (+Y) is "up the ladder" and its blue arrow (+Z) must
+## point AWAY from the ship. Climbing up also leans you toward the ship (-Z) so that at the top
+## you go over the rail; make the box reach about half a metre above the rail.
+## Put it under the ship so it moves with it. It doesn't block or detect anything by itself;
+## player.gd checks whether it's inside the box.
+
+@export var climb_speed := 1.5
+## Fraction of climb_speed pushing you toward the ship while climbing up (gets you over the rail).
+@export_range(0.0, 1.5, 0.05) var lean_in := 0.6
+## Sideways speed (A/D) as a fraction of climb_speed.
+@export_range(0.0, 1.0, 0.05) var side_speed := 0.6
+
+func _ready() -> void:
+	add_to_group("ship_ladders")
+	monitoring = false
+	monitorable = false
+	collision_layer = 0
+	collision_mask = 0
+
+## True if world point p is inside any of this ladder's box shapes.
+func contains(p: Vector3) -> bool:
+	for c in get_children():
+		var cs := c as CollisionShape3D
+		if cs == null or cs.disabled or not (cs.shape is BoxShape3D):
+			continue
+		var lp := cs.global_transform.affine_inverse() * p
+		var h := (cs.shape as BoxShape3D).size * 0.5
+		if absf(lp.x) <= h.x and absf(lp.y) <= h.y and absf(lp.z) <= h.z:
+			return true
+	return false

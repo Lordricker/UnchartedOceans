@@ -1,0 +1,544 @@
+=== start 11:29:48 skip=[]
+-- read group Hull: 55 objects
+START Hull mods=['SOLIDIFY', 'SUBSURF'] v=480
+OK Hull polys=3772
+START Keel mods=['BEVEL'] v=228
+OK Keel polys=466
+START Stem mods=['BEVEL'] v=92
+OK Stem polys=322
+START Sternpost mods=['BEVEL'] v=52
+OK Sternpost polys=114
+START Wales mods=['BEVEL'] v=968
+OK Wales polys=1732
+START Bulwarks mods=['BEVEL', 'WEIGHTED_NORMAL'] v=5034
+OK Bulwarks polys=6912
+START CapRail mods=['WEIGHTED_NORMAL'] v=3792
+OK CapRail polys=3770
+START Moulding mods=[] v=1880
+OK Moulding polys=1496
+START TransomPlanks mods=['BEVEL'] v=1380
+OK TransomPlanks polys=6901
+START SternMouldings mods=[] v=800
+OK SternMouldings polys=776
+START QuarterPieces mods=[] v=480
+OK QuarterPieces polys=288
+START WingTransom mods=[] v=310
+OK WingTransom polys=302
+START SternWinRecess mods=[] v=24
+OK SternWinRecess polys=18
+START SternWinGlass mods=[] v=24
+OK SternWinGlass polys=18
+START SternWinFrames mods=['BEVEL'] v=192
+OK SternWinFrames polys=624
+START HeadKnee mods=['BEVEL'] v=22
+OK HeadKnee polys=89
+START HeadTimbers mods=[] v=72
+OK HeadTimbers polys=48
+START Headrails mods=[] v=672
+OK Headrails polys=648
+START Trailboards mods=[] v=28
+OK Trailboards polys=2
+START TrailboardTrim mods=[] v=406
+OK TrailboardTrim polys=388
+START Figurehead mods=[] v=1260
+OK Figurehead polys=1240
+START Knightheads mods=['BEVEL'] v=32
+OK Knightheads polys=216
+START Catheads mods=['BEVEL'] v=32
+OK Catheads polys=216
+START CatFaces mods=[] v=160
+OK CatFaces polys=88
+START CatheadSheaves mods=[] v=32
+OK CatheadSheaves polys=8
+START HawseHoles mods=['SOLIDIFY'] v=96
+OK HawseHoles polys=164
+START Channels mods=['BEVEL'] v=32
+OK Channels polys=104
+START Chainplates mods=[] v=336
+OK Chainplates polys=224
+START Scuppers mods=[] v=120
+OK Scuppers polys=10
+START ScupperLead mods=['SOLIDIFY'] v=40
+OK ScupperLead polys=60
+START Fenders mods=['BEVEL'] v=256
+OK Fenders polys=888
+START EntrySteps mods=['BEVEL'] v=112
+OK EntrySteps polys=364
+START ManropeStanchions mods=[] v=184
+OK ManropeStanchions polys=192
+START PortLids mods=['BEVEL'] v=48
+OK PortLids polys=156
+START PortLidsInner mods=[] v=48
+OK PortLidsInner polys=36
+START PortHinges mods=[] v=96
+OK PortHinges polys=60
+START RingBolts mods=['SOLIDIFY'] v=480
+OK RingBolts polys=816
+START DeckWaterway mods=['BEVEL'] v=1032
+OK DeckWaterway polys=2096
+START Stanchions mods=['BEVEL'] v=192
+OK Stanchions polys=1296
+START PoopDeck mods=['SOLIDIFY'] v=476
+OK PoopDeck polys=824
+START PoopRail mods=[] v=1162
+OK PoopRail polys=1112
+START PoopBalusters mods=[] v=3600
+OK PoopBalusters polys=3246
+START CabinFront mods=['BEVEL'] v=64
+OK CabinFront polys=208
+START CabinFrontWindow mods=[] v=8
+OK CabinFrontWindow polys=6
+START CabinDoorFrame mods=['BEVEL'] v=64
+OK CabinDoorFrame polys=208
+START PoopSkylight mods=['BEVEL'] v=14
+OK PoopSkylight polys=28
+START PoopSkylightBars mods=[] v=136
+OK PoopSkylightBars polys=90
+START PoopSkylightGlass mods=[] v=8
+OK PoopSkylightGlass polys=2
+START StairEntryStep mods=['BEVEL'] v=8
+OK StairEntryStep polys=26
+START CabinStep mods=['BEVEL'] v=8
+OK CabinStep polys=26
+START Lamp_Stern_Candle mods=[] v=32
+OK Lamp_Stern_Candle polys=20
+START Lamp_Stern_Flame mods=[] v=84
+OK Lamp_Stern_Flame polys=96
+START Lamp_Stern_Frame mods=[] v=936
+OK Lamp_Stern_Frame polys=716
+START Lamp_Stern_Glass mods=[] v=48
+OK Lamp_Stern_Glass polys=12
+START Lamp_Stern_Hardware mods=[] v=464
+OK Lamp_Stern_Hardware polys=304
+READ Hull: verts=46934 faces=43844
+-- read group MainDeck: 1 objects
+START DeckLow mods=['BOOLEAN', 'BOOLEAN'] v=611
+OK DeckLow polys=434
+READ MainDeck: verts=507 faces=434
+-- read group DeckFittings: 45 objects
+START Capstan mods=['BEVEL'] v=216
+OK Capstan polys=820
+START CapstanSockets mods=[] v=64
+OK CapstanSockets polys=48
+START CapstanCap mods=[] v=24
+OK CapstanCap polys=14
+START WheelStand mods=['BEVEL'] v=76
+OK WheelStand polys=376
+START WheelSheaves mods=['BEVEL'] v=64
+OK WheelSheaves polys=204
+START WheelRopeHoles mods=[] v=88
+OK WheelRopeHoles polys=38
+START WheelTillerRopes mods=[] v=72
+OK WheelTillerRopes polys=56
+START Windlass mods=['BEVEL'] v=80
+OK Windlass polys=218
+START WindlassIron mods=[] v=84
+OK WindlassIron polys=54
+START ForeHatch mods=['BEVEL'] v=32
+OK ForeHatch polys=104
+START ForeHatchGrate mods=[] v=160
+OK ForeHatchGrate polys=120
+START Hatch mods=['BEVEL'] v=24
+OK Hatch polys=78
+START HatchRail mods=[] v=324
+OK HatchRail polys=300
+START HatchRailPosts mods=[] v=192
+OK HatchRailPosts polys=120
+START FifeRail_Fore mods=['BEVEL'] v=24
+OK FifeRail_Fore polys=162
+START FifeRail_Main mods=['BEVEL'] v=24
+OK FifeRail_Main polys=162
+START BelayPins_Fore mods=[] v=224
+OK BelayPins_Fore polys=144
+START BelayPins_Main mods=[] v=224
+OK BelayPins_Main polys=144
+START Coils_Fore mods=[] v=1360
+OK Coils_Fore polys=1280
+START Coils_Main mods=[] v=1360
+OK Coils_Main polys=1280
+START Flemish_Fore mods=[] v=420
+OK Flemish_Fore polys=416
+START Flemish_Main mods=[] v=420
+OK Flemish_Main polys=416
+START PinRails mods=['BEVEL'] v=320
+OK PinRails polys=2160
+START PinRailPins mods=[] v=560
+OK PinRailPins polys=360
+START PinRailCoils mods=[] v=4080
+OK PinRailCoils polys=3840
+START Casks mods=['BEVEL'] v=168
+OK Casks polys=228
+START CaskHoops mods=['SOLIDIFY'] v=256
+OK CaskHoops polys=512
+START CargoLashings mods=[] v=372
+OK CargoLashings polys=348
+START CargoEyebolts mods=[] v=112
+OK CargoEyebolts polys=64
+START Stovepipe mods=[] v=96
+OK Stovepipe polys=56
+START Anchors mods=['WEIGHTED_NORMAL'] v=592
+OK Anchors polys=552
+START AnchorStocks mods=['BEVEL'] v=40
+OK AnchorStocks polys=180
+START AnchorRings mods=[] v=112
+OK AnchorRings polys=56
+START CatBlocks mods=[] v=104
+OK CatBlocks polys=120
+START CatTackle mods=[] v=96
+OK CatTackle polys=64
+START AnchorCables mods=[] v=500
+OK AnchorCables polys=484
+START BowspritBitts mods=['BEVEL'] v=24
+OK BowspritBitts polys=162
+START Breeching0 mods=[] v=288
+OK Breeching0 polys=284
+START Breeching1 mods=[] v=288
+OK Breeching1 polys=284
+START Breeching2 mods=[] v=288
+OK Breeching2 polys=284
+START Breeching3 mods=[] v=288
+OK Breeching3 polys=284
+START Breeching4 mods=[] v=288
+OK Breeching4 polys=284
+START Breeching5 mods=[] v=288
+OK Breeching5 polys=284
+START Manropes mods=[] v=144
+OK Manropes polys=128
+START BoomHorse mods=[] v=48
+OK BoomHorse polys=0
+READ DeckFittings: verts=19128 faces=17572
+-- read group DeckExtras: 5 objects
+START AnchorCableInboard mods=[] v=600
+OK AnchorCableInboard polys=594
+START CableManger mods=[] v=48
+OK CableManger polys=36
+START BinnacleBody mods=[] v=24
+OK BinnacleBody polys=18
+START BinnaclePanels mods=[] v=16
+OK BinnaclePanels polys=12
+START BinnacleBrass mods=[] v=120
+OK BinnacleBrass polys=66
+READ DeckExtras: verts=808 faces=726
+-- read group Rig_Spars: 57 objects
+START Mast_Fore mods=['BEVEL'] v=124
+OK Mast_Fore polys=450
+START Mast_Main mods=['BEVEL'] v=124
+OK Mast_Main polys=434
+START MastCap_Fore mods=['BEVEL'] v=16
+OK MastCap_Fore polys=108
+START MastCap_Main mods=['BEVEL'] v=16
+OK MastCap_Main polys=108
+START MastCoat_Fore mods=['BEVEL'] v=128
+OK MastCoat_Fore polys=730
+START MastCoat_Main mods=['BEVEL'] v=128
+OK MastCoat_Main polys=730
+START MastHoops_Fore mods=['SOLIDIFY'] v=192
+OK MastHoops_Fore polys=384
+START MastHoops_Main mods=['SOLIDIFY'] v=192
+OK MastHoops_Main polys=384
+START MastHoopsWood mods=['SOLIDIFY'] v=216
+OK MastHoopsWood polys=432
+START TMCross_Fore mods=['BEVEL'] v=32
+OK TMCross_Fore polys=216
+START TMCross_Main mods=['BEVEL'] v=32
+OK TMCross_Main polys=216
+START TopFrame_Fore mods=['BEVEL'] v=56
+OK TopFrame_Fore polys=378
+START TopFrame_Main mods=['BEVEL'] v=56
+OK TopFrame_Main polys=378
+START TopPlanks_Fore mods=['BEVEL'] v=176
+OK TopPlanks_Fore polys=1188
+START TopPlanks_Main mods=['BEVEL'] v=176
+OK TopPlanks_Main polys=1188
+START TopRim_Fore mods=[] v=248
+OK TopRim_Fore polys=226
+START TopRim_Main mods=[] v=248
+OK TopRim_Main polys=226
+START TopRail_Fore mods=['BEVEL'] v=8
+OK TopRail_Fore polys=26
+START TopRail_Main mods=['BEVEL'] v=8
+OK TopRail_Main polys=26
+START TopRailIron_Fore mods=[] v=64
+OK TopRailIron_Fore polys=40
+START TopRailIron_Main mods=[] v=64
+OK TopRailIron_Main polys=40
+START TopNetting_Fore mods=[] v=240
+OK TopNetting_Fore polys=208
+START TopNetting_Main mods=[] v=240
+OK TopNetting_Main polys=208
+START TopDeadeyes_Fore mods=[] v=288
+OK TopDeadeyes_Fore polys=168
+START TopDeadeyes_Main mods=[] v=288
+OK TopDeadeyes_Main polys=168
+START TopLanyards_Fore mods=[] v=144
+OK TopLanyards_Fore polys=108
+START TopLanyards_Main mods=[] v=144
+OK TopLanyards_Main polys=108
+START FuttockPlates_Fore mods=[] v=72
+OK FuttockPlates_Fore polys=48
+START FuttockPlates_Main mods=[] v=72
+OK FuttockPlates_Main polys=48
+START CrowsNest_Brackets mods=[] v=48
+OK CrowsNest_Brackets polys=32
+START CrowsNest_Floor mods=[] v=88
+OK CrowsNest_Floor polys=66
+START CrowsNest_Hatch mods=[] v=32
+OK CrowsNest_Hatch polys=24
+START CrowsNest_Hoops mods=['SOLIDIFY'] v=192
+OK CrowsNest_Hoops polys=384
+START CrowsNest_Ladder mods=[] v=20
+OK CrowsNest_Ladder polys=14
+START CrowsNest_Rungs mods=[] v=132
+OK CrowsNest_Rungs polys=88
+START CrowsNest_Staves mods=['BEVEL'] v=440
+OK CrowsNest_Staves polys=1100
+START Bowsprit mods=['BEVEL'] v=40
+OK Bowsprit polys=76
+START JibBoom mods=[] v=24
+OK JibBoom polys=14
+START BowspritCap mods=['BEVEL'] v=8
+OK BowspritCap polys=54
+START DolphinStriker mods=[] v=20
+OK DolphinStriker polys=12
+START Deadeyes mods=[] v=1344
+OK Deadeyes polys=784
+START BowDeadeyes mods=[] v=192
+OK BowDeadeyes polys=112
+START Lanyards mods=[] v=840
+OK Lanyards polys=588
+START Blocks mods=[] v=4256
+OK Blocks polys=1080
+START BraceBlocks mods=[] v=312
+OK BraceBlocks polys=360
+START SpankerBlocks mods=[] v=260
+OK SpankerBlocks polys=0
+START SpankerJaws mods=[] v=860
+OK SpankerJaws polys=0
+START Boom mods=[] v=48
+OK Boom polys=0
+START ChainSlings mods=['SOLIDIFY'] v=1248
+OK ChainSlings polys=2496
+START FlagToggle mods=[] v=24
+OK FlagToggle polys=16
+START CrowsNestFore_Brackets mods=[] v=48
+OK CrowsNestFore_Brackets polys=32
+START CrowsNestFore_Floor mods=[] v=88
+OK CrowsNestFore_Floor polys=66
+START CrowsNestFore_Hatch mods=[] v=32
+OK CrowsNestFore_Hatch polys=24
+START CrowsNestFore_Hoops mods=['SOLIDIFY'] v=192
+OK CrowsNestFore_Hoops polys=384
+START CrowsNestFore_Ladder mods=[] v=20
+OK CrowsNestFore_Ladder polys=14
+START CrowsNestFore_Rungs mods=[] v=132
+OK CrowsNestFore_Rungs polys=88
+START CrowsNestFore_Staves mods=['BEVEL'] v=440
+OK CrowsNestFore_Staves polys=1100
+READ Rig_Spars: verts=24140 faces=17980
+-- read group Rig_Ropes: 21 objects
+START Shrouds mods=[] v=2000
+OK Shrouds polys=1880
+START Ratlines mods=[] v=5070
+OK Ratlines polys=4860
+START Backstays mods=[] v=624
+OK Backstays polys=592
+START ShroudEnds mods=[] v=3864
+OK ShroudEnds polys=3648
+START Seizings mods=[] v=3600
+OK Seizings polys=3120
+START Stays mods=[] v=800
+OK Stays polys=764
+START TopmastShrouds mods=[] v=432
+OK TopmastShrouds polys=384
+START TopgallantShrouds mods=[] v=192
+OK TopgallantShrouds polys=160
+START FuttockShrouds mods=[] v=144
+OK FuttockShrouds polys=96
+START Lifts mods=[] v=648
+OK Lifts polys=600
+START Braces mods=[] v=1080
+OK Braces polys=1032
+START Sheets mods=[] v=264
+OK Sheets polys=248
+START RunningRigging mods=[] v=2688
+OK RunningRigging polys=2560
+START SpankerRigging mods=[] v=426
+OK SpankerRigging polys=0
+START Bobstays mods=[] v=128
+OK Bobstays polys=80
+START BowspritShrouds mods=[] v=96
+OK BowspritShrouds polys=64
+START Gammoning mods=[] v=294
+OK Gammoning polys=250
+START Martingale mods=[] v=264
+OK Martingale polys=248
+START JibFootropes mods=[] v=228
+OK JibFootropes polys=204
+START HeadsailSheets mods=[] v=360
+OK HeadsailSheets polys=344
+START FlagHalyard mods=[] v=15
+OK FlagHalyard polys=12
+READ Rig_Ropes: verts=23217 faces=21146
+-- read group Interiors: 76 objects
+START CabinFloor mods=['SOLIDIFY'] v=273
+OK CabinFloor polys=544
+START CabinWinInside mods=[] v=24
+OK CabinWinInside polys=18
+START CabinWinInsideFrames mods=['BEVEL'] v=192
+OK CabinWinInsideFrames polys=624
+START CabinChest mods=['BEVEL'] v=24
+OK CabinChest polys=78
+START CabinLining mods=[] v=825
+OK CabinLining polys=672
+START CabinSkyGlow mods=[] v=8
+OK CabinSkyGlow polys=6
+START PoopWalls mods=['BEVEL'] v=456
+OK PoopWalls polys=538
+START PoopBeams mods=['BEVEL'] v=32
+OK PoopBeams polys=104
+START PoopStairs mods=['BEVEL'] v=64
+OK PoopStairs polys=208
+START PoopStairRisers mods=['SOLIDIFY'] v=32
+OK PoopStairRisers polys=48
+START PoopStairNosing mods=[] v=128
+OK PoopStairNosing polys=80
+START PoopStairStringers mods=['BEVEL'] v=168
+OK PoopStairStringers polys=580
+START PoopStairPosts mods=[] v=776
+OK PoopStairPosts polys=708
+START PoopStairRail mods=[] v=130
+OK PoopStairRail polys=122
+START PoopStairManrope mods=[] v=152
+OK PoopStairManrope polys=146
+START PoopStairStanchions mods=[] v=208
+OK PoopStairStanchions polys=120
+START StairwellWalls mods=['BEVEL'] v=76
+OK StairwellWalls polys=172
+START StairSoffit mods=[] v=26
+OK StairSoffit polys=12
+START LowerFloor mods=['SOLIDIFY'] v=885
+OK LowerFloor polys=1768
+START LowerLining mods=[] v=1140
+OK LowerLining polys=1008
+START LowerFrames mods=[] v=2592
+OK LowerFrames polys=1944
+START LowerWaterway mods=['BEVEL'] v=590
+OK LowerWaterway polys=1202
+START DeckUnderside mods=['BOOLEAN'] v=705
+OK DeckUnderside polys=630
+START DeckBeams mods=['BEVEL'] v=528
+OK DeckBeams polys=1176
+START MastsBelow mods=[] v=80
+OK MastsBelow polys=48
+START CapstanBelow mods=[] v=80
+OK CapstanBelow polys=56
+START LowerStairs mods=['BEVEL'] v=88
+OK LowerStairs polys=286
+START LowerStairStringers mods=['BEVEL'] v=16
+OK LowerStairStringers polys=52
+START LowerStairRail mods=[] v=32
+OK LowerStairRail polys=20
+START ForepeakBulkhead mods=['SOLIDIFY'] v=48
+OK ForepeakBulkhead polys=72
+START AftBulkhead mods=['SOLIDIFY'] v=124
+OK AftBulkhead polys=186
+START RoomDivider mods=[] v=8
+OK RoomDivider polys=6
+START RoomBeams mods=['BEVEL'] v=32
+OK RoomBeams polys=104
+START RoomDoorFrames mods=['BEVEL'] v=48
+OK RoomDoorFrames polys=156
+START RoomShelves mods=[] v=32
+OK RoomShelves polys=24
+START RoomLining mods=[] v=864
+OK RoomLining polys=748
+START GalleyStove mods=[] v=1093
+OK GalleyStove polys=1031
+START GalleyUtensils mods=[] v=168
+OK GalleyUtensils polys=184
+START ProvisionSacks mods=[] v=156
+OK ProvisionSacks polys=180
+START ProvisionsSlateFrame mods=[] v=32
+OK ProvisionsSlateFrame polys=24
+START TableTop mods=['BEVEL'] v=24
+OK TableTop polys=294
+START TableFrame mods=['BEVEL'] v=72
+OK TableFrame polys=234
+START TableLegs mods=[] v=560
+OK TableLegs polys=512
+START TableFiddles mods=['BEVEL'] v=152
+OK TableFiddles polys=484
+START TableQuill mods=['SOLIDIFY'] v=16
+OK TableQuill polys=30
+START TableBrass mods=[] v=120
+OK TableBrass polys=98
+START TablePewter mods=[] v=134
+OK TablePewter polys=102
+START TableInk mods=[] v=60
+OK TableInk polys=52
+START TableCandle mods=[] v=16
+OK TableCandle polys=10
+START TableFlame mods=[] v=42
+OK TableFlame polys=48
+START TableBook mods=['BEVEL'] v=16
+OK TableBook polys=52
+START Lamp_Cabin_Candle mods=[] v=32
+OK Lamp_Cabin_Candle polys=20
+START Lamp_Cabin_Flame mods=[] v=84
+OK Lamp_Cabin_Flame polys=96
+START Lamp_Cabin_Frame mods=[] v=816
+OK Lamp_Cabin_Frame polys=594
+START Lamp_Cabin_Glass mods=[] v=48
+OK Lamp_Cabin_Glass polys=12
+START Lamp_Cabin_Hardware mods=[] v=196
+OK Lamp_Cabin_Hardware polys=124
+START Lamp_Rooms_Candle mods=[] v=32
+OK Lamp_Rooms_Candle polys=20
+START Lamp_Rooms_Flame mods=[] v=84
+OK Lamp_Rooms_Flame polys=96
+START Lamp_Rooms_Frame mods=[] v=816
+OK Lamp_Rooms_Frame polys=594
+START Lamp_Rooms_Glass mods=[] v=48
+OK Lamp_Rooms_Glass polys=12
+START Lamp_Rooms_Hardware mods=[] v=104
+OK Lamp_Rooms_Hardware polys=60
+START Lamp_Hold_Candle mods=[] v=64
+OK Lamp_Hold_Candle polys=40
+START Lamp_Hold_Flame mods=[] v=168
+OK Lamp_Hold_Flame polys=192
+START Lamp_Hold_Frame mods=[] v=1632
+OK Lamp_Hold_Frame polys=1188
+START Lamp_Hold_Glass mods=[] v=96
+OK Lamp_Hold_Glass polys=24
+START Lamp_Hold_Hardware mods=[] v=512
+OK Lamp_Hold_Hardware polys=344
+START GalleyBarrel mods=[] v=64
+OK GalleyBarrel polys=66
+START Bunk_Port mods=['BEVEL'] v=76
+OK Bunk_Port polys=202
+START Bunk_Stbd mods=['BEVEL'] v=76
+OK Bunk_Stbd polys=202
+START BunkBedding_Port mods=['BEVEL'] v=28
+OK BunkBedding_Port polys=261
+START BunkBedding_Stbd mods=['BEVEL'] v=28
+OK BunkBedding_Stbd polys=244
+START RoomTable_Port mods=[] v=1848
+OK RoomTable_Port polys=1834
+START RoomTable_Stbd mods=[] v=1848
+OK RoomTable_Stbd polys=1834
+START ProvisionsSlateChalk mods=[] v=64
+OK ProvisionsSlateChalk polys=48
+START LowerStairPosts mods=['BEVEL'] v=112
+OK LowerStairPosts polys=756
+START GalleyUtensilRail mods=[] v=24
+OK GalleyUtensilRail polys=18
+READ Interiors: verts=29436 faces=26482
+DONE Hull: verts=46702 tris=88950 mats=['M_Brig_HullClean', 'M_Brig_Stripe', 'M_Brig_Tar', 'M_Brig_Walnut', 'M_Brig_BulwarkClean', 'BR_PortRed', 'M_Brig_Iron', 'BR_Glow', 'BR_Gilt', 'BR_Lead', 'M_Brig_OakLight', 'M_Brig_DeckClean', 'M_Brig_Lining', 'BR_GlassDim', 'M_Brig_DarkWood', 'BR_Wax', 'BR_Flame', 'BR_Brass', 'BR_LanternGlass']
+DONE MainDeck: verts=507 tris=884 mats=['M_Brig_DeckClean']
+DONE DeckFittings: verts=19080 tris=36064 mats=['M_Brig_Walnut', 'M_Brig_Iron', 'M_Rope_Hemp', 'M_Brig_OakLight', 'M_Rope_Tar']
+DONE DeckExtras: verts=808 tris=1552 mats=['M_Rope_Tar', 'M_Brig_Walnut', 'M_Brig_Iron', 'BR_Brass']
+DONE Rig_Spars: verts=19788 tris=37268 mats=['M_Brig_MastOak', 'M_Brig_FlamedBlack', 'M_Brig_Walnut', 'M_Brig_Iron', 'M_Brig_OakLight', 'M_Rope_Tar']
+DONE Rig_Ropes: verts=22791 tris=43958 mats=['M_Rope_Tar', 'M_Rope_Hemp']
+DONE Interiors: verts=29418 tris=52815 mats=['M_Brig_CabinFloor', 'BR_Glow', 'M_Brig_DarkWood', 'M_Brig_Lining', 'BR_GlassDim', 'M_Brig_BulwarkClean', 'M_Brig_Walnut', 'M_Brig_OakLight', 'M_Rope_Hemp', 'BR_Brass', 'M_Brig_DeckClean', 'M_Brig_MastOak', 'BR_Copper', 'M_Brig_Iron', 'BR_FireGlow', 'M_Brig_Burlap', 'M_Brig_Parchment', 'BR_Pewter', 'BR_InkGlass', 'BR_Wax', 'BR_Flame', 'BR_Leather', 'BR_LanternGlass', 'BR_Tin', 'M_Brig_Bedding', 'BR_Chalk']
+SAVED C:\Users\Victus\Documents\GitHub\UnchartedOceans\tools\brig_merge\out\s01_static.blend
+=== finished

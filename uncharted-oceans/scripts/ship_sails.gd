@@ -1,0 +1,819 @@
+class_name ShipSails
+extends Node3D
+## The brig's sails, their ropes and the wind, tied to the ship. Created by ship_motion.gd
+## (sails_enabled). Everything is found by name in Brig.glb; nothing in the scene has to be edited.
+##
+## How you sail it (all with the mouse, like the wheel):
+##   * Every sail has a line hanging from a belaying pin on a fife rail. Look at it, hold the left
+##     button and pull the mouse DOWN to haul it: the sail clews up and furls (squares reef halfway
+##     first). Move the mouse UP to ease it out: the sail drops and sets. Let go and the pin holds it.
+##       fore fife rail (aft of the foremast): jib, staysail, fore topgallant / topsail / course
+##       main fife rail (aft of the mainmast): main topgallant / topsail / course, spanker
+##   * The square sails are trimmed with the BRACES, one pair per mast on the pin rails along the
+##     bulwarks. Pull the port brace to swing the yards so their port end goes aft; pull the starboard
+##     one to swing them the other way. A yard braced to the wind drives the ship; square to it or
+##     the wrong way round and the sail is aback and pushes you astern.
+##   * The fore-and-aft sails (jib, staysail, spanker) are trimmed by the crew.
+## The wind is SeaWind (keys [ ] to swing it, 1-4 for the sea state). The physics is in SailModel.
+##
+## Y toggles all sails set / furled (a test aid; the sails ease out or in by themselves).
+
+@export var enabled := true
+## Start with every sail furled, like a ship in port.
+@export var start_furled := true
+## Scale on every sail's area (1 = as modelled). Handy for tuning how lively the ship is.
+@export var area_scale := 1.0
+## Square yards swing this far each way at most (degrees); each yard is also limited by its own level.
+@export var brace_limit_deg := 45.0
+## The spanker's boom swings out to the lee side up to this far (degrees); how fast it swings across (per second).
+@export var spanker_swing_max_deg := 44.0
+@export var spanker_swing_rate := 2.0
+## Mouse pixels of pull per metre of rope.
+@export var pixels_per_metre := 260.0
+## How much wind load makes hauling harder (0 = none).
+@export var load_effort := 2.2
+@export var hull_path: NodePath = ^"Brig"
+
+const MAST_Z := [-4.3, 1.6]                       # fore, main (ship frame, bow is -Z)
+const RAIL_PIN_Y := 2.58
+const RAIL_Z := [-3.40, 2.42]                     # tails hang on the aft side of each fife rail
+const DECK_Y := [1.82, 1.72]
+const LEVEL_LIMIT_DEG := [38.0, 42.0, 45.0]       # course, topsail, topgallant
+
+## Sail table: id, node name, yard name (squares), mast (0 fore / 1 main / -1 none), label,
+## pin x on its fife rail, kind (0 square, 1 fore-and-aft), reefable
+const SAILS := [
+	["Fore_2", "Sail_Fore_2", "Yard_Fore_2", 0, "Fore topgallant", 0.00, 0, false],
+	["Fore_1", "Sail_Fore_1", "Yard_Fore_1", 0, "Fore topsail", 0.36, 0, true],
+	["Fore_0", "Sail_Fore_0", "Yard_Fore_0", 0, "Fore course", 0.72, 0, true],
+	["Jib", "Sail_Jib", "", 0, "Jib", -0.72, 1, false],
+	["Staysail", "Sail_ForeStaysail", "", 0, "Fore staysail", -0.36, 1, false],
+	["Main_2", "Sail_Main_2", "Yard_Main_2", 1, "Main topgallant", -0.54, 0, false],
+	["Main_1", "Sail_Main_1", "Yard_Main_1", 1, "Main topsail", -0.18, 0, true],
+	["Main_0", "Sail_Main_0", "Yard_Main_0", 1, "Main course", 0.18, 0, true],
+	["Spanker", "Sail_Spanker", "", 1, "Spanker", 0.54, 1, false],
+]
+
+class SailRec:
+	var id := ""
+	var label := ""
+	var node: MeshInstance3D
+	var yard: Node3D
+	var yard_basis := Basis.IDENTITY
+	var node_basis := Basis.IDENTITY
+	var node_xform := Transform3D.IDENTITY   # the sail's rest transform in the Brig (the spanker swings from it)
+	var swing_vis := 0.0                     # the spanker's boom angle as drawn, radians (+ = aft end to starboard)
+	var mast := 0
+	var level := 0
+	var kind := 0
+	var reefable := false
+	var model: SailModel.Sail
+	var mat: ShaderMaterial
+	var idx_furled := -1
+	var idx_reefed := -1
+	var progress := 1.0          # 0 = fully set, 1 = furled (the rope's state)
+	var target := -1.0           # automatic (Y key) target, -1 = none
+	var fill := 0.0
+	var luff := 0.0
+	var anchor_idx := -1
+	var base_verts := PackedVector3Array()
+	var d_furled := PackedVector3Array()
+	var d_reefed := PackedVector3Array()
+	var area := 0.0
+	var h_full := 7.0
+	var yard_y := 0.0
+	var swing_axis := Vector3.UP  # headsails: the stay, in the Brig's local space
+	var swing_sign := 1.0
+	var rope: ShipRope
+	var strain := 0.0            # 0..1 how hard the wind is loading this sail
+
+var model := SailModel.new()
+var recs: Array[SailRec] = []
+var braces := [0.0, 0.0]         # per mast, -1 .. +1 (+ = starboard yardarm forward)
+var brace_ropes: Array[ShipRope] = []
+var ropes: Array[ShipRope] = []
+var wind: SeaWind
+var ship: Node3D                 # the ShipRig (ship_motion.gd)
+var held: ShipRope
+var player_busy := false
+
+var _brig: Node3D
+var _sp_parts: Array = []        # the spanker's boom (and gaff): {"n": node, "x": rest transform}, they swing with the sail
+var _sp_scanned := false
+var _flags: Array[Node3D] = []
+var _flag_basis: Array[Basis] = []
+var _label: Label
+var _cam: Camera3D
+var _hands: Node
+var _aimed: ShipRope
+var _setup_done := false
+var _deck_probe_frames := 0
+
+func _ready() -> void:
+	ship = get_parent() as Node3D
+	add_to_group("ship_sails")
+	if not enabled:
+		set_physics_process(false)
+		set_process(false)
+		return
+	_brig = ship.get_node_or_null(hull_path) as Node3D
+	if _brig == null:
+		push_warning("ShipSails: no Brig under the ship")
+		set_physics_process(false)
+		return
+	_setup_wind()
+	_find_sails()
+	_find_flags()
+	_make_ropes()
+	_make_label()
+	model.max_turn_rate_deg = float(ship.get("max_turn_rate_deg")) if ship.get("max_turn_rate_deg") != null else 4.0
+	model.turn_lag = float(ship.get("turn_lag")) if ship.get("turn_lag") != null else 2.5
+	_setup_done = true
+	for r in recs:
+		_apply_visual(r, 0.0)
+
+func _setup_wind() -> void:
+	wind = get_tree().get_first_node_in_group("wind") as SeaWind
+	if wind == null:
+		wind = SeaWind.new()
+		wind.name = "Wind"
+		ship.get_parent().add_child.call_deferred(wind)
+		wind.ocean_path = NodePath("../Ocean")
+
+# ---------------------------------------------------------------- setting up
+
+func _find_sails() -> void:
+	for d in SAILS:
+		var r := SailRec.new()
+		r.id = d[0]
+		r.label = d[4]
+		r.mast = d[3]
+		r.kind = d[6]
+		r.reefable = d[7]
+		r.node = _brig.find_child(d[1], true, false) as MeshInstance3D
+		if r.node == null:
+			push_warning("ShipSails: no sail node %s" % d[1])
+			continue
+		if d[2] != "":
+			r.yard = _brig.find_child(d[2], true, false) as Node3D
+			r.yard_basis = r.yard.transform.basis
+			r.yard_y = _to_ship(r.yard.global_position).y
+			r.level = int(String(d[2]).right(1))
+		r.node_basis = r.node.transform.basis
+		r.node_xform = r.node.transform
+		r.idx_furled = r.node.find_blend_shape_by_name("Furled")
+		r.idx_reefed = r.node.find_blend_shape_by_name("Reefed")
+		r.model = SailModel.Sail.new()
+		r.model.kind = r.kind
+		r.model.group = r.mast
+		r.model.headsail = r.kind == 1 and r.mast == 0
+		_read_mesh(r)
+		_make_material(r)
+		r.node.extra_cull_margin = 3.0
+		r.progress = 1.0 if start_furled else 0.0
+		recs.append(r)
+
+func _to_ship(world: Vector3) -> Vector3:
+	return ship.global_transform.affine_inverse() * world
+
+func _read_mesh(r: SailRec) -> void:
+	var mesh := r.node.mesh
+	var arr := mesh.surface_get_arrays(0)
+	var v: PackedVector3Array = arr[Mesh.ARRAY_VERTEX]
+	r.base_verts = v
+	var idx: PackedInt32Array = arr[Mesh.ARRAY_INDEX]
+	var shapes := mesh.surface_get_blend_shape_arrays(0)
+	for i in mesh.get_blend_shape_count():
+		var nm := String(mesh.get_blend_shape_name(i))
+		var sv: PackedVector3Array = shapes[i][Mesh.ARRAY_VERTEX]
+		var d := PackedVector3Array()
+		d.resize(v.size())
+		for j in v.size():
+			d[j] = sv[j] - v[j]
+		if nm == "Furled":
+			r.d_furled = d
+		elif nm == "Reefed":
+			r.d_reefed = d
+	# area, centre of effort, depth of belly, anchor vertex (all in the sail's own frame, then ship frame)
+	var rel := ship.global_transform.affine_inverse() * r.node.global_transform
+	var area := 0.0
+	var c := Vector3.ZERO
+	for i in range(0, idx.size(), 3):
+		var a: Vector3 = rel * v[idx[i]]
+		var b: Vector3 = rel * v[idx[i + 1]]
+		var e: Vector3 = rel * v[idx[i + 2]]
+		var ar := (b - a).cross(e - a).length() * 0.5
+		area += ar
+		c += (a + b + e) / 3.0 * ar
+	c /= maxf(area, 0.001)
+	r.area = area
+	r.model.area = area * area_scale
+	r.model.f = -c.z
+	r.model.h = c.y
+	r.h_full = c.y
+	r.model.max_swing = deg_to_rad(68.0)
+	_pick_anchor(r, rel)
+	if r.kind == 1 and r.yard == null:
+		_find_swing_axis(r, rel)
+
+func _billow_dir(r: SailRec) -> Vector3:
+	# mesh-local: squares are modelled with the belly toward +Z (the bow); the headsails and the
+	# spanker toward +X (the ship's port side)
+	return Vector3(0, 0, 1) if r.kind == 0 else Vector3(1, 0, 0)
+
+func _make_material(r: SailRec) -> void:
+	var src := r.node.mesh.surface_get_material(0)
+	var tex: Texture2D = null
+	if src is BaseMaterial3D:
+		tex = (src as BaseMaterial3D).albedo_texture
+	var sh := load("res://assets/ships/brig/sail_wind.gdshader") as Shader
+	var m := ShaderMaterial.new()
+	m.shader = sh
+	m.set_shader_parameter("albedo_tex", tex)
+	var dir := _billow_dir(r)
+	m.set_shader_parameter("billow_dir", dir)
+	var lo := 1e9
+	var hi := -1e9
+	for p in r.base_verts:
+		var t := p.dot(dir)
+		lo = minf(lo, t)
+		hi = maxf(hi, t)
+	m.set_shader_parameter("belly_depth", clampf(hi - lo, 0.2, 1.2))
+	r.node.set_surface_override_material(0, m)
+	r.mat = m
+
+## The vertex a rope ties to: the middle of a square sail's foot, the clew of a headsail, the middle
+## of the spanker's after edge (where the brails gather it).
+func _pick_anchor(r: SailRec, rel: Transform3D) -> void:
+	var best := -1
+	var best_score := 1e9
+	var lo_y := 1e9
+	var hi_y := -1e9
+	var max_aft := -1e9
+	for p in r.base_verts:
+		var q: Vector3 = rel * p
+		lo_y = minf(lo_y, q.y)
+		hi_y = maxf(hi_y, q.y)
+		max_aft = maxf(max_aft, q.z)
+	for i in r.base_verts.size():
+		var q: Vector3 = rel * r.base_verts[i]
+		var score := 1e9
+		if r.kind == 0:
+			if absf(q.x) < 0.35:
+				score = q.y
+		elif r.id == "Spanker":
+			if q.z > max_aft - 0.6:
+				score = absf(q.y - (lo_y + hi_y) * 0.5)
+		else:
+			if q.y < lo_y + 0.2:
+				score = -q.z                 # the clew: the low point farthest aft
+		if score < best_score:
+			best_score = score
+			best = i
+	r.anchor_idx = best
+
+## Headsails swing about their stay (tack to head), outward on the lee side.
+func _find_swing_axis(r: SailRec, rel: Transform3D) -> void:
+	var tack := rel.origin
+	var head := tack
+	for p in r.base_verts:
+		var q: Vector3 = rel * p
+		if q.y > head.y:
+			head = q
+	var axis_ship := (head - tack).normalized()
+	# into the Brig's local space (the Brig is the sails' parent frame)
+	var to_brig := _brig.global_transform.affine_inverse() * ship.global_transform
+	r.swing_axis = (to_brig.basis * axis_ship).normalized()
+	r.swing_sign = 1.0
+
+func _find_flags() -> void:
+	for n in ["Flag_Ensign", "Flag_Pennant"]:
+		var f := _brig.find_child(n, true, false) as Node3D
+		if f:
+			_flags.append(f)
+			_flag_basis.append(f.transform.basis)
+			if f is MeshInstance3D:
+				var m := ShaderMaterial.new()
+				m.shader = load("res://assets/ships/brig/sail_wind.gdshader")
+				var src := (f as MeshInstance3D).mesh.surface_get_material(0)
+				if src is BaseMaterial3D:
+					m.set_shader_parameter("albedo_tex", (src as BaseMaterial3D).albedo_texture)
+				m.set_shader_parameter("billow_dir", Vector3(1, 0, 0))
+				m.set_shader_parameter("belly_depth", 0.0)
+				m.set_shader_parameter("flutter_amp", 0.12)
+				m.set_shader_parameter("flutter_speed", 9.0)
+				m.set_shader_parameter("luff", 0.0)
+				(f as MeshInstance3D).set_surface_override_material(0, m)
+				(f as MeshInstance3D).extra_cull_margin = 2.0
+
+# ---------------------------------------------------------------- ropes
+
+func _make_ropes() -> void:
+	for r in recs:
+		var rope := ShipRope.new()
+		rope.name = "Rope_" + r.id
+		rope.sails = self
+		rope.kind = ShipRope.HAUL
+		rope.key = recs.find(r)
+		rope.label = r.label
+		var d: Array = _sail_def(r.id)
+		var rail := _rail_pin(r.mast, float(d[5]))
+		rope.pin = rail
+		rope.deck_y = DECK_Y[r.mast]
+		rope.travel = 2.5
+		add_child(rope)
+		r.rope = rope
+		ropes.append(rope)
+	# braces: for each mast a port and a starboard rope on the bulwark pin rails
+	var specs := [
+		[0, -1, "Fore brace (port)", Vector3(-2.74, 2.36, -2.70), Vector3(-3.0, 3.1, -2.2)],
+		[0, 1, "Fore brace (starboard)", Vector3(2.74, 2.36, -2.70), Vector3(3.0, 3.1, -2.2)],
+		[1, -1, "Main brace (port)", Vector3(-2.74, 2.36, 3.35), Vector3(-3.0, 3.1, 3.85)],
+		[1, 1, "Main brace (starboard)", Vector3(2.74, 2.36, 3.35), Vector3(3.0, 3.1, 3.85)],
+	]
+	for s in specs:
+		var rope := ShipRope.new()
+		rope.name = "Brace_%s_%s" % ["Fore" if s[0] == 0 else "Main", "P" if s[1] < 0 else "S"]
+		rope.sails = self
+		rope.kind = ShipRope.BRACE
+		rope.key = s[0]
+		rope.side = s[1]
+		rope.label = s[2]
+		rope.pin = s[3]
+		rope.block = s[4]
+		rope.deck_y = DECK_Y[s[0]]
+		rope.travel = 2.2
+		add_child(rope)
+		brace_ropes.append(rope)
+		ropes.append(rope)
+
+func _sail_def(id: String) -> Array:
+	for d in SAILS:
+		if d[0] == id:
+			return d
+	return []
+
+func _rail_pin(mast: int, x: float) -> Vector3:
+	return Vector3(x, RAIL_PIN_Y, RAIL_Z[mast])
+
+## Position (ship frame) of the vertex a sail's rope ties to, following the furl / reef shape keys.
+func anchor_ship(r: SailRec) -> Vector3:
+	var p := r.progress
+	var furl := 0.0
+	var reef := 0.0
+	if r.reefable:
+		if p <= 0.5:
+			reef = p / 0.5
+		else:
+			var t := (p - 0.5) / 0.5
+			reef = 1.0 - t
+			furl = t
+	else:
+		furl = p
+	var i := r.anchor_idx
+	var local := r.base_verts[i]
+	if r.d_furled.size() > i:
+		local += r.d_furled[i] * furl
+	if r.d_reefed.size() > i:
+		local += r.d_reefed[i] * reef
+	return _to_ship(r.node.global_transform * local)
+
+## The sail's highest point (its head), ship frame.
+func head_ship(r: SailRec) -> Vector3:
+	var best := Vector3.ZERO
+	var by := -1e9
+	for v in r.base_verts:
+		if v.y > by:
+			by = v.y
+			best = v
+	return _to_ship(r.node.global_transform * best)
+
+## A point on a yard given in the yard's own frame (x along the yard, y up, +z toward the bow), ship frame.
+func yard_point(r: SailRec, local: Vector3) -> Vector3:
+	return _to_ship(r.yard.global_transform * local)
+
+# ---------------------------------------------------------------- state API
+
+func rec(id: String) -> SailRec:
+	for r in recs:
+		if r.id == id:
+			return r
+	return null
+
+## Percent of the sail drawing (100 = fully set, 0 = furled).
+func set_percent(r: SailRec) -> float:
+	return model_frac(r) * 100.0
+
+func model_frac(r: SailRec) -> float:
+	return _area_fraction(r, r.progress)
+
+func _area_fraction(r: SailRec, p: float) -> float:
+	if r.reefable:
+		return lerpf(1.0, 0.75, p / 0.5) if p <= 0.5 else lerpf(0.75, 0.0, (p - 0.5) / 0.5)
+	return 1.0 - p
+
+## Where in its travel the rope is: 0 = sail set, 1 = furled.
+func set_progress(id: String, p: float) -> void:
+	var r := rec(id)
+	if r:
+		r.progress = clampf(p, 0.0, 1.0)
+		r.target = -1.0
+
+func progress_of(id: String) -> float:
+	var r := rec(id)
+	return r.progress if r else 0.0
+
+func set_brace(mast: int, b: float) -> void:
+	braces[mast] = clampf(b, -1.0, 1.0)
+
+## Yard angle of a mast's course yard, degrees (+ = starboard yardarm forward).
+func brace_deg(mast: int) -> float:
+	return braces[mast] * brace_limit_deg
+
+func set_all(furled: bool) -> void:
+	for r in recs:
+		r.target = 1.0 if furled else 0.0
+
+## How the rope moves the state: called by ShipRope while you haul / ease. Returns the amount of
+## rope that actually moved (metres, + = hauled).
+func rope_move(rope: ShipRope, metres: float) -> float:
+	if rope.kind == ShipRope.HAUL:
+		var r: SailRec = recs[rope.key]
+		var dp := metres / rope.travel
+		var np := clampf(r.progress + dp, 0.0, 1.0)
+		var moved := (np - r.progress) * rope.travel
+		r.progress = np
+		r.target = -1.0
+		return moved
+	# brace: pulling the port brace swings the yards toward +, the starboard brace toward -
+	var m: int = rope.key
+	var db: float = (metres / rope.travel) * 2.0 * (-float(rope.side))
+	var nb: float = clampf(braces[m] + db, -1.0, 1.0)
+	var moved_b: float = (nb - braces[m]) / 2.0 * rope.travel * (-float(rope.side))
+	braces[m] = nb
+	return moved_b
+
+## How hard the wind loads the sails a rope works, 0..1+ (for hauling effort).
+func rope_load(rope: ShipRope) -> float:
+	if rope.kind == ShipRope.HAUL:
+		return recs[rope.key].strain
+	var s := 0.0
+	var n := 0
+	for r in recs:
+		if r.mast == rope.key and r.kind == 0:
+			s += r.strain
+			n += 1
+	return s / maxf(n, 1)
+
+func rope_value(rope: ShipRope) -> float:
+	# 0..1: how much of its travel the rope has been hauled in
+	if rope.kind == ShipRope.HAUL:
+		return recs[rope.key].progress
+	var b: float = braces[rope.key]
+	return (b + 1.0) * 0.5 if rope.side < 0 else (1.0 - b) * 0.5
+
+func rope_text(rope: ShipRope) -> String:
+	if rope.kind == ShipRope.HAUL:
+		var r: SailRec = recs[rope.key]
+		var st: String
+		if r.progress < 0.04:
+			st = "set"
+		elif r.progress > 0.96:
+			st = "furled"
+		elif r.reefable and absf(r.progress - 0.5) < 0.06:
+			st = "reefed"
+		else:
+			st = "%d%% set" % roundi(set_percent(r))
+		return "%s: %s" % [r.label, st]
+	var deg := brace_deg(rope.key)
+	var mast_name := "Fore" if rope.key == 0 else "Main"
+	if absf(deg) < 1.5:
+		return "%s yards square" % mast_name
+	return "%s yards braced %d° (%s yardarm forward)" % [mast_name, roundi(absf(deg)), "starboard" if deg > 0 else "port"]
+
+# ---------------------------------------------------------------- per frame
+
+func _physics_process(delta: float) -> void:
+	if not _setup_done or wind == null:
+		return
+	_probe_deck()
+	# automatic set / furl (Y)
+	for r in recs:
+		if r.target >= 0.0:
+			r.progress = move_toward(r.progress, r.target, delta * 0.22)
+			if is_equal_approx(r.progress, r.target):
+				r.target = -1.0
+	# feed the model
+	var yaw := deg_to_rad(float(ship.get("heading_deg")))
+	var fwd := Vector2(-sin(yaw), -cos(yaw))
+	var right := Vector2(cos(yaw), -sin(yaw))
+	var wv := wind.velocity()
+	var w := Vector2(wv.x, wv.z)
+	var wind_ship := Vector2(w.dot(fwd), w.dot(right))
+	model.sails.clear()
+	for r in recs:
+		var frac := _area_fraction(r, r.progress)
+		r.model.set_frac = frac
+		if r.kind == 0:
+			var lim := deg_to_rad(minf(brace_limit_deg, LEVEL_LIMIT_DEG[r.level]))
+			var b := clampf(deg_to_rad(braces[r.mast] * brace_limit_deg), -lim, lim)
+			r.model.beta = b
+		# centre of effort rises toward the yard as a square sail is clewed up
+		if r.kind == 0:
+			r.model.h = lerpf(r.yard_y, r.h_full, frac)
+		model.sails.append(r.model)
+	var motor := -1.0
+	if ship.get("underway"):
+		motor = float(ship.get("ahead_speed"))
+	model.step(delta, wind_ship, float(ship.get("rudder")), motor)
+	var qref := 0.5 * SailModel.RHO_AIR * 100.0
+	for r in recs:
+		r.strain = clampf(r.model.force.length() / maxf(qref * r.area * maxf(r.model.set_frac, 0.05) * 1.2, 1.0), 0.0, 1.5)
+		var tf := 1.0 - exp(-delta * 3.0)
+		r.fill = lerpf(r.fill, r.model.fill, tf)
+		r.luff = lerpf(r.luff, r.model.luff, 1.0 - exp(-delta * 5.0))
+
+func _process(delta: float) -> void:
+	if not _setup_done:
+		return
+	for r in recs:
+		_apply_visual(r, delta)
+	_update_flags()
+	for rope in ropes:
+		rope.refresh()
+	_update_prompt()
+
+func _unhandled_input(e: InputEvent) -> void:
+	if e is InputEventKey and e.pressed and not e.echo and e.physical_keycode == KEY_Y:
+		var any_set := false
+		for r in recs:
+			if r.progress < 0.5:
+				any_set = true
+		set_all(any_set)
+
+func _apply_visual(r: SailRec, _delta: float) -> void:
+	var p := r.progress
+	var furl := 0.0
+	var reef := 0.0
+	if r.reefable:
+		if p <= 0.5:
+			reef = p / 0.5
+		else:
+			var t := (p - 0.5) / 0.5
+			reef = 1.0 - t
+			furl = t
+	else:
+		furl = p
+	if r.idx_furled >= 0:
+		r.node.set_blend_shape_value(r.idx_furled, furl)
+	if r.idx_reefed >= 0:
+		r.node.set_blend_shape_value(r.idx_reefed, reef)
+	# yards swing with the braces
+	if r.yard:
+		var lim := deg_to_rad(minf(brace_limit_deg, LEVEL_LIMIT_DEG[r.level]))
+		var b := clampf(deg_to_rad(braces[r.mast] * brace_limit_deg), -lim, lim)
+		r.yard.transform.basis = Basis(Vector3.UP, b) * r.yard_basis
+	elif r.id == "Spanker":
+		_swing_spanker(r, _delta)
+	else:
+		# headsails swing out on their stay to the lee side
+		var swing := deg_to_rad(clampf(rad_to_deg(r.model.theta) * 1.5, 0.0, 70.0)) * r.model.lee
+		r.node.transform.basis = Basis(r.swing_axis, swing * r.swing_sign) * r.node_basis
+	var set_frac := _area_fraction(r, p)
+	var fill_eff := lerpf(1.0, r.fill, clampf(set_frac * 1.2, 0.0, 1.0))
+	if r.kind == 1:
+		# modelled with the belly to port; to starboard when the sail lies to starboard
+		fill_eff = lerpf(1.0, r.fill * (-r.model.lee), clampf(set_frac * 1.2, 0.0, 1.0)) if r.model.lee != 0.0 else 1.0
+	var gust := wind.gust_amount() if wind else 0.0
+	r.mat.set_shader_parameter("fill", fill_eff)
+	r.mat.set_shader_parameter("luff", r.luff * clampf(set_frac * 2.0, 0.0, 1.0))
+	r.mat.set_shader_parameter("gust", maxf(gust, 0.0))
+	r.mat.set_shader_parameter("slack", clampf(set_frac * 1.5, 0.0, 1.0))
+
+## The spars that belong to the spanker (its boom, and its gaff if the model has one) swing with the sail. The rig table
+## only lists the sail mesh, so they are found by name in the Brig: anything called boom / gaff / spanker that is not
+## the sail itself, a jib or a stay. Called once, before the sail first moves, so each spar's rest pose is its true one.
+func _scan_spanker_parts(sail: Node3D) -> void:
+	_sp_scanned = true
+	_sp_parts.clear()
+	var found: Array[Node3D] = []
+	for c in _brig.find_children("*", "Node3D", true, false):
+		var n := c as Node3D
+		if n == null or n == sail or sail.is_ancestor_of(n) or n.is_ancestor_of(sail):
+			continue
+		var nm := String(n.name).to_lower()
+		if nm.begins_with("sail") or nm.contains("jib") or nm.contains("bowsprit") or nm.contains("stay"):
+			continue
+		if not (nm.contains("boom") or nm.contains("gaff") or nm.contains("spanker")):
+			continue
+		if not (n is MeshInstance3D or not n.find_children("*", "MeshInstance3D", true, false).is_empty()):
+			continue
+		found.append(n)
+	for n in found:
+		var nested := false
+		for m in found:
+			if m != n and m.is_ancestor_of(n):
+				nested = true
+				break
+		if not nested:
+			_sp_parts.append({"n": n, "x": n.transform})
+	if _sp_parts.is_empty():
+		push_warning("ShipSails: no boom or gaff found by name next to the spanker, so only the sail swings")
+
+## The spanker is a boom sail: the whole sail swings about the mainmast, its after end going out to the lee side as the
+## wind pushes it (the headsails swing on their stays, the square sails on their yards). It follows the model's trim
+## angle, eases across when the wind changes sides, and lies along the centreline when it is furled.
+func _swing_spanker(r: SailRec, delta: float) -> void:
+	if not _sp_scanned:
+		_scan_spanker_parts(r.node)
+	var frac := _area_fraction(r, r.progress)
+	var target := deg_to_rad(clampf(rad_to_deg(r.model.theta), 0.0, spanker_swing_max_deg)) * r.model.lee
+	target *= clampf(frac * 4.0, 0.0, 1.0)
+	r.swing_vis = lerpf(r.swing_vis, target, 1.0 - exp(-delta * spanker_swing_rate))
+	# turn about the mainmast, in the ship's own frame (+ angle = the after end goes to starboard)
+	var st := ship.global_transform
+	var pivot := st * Vector3(0.0, 0.0, MAST_Z[1])
+	var rot := Basis(st.basis.y.normalized(), r.swing_vis)
+	var swing := Transform3D(rot, pivot - rot * pivot)
+	var swung := swing * (_brig.global_transform * r.node_xform)
+	r.node.transform = _brig.global_transform.affine_inverse() * swung
+	for p in _sp_parts:
+		var n: Node3D = p["n"]
+		if is_instance_valid(n):
+			n.global_transform = swing * (n.get_parent_node_3d().global_transform * (p["x"] as Transform3D))
+
+func _update_flags() -> void:
+	if wind == null:
+		return
+	var a := model.apparent
+	if a.length() < 0.2:
+		return
+	# where the air is going, in the ship frame (x starboard, z aft); the flags are modelled flying toward -Z
+	var d := Vector2(a.y, -a.x)
+	var psi := atan2(-d.x, -d.y)
+	for i in _flags.size():
+		_flags[i].transform.basis = Basis(Vector3.UP, psi) * _flag_basis[i]
+		var mi := _flags[i] as MeshInstance3D
+		if mi and mi.get_surface_override_material(0):
+			var m := mi.get_surface_override_material(0) as ShaderMaterial
+			m.set_shader_parameter("flutter_amp", 0.06 + 0.02 * minf(a.length(), 12.0))
+			m.set_shader_parameter("flutter_speed", 5.0 + minf(a.length(), 14.0) * 0.8)
+
+## The deck height under each fife rail and pin rail, from the deck collision (once, when physics is up).
+func _probe_deck() -> void:
+	if _deck_probe_frames >= 3:
+		return
+	_deck_probe_frames += 1
+	if _deck_probe_frames < 3:
+		return
+	var space := get_world_3d().direct_space_state
+	for rope in ropes:
+		var from := ship.global_transform * (rope.pin + Vector3(0, 0.6, 0.0) + Vector3(0, 0, 0.5 if rope.kind == ShipRope.HAUL else 0.0))
+		var to := from - ship.global_transform.basis.y * 2.5
+		var q := PhysicsRayQueryParameters3D.create(from, to, 1)
+		var hit := space.intersect_ray(q)
+		if not hit.is_empty():
+			var y := _to_ship(hit["position"]).y
+			if y > 0.5 and y < 3.5:
+				rope.deck_y = y
+
+# ---------------------------------------------------------------- grabbing
+
+func _camera() -> Camera3D:
+	if _cam == null or not is_instance_valid(_cam):
+		var pl := get_tree().get_first_node_in_group("player")
+		if pl:
+			_cam = pl.get_node_or_null("Head/Camera3D") as Camera3D
+			_hands = pl.get("hands")
+	return _cam
+
+## The rope under the crosshair, or null.
+func aimed_rope(reach := 2.0) -> ShipRope:
+	var cam := _camera()
+	if cam == null:
+		return null
+	var o := cam.global_position
+	var d := -cam.global_basis.z
+	var best: ShipRope = null
+	var best_d := 0.16
+	for rope in ropes:
+		var seg := rope.grab_segment_world()
+		var cp := Geometry3D.get_closest_points_between_segments(o, o + d * (reach + 0.4), seg[0], seg[1])
+		var dist := cp[0].distance_to(cp[1])
+		if cp[0].distance_to(o) > reach:
+			continue
+		if dist < best_d:
+			best_d = dist
+			best = rope
+	return best
+
+func _input(e: InputEvent) -> void:
+	if not _setup_done:
+		return
+	if e is InputEventMouseButton and e.button_index == MOUSE_BUTTON_LEFT:
+		if e.pressed and held == null and _captured() and not _busy():
+			var rope := aimed_rope()
+			if rope:
+				_grab(rope)
+				get_viewport().set_input_as_handled()
+		elif not e.pressed and held:
+			_release()
+			get_viewport().set_input_as_handled()
+	elif e is InputEventMouseMotion and held:
+		held.drag(e.relative.y, pixels_per_metre)
+		get_viewport().set_input_as_handled()
+
+func _captured() -> bool:
+	return Input.mouse_mode == Input.MOUSE_MODE_CAPTURED or get_meta("test_capture", false)
+
+func _busy() -> bool:
+	var pl := get_tree().get_first_node_in_group("player")
+	return pl != null and pl.get_meta("grab_busy", false)
+
+func _grab(rope: ShipRope) -> void:
+	held = rope
+	var pl := get_tree().get_first_node_in_group("player")
+	if pl:
+		pl.set_meta("grab_busy", true)
+	rope.begin_hold(_camera())
+
+func _release() -> void:
+	if held:
+		held.end_hold()
+	held = null
+	var pl := get_tree().get_first_node_in_group("player")
+	if pl:
+		pl.set_meta("grab_busy", false)
+
+func release_all() -> void:
+	_release()
+
+# ---------------------------------------------------------------- prompt
+
+func _make_label() -> void:
+	var layer := CanvasLayer.new()
+	layer.layer = 5
+	_label = Label.new()
+	_label.set_anchors_preset(Control.PRESET_CENTER_BOTTOM)
+	_label.grow_horizontal = Control.GROW_DIRECTION_BOTH
+	_label.grow_vertical = Control.GROW_DIRECTION_BEGIN
+	_label.offset_bottom = -90.0
+	_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_label.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.85))
+	_label.add_theme_constant_override("outline_size", 5)
+	_label.add_theme_font_size_override("font_size", 20)
+	_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_label.visible = false
+	layer.add_child(_label)
+	add_child(layer)
+
+func _update_prompt() -> void:
+	if held and (not _captured() or _camera() == null or held.too_far(_camera())):
+		_release()
+	var text := ""
+	var target: ShipRope = held
+	if target == null and _captured() and not _busy():
+		target = aimed_rope()
+	if target != _aimed:
+		if _aimed:
+			_aimed.set_highlight(false)
+		_aimed = target
+		if _aimed:
+			_aimed.set_highlight(true)
+	if held:
+		text = rope_text(held)
+		var load := rope_load(held)
+		if load > 0.35:
+			text += "    (heavy: the wind is loading it)" if load < 0.9 else "    (very heavy: spill the wind first)"
+	elif target:
+		text = rope_text(target) + "\nHold left click and pull down to haul, up to ease" if target.kind == ShipRope.HAUL \
+			else rope_text(target) + "\nHold left click and pull down to haul this brace"
+	# no text on screen while you walk about: the sails and the rope outline say it all (H shows it for testing)
+	if not Engine.get_meta("debug_ui", false):
+		text = ""
+	_label.text = text
+	_label.visible = text != ""
+
+# ---------------------------------------------------------------- readouts
+
+## A few lines for the HUD.
+func status_text() -> String:
+	var wv := wind.velocity() if wind else Vector3.ZERO
+	var wspd := wind.speed() if wind else 0.0
+	var rel_deg := 0.0
+	var a := Vector2(wv.x, wv.z)
+	# true wind angle off the bow: 0 = wind from dead ahead, + = from starboard
+	var yaw := deg_to_rad(float(ship.get("heading_deg")))
+	var fwd := Vector2(-sin(yaw), -cos(yaw))
+	var right := Vector2(cos(yaw), -sin(yaw))
+	var from := -a
+	rel_deg = rad_to_deg(atan2(from.dot(right), from.dot(fwd)))
+	var s := "wind %.1f m/s (%d kn) from %d° off the bow%s   ship %.1f kn   heel %d°\n" % [
+		wspd, roundi(wspd / 0.5144), roundi(absf(rel_deg)), " (stbd)" if rel_deg > 0 else " (port)",
+		model.speed_knots(), roundi(rad_to_deg(model.heel))]
+	var parts := PackedStringArray()
+	for r in recs:
+		parts.append("%s %d%%" % [r.id.replace("_0", " C").replace("_1", " T").replace("_2", " G"), roundi(set_percent(r))])
+	s += "sails: " + "  ".join(parts) + "\n"
+	s += "braces: fore %d°  main %d°     [ ] swing the wind   Y all sails set/furled" % [roundi(brace_deg(0)), roundi(brace_deg(1))]
+	return s

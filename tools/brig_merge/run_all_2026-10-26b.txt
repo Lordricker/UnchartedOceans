@@ -1,0 +1,17 @@
+TBBmalloc: skip allocation functions replacement in ucrtbase.dll: unknown prologue for function _msize
+BlenderMCP addon registered
+00_materials.py        rc=0   5.6s ok
+01_static_groups.py    rc=0  10.4s ok
+02_animated_parts.py   rc=0   3.8s ok
+03_organize.py         rc=0   2.2s ok
+04_decimate.py         rc=0   3.2s ok
+05_rig_lods.py         rc=0   2.4s ok
+06_finalize.py         rc=0   1.7s ok
+07_collision.py        rc=0   2.0s ok
+08_export_test.py      rc=0   5.0s ok
+done -> C:\Users\Victus\Documents\GitHub\UnchartedOceans\export\Brig_test.glb
+BlenderMCP addon unregistered
+Blender 4.1.1 (hash e1743a0317bc built 2024-04-15 23:33:30)
+Read prefs: "C:\Users\Victus\AppData\Roaming\Blender Foundation\Blender\4.1\config\userpref.blend"
+
+Blender quit
