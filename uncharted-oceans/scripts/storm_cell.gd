@@ -36,7 +36,8 @@ func step(dt: float) -> void:
 	pos += velocity * dt
 
 ## Advances the lightning. Returns true on the frame a new flash starts.
-func step_lightning(dt: float, rng: RandomNumberGenerator) -> bool:
+## `allow` is false while another strike is too recent (SkySystem.lightning_min_gap_s): a flash that is due then waits.
+func step_lightning(dt: float, rng: RandomNumberGenerator, allow := true) -> bool:
 	var fired := false
 	flash = maxf(0.0, flash - dt * 7.0)
 	if _second_pulse_s >= 0.0:
@@ -47,8 +48,11 @@ func step_lightning(dt: float, rng: RandomNumberGenerator) -> bool:
 		return false
 	_next_flash_s -= dt
 	if _next_flash_s <= 0.0:
+		if not allow:
+			_next_flash_s = 0.5
+			return false
 		flash = 1.0
 		_second_pulse_s = rng.randf_range(0.09, 0.2)
-		_next_flash_s = rng.randf_range(2.5, 9.0) / (0.4 + intensity)
+		_next_flash_s = rng.randf_range(10.0, 26.0) / (0.7 + 0.3 * intensity)   # at least 10 s apart (it was 2.5-9 s)
 		fired = true
 	return fired

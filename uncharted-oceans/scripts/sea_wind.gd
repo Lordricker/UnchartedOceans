@@ -36,7 +36,7 @@ extends Node
 ## Set align_to_ship off to keep the Ocean's own wind_heading_deg.
 @export var align_to_ship := true
 @export_range(-90.0, 90.0) var from_astern_deg := 45.0
-## Close to a port (inside the ring where its scene is loaded) the sea is held at this level or below: 2 = rough, so
+## Close to a port (inside Ocean.port_calm_radius_m, 1.5 km) the sea is held at this level or below: 2 = rough, so
 ## the big storm swell never reaches a harbour approach, whether the storm is the weather's or the 4 key's. When the
 ## ship comes within range of a port the swell dies down over about port_calm_s seconds.
 @export_range(0.0, 3.0) var port_max_sea_level := 2.0

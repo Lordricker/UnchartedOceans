@@ -1,0 +1,561 @@
+extends Node
+## Ambient sea sound. Autoload "Ambience", so it runs in every scene and keeps going across scene changes.
+##
+## It plays a handful of looping recordings (res://assets/audio/ambience/) and turns each one up or down from what is
+## actually happening round the player. Nothing here is on a timer of its own; it reads the game's own systems:
+##   wind        SeaWind ("wind" group): wind speed and gusts            -> wind_sea loop, its pitch and volume
+##   sea state   Ocean (found through SeaWind): sea_level 0 calm..3 storm -> hull water and the rough-sea loop
+##   coast       WorldChart.shore_distance_m at the ship (via the "world_streamer" and "weather" groups)
+##                                                                        -> shore waves, gulls, breaking surf
+##   weather     WorldWeather: rain, storm nearness, daylight             -> gulls stay away in bad weather and at night
+##   the player  swimming / head_under, and a ray straight up (same trick as RainEffect) for "under cover"
+##                                                                        -> muffled wind below deck, muffled under water
+## A scene with no sea in it (no SeaWind and no ship) stays silent.
+##
+## Buses (made here if the project does not have them yet):
+##   Master
+##    +- Ambience            everything in this file; set its level with ambience_db
+##    |   +- AmbOutdoor      has a low-pass filter this script closes below deck and under water
+##    +- SFX                 empty for now
+##    +- Music               empty for now
+## The hull sound goes straight to Ambience (it should stay clear below deck), the rest to AmbOutdoor.
+##
+## Debug: the layers' levels are in the debug HUD (status_text), H shows it.
+## Not here yet: rain on the water and the deck, creaking rigging, bells. (Thunder is at the bottom of this file.)
+
+const DIR := "res://assets/audio/ambience/"
+const BUS_AMBIENCE := "Ambience"
+const BUS_OUTDOOR := "AmbOutdoor"
+const BUS_SFX := "SFX"
+const BUS_MUSIC := "Music"
+
+## trim is the dB that brings each file to about the same loudness (measured, -28 LUFS at full); tau is the
+## smoothing time in seconds, so a layer swells in and out instead of switching.
+const LAYER_DEFS := {
+	"hull":  {"file": "hull_sea.ogg",    "bus": BUS_AMBIENCE, "trim": -7.5,  "tau": 2.5},
+	"rough": {"file": "sea_rough.ogg",   "bus": BUS_OUTDOOR,  "trim": -12.5, "tau": 4.0},
+	"wind":  {"file": "wind_sea.ogg",    "bus": BUS_OUTDOOR,  "trim": -10.5, "tau": 2.5},
+	"shore": {"file": "shore_waves.ogg", "bus": BUS_OUTDOOR,  "trim": -1.0,  "tau": 3.0},
+	"terns": {"file": "coast_terns.ogg", "bus": BUS_OUTDOOR,  "trim": -2.5,  "tau": 5.0},
+	"birds": {"file": "coast_birds.ogg", "bus": BUS_OUTDOOR,  "trim": -9.0,  "tau": 5.0},
+	"swim":  {"file": "swim_loop.ogg",   "bus": BUS_OUTDOOR,  "trim": -10.5, "tau": 0.7},
+}
+const SURF_FILES := ["surf_01.ogg", "surf_02.ogg", "surf_03.ogg", "surf_04.ogg"]
+const OPEN_HZ := 20500.0
+
+@export var enabled := true
+## Level of the whole ambience bus, dB.
+@export var ambience_db := -3.0:
+	set(v):
+		ambience_db = v
+		_apply_bus_volume()
+
+@export_group("Wind")
+## Wind speed (m/s) where the wind loop starts to be heard, and where it is at full.
+@export var wind_min_mps := 2.0
+@export var wind_max_mps := 20.0
+
+@export_group("Coast")
+## Shore waves are full closer than near, gone beyond far (metres from the coast).
+@export var shore_near_m := 120.0
+@export var shore_far_m := 2000.0
+## Gulls are heard out to this distance from the coast, metres.
+@export var gull_range_m := 5000.0
+## Gulls are meant to be faint: this is taken off their layers, dB.
+@export var gull_db := -10.0
+## Breaking waves round you only inside this distance from the coast, metres.
+@export var surf_range_m := 600.0
+
+class Layer extends RefCounted:
+	var player: AudioStreamPlayer
+	var base_db := 0.0
+	var tau := 3.0
+	var gain := 0.0      # smoothed, linear
+	var target := 0.0
+
+var _layers := {}
+var _surf: Array[AudioStream] = []
+var _surf_players: Array[AudioStreamPlayer3D] = []
+var _surf_t := 5.0
+
+var _noise := FastNoiseLite.new()
+var _t := 0.0
+var _sample_t := 0.0
+var _find_t := 0.0
+var _cover_t := 0.0
+
+var _wind: Node
+var _weather: Node
+var _streamer: Node
+var _ship: Node3D
+var _player: Node3D
+var _ocean: Node
+
+# what the last look found
+var _have_sea := false
+var _wind_mps := 6.0
+var _gust := 0.0
+var _sea_level := 1.0
+var _shore_m := 99999.0
+var _rain := 0.0
+var _storm := 0.0
+var _daylight := 1.0
+var _ship_speed := 0.0
+var _on_ship := false
+
+## Thunder: one-shot recordings played when the thunder of a lightning strike reaches the ship (SkySystem.lightning
+## says how far off it was and how many seconds the sound takes). Which one depends on where the storm is:
+##   rumble  the storm is way off: a long low roll, a random 12-18 s slice of the recording
+##   rain    the storm is close to you (just about upon you): thunder with the rain coming
+##   boom    you are in the storm itself (inside the no-sleep zone): the big crack
+const THUNDER_FILES := {"rumble": "thunder_rumble.ogg", "rain": "thunder_rain.ogg", "boom": "thunder_boom.ogg"}
+const THUNDER_MAX_M := 35000.0         # farther strikes are not heard at all
+const THUNDER_CLOSE_STORM := 0.25      # storm_proximity_at_ship from here on: "rain" thunder
+const THUNDER_IN_STORM := 0.7          # ... and from here (WorldWeather.storm_wake_level): "boom"
+var _thunder := {}
+var _thunder_players: Array[AudioStreamPlayer] = []
+var _thunder_tweens: Array[Tween] = []
+var _thunder_next := 0
+var _thunder_queue: Array = []         # of {"due": seconds on _t, "d": strike distance in metres}
+var _sky: SkySystem
+var _swimming := false
+var _head_under := false
+var _covered := false
+var _shelter := 0.0      # smoothed 0 open .. 1 under cover
+var _under := 0.0        # smoothed 0 .. 1 head under water
+var _shore_factor := 0.0
+var _gull_gain := 0.0
+var _lowpass: AudioEffectLowPassFilter
+var _lowpass_idx := -1
+var _cutoff := OPEN_HZ
+
+
+func _ready() -> void:
+	add_to_group("ambience")
+	_noise.seed = randi()
+	_noise.frequency = 0.03
+	_ensure_buses()
+	_load_layers()
+	_load_surf()
+	_load_thunder()
+	_apply_bus_volume()
+
+
+# ------------------------------------------------------------------ set-up
+
+func _bus_exists(bus_name: String) -> bool:
+	return AudioServer.get_bus_index(bus_name) >= 0
+
+
+func _add_bus(bus_name: String, send: String) -> void:
+	if _bus_exists(bus_name):
+		return
+	AudioServer.add_bus()
+	var i := AudioServer.bus_count - 1
+	AudioServer.set_bus_name(i, bus_name)
+	AudioServer.set_bus_send(i, send)
+
+
+func _ensure_buses() -> void:
+	_add_bus(BUS_AMBIENCE, "Master")
+	_add_bus(BUS_OUTDOOR, BUS_AMBIENCE)
+	_add_bus(BUS_SFX, "Master")
+	_add_bus(BUS_MUSIC, "Master")
+	_lowpass_idx = -1
+	var bi := AudioServer.get_bus_index(BUS_OUTDOOR)
+	for e in AudioServer.get_bus_effect_count(bi):
+		if AudioServer.get_bus_effect(bi, e) is AudioEffectLowPassFilter:
+			_lowpass_idx = e
+			break
+	if _lowpass_idx < 0:
+		var lp := AudioEffectLowPassFilter.new()
+		lp.cutoff_hz = OPEN_HZ
+		AudioServer.add_bus_effect(bi, lp)
+		_lowpass_idx = AudioServer.get_bus_effect_count(bi) - 1
+	_lowpass = AudioServer.get_bus_effect(bi, _lowpass_idx) as AudioEffectLowPassFilter
+	AudioServer.set_bus_effect_enabled(bi, _lowpass_idx, false)
+
+
+func _apply_bus_volume() -> void:
+	var i := AudioServer.get_bus_index(BUS_AMBIENCE)
+	if i >= 0:
+		AudioServer.set_bus_volume_db(i, ambience_db)
+
+
+func _load_stream(file: String) -> AudioStream:
+	var path := DIR + file
+	if not ResourceLoader.exists(path):
+		push_warning("Ambience: %s is not imported yet (open the project in the editor once so Godot imports it)" % path)
+		return null
+	var s := load(path) as AudioStream
+	if s is AudioStreamOggVorbis:
+		(s as AudioStreamOggVorbis).loop = true
+	return s
+
+
+func _load_layers() -> void:
+	for key in LAYER_DEFS:
+		var d: Dictionary = LAYER_DEFS[key]
+		var s := _load_stream(d["file"])
+		if s == null:
+			continue
+		var l := Layer.new()
+		l.player = AudioStreamPlayer.new()
+		l.player.name = "Amb_" + key
+		l.player.stream = s
+		l.player.bus = StringName(d["bus"])
+		l.player.volume_db = -80.0
+		add_child(l.player)
+		l.base_db = float(d["trim"])
+		l.tau = float(d["tau"])
+		_layers[key] = l
+
+
+func _load_surf() -> void:
+	for f in SURF_FILES:
+		var path: String = DIR + f
+		if ResourceLoader.exists(path):
+			var s := load(path) as AudioStream
+			if s is AudioStreamOggVorbis:
+				(s as AudioStreamOggVorbis).loop = false
+			_surf.append(s)
+	if _surf.is_empty():
+		return
+	for i in 3:
+		var p := AudioStreamPlayer3D.new()
+		p.name = "Surf_%d" % i
+		p.bus = StringName(BUS_OUTDOOR)
+		p.attenuation_model = AudioStreamPlayer3D.ATTENUATION_INVERSE_DISTANCE
+		p.unit_size = 10.0
+		p.max_distance = 110.0
+		p.doppler_tracking = AudioStreamPlayer3D.DOPPLER_TRACKING_DISABLED
+		add_child(p)
+		_surf_players.append(p)
+
+
+# ------------------------------------------------------------------ looking round
+
+func _find_nodes() -> void:
+	if _wind == null or not is_instance_valid(_wind):
+		_wind = get_tree().get_first_node_in_group("wind")
+	if _weather == null or not is_instance_valid(_weather):
+		_weather = get_tree().get_first_node_in_group("weather")
+	if _streamer == null or not is_instance_valid(_streamer):
+		_streamer = get_tree().get_first_node_in_group("world_streamer")
+	if _ship == null or not is_instance_valid(_ship):
+		_ship = get_tree().get_first_node_in_group("ships") as Node3D
+	if _player == null or not is_instance_valid(_player):
+		_player = get_tree().get_first_node_in_group("player") as Node3D
+	if _sky == null or not is_instance_valid(_sky):
+		_sky = get_tree().get_first_node_in_group("sky_system") as SkySystem
+		if _sky != null and not _sky.lightning.is_connected(_on_lightning):
+			_sky.lightning.connect(_on_lightning)
+	if _ocean == null or not is_instance_valid(_ocean):
+		_ocean = null
+		if _wind != null:
+			var np = _wind.get("ocean_path")
+			if np is NodePath:
+				_ocean = _wind.get_node_or_null(np)
+
+
+func _sample() -> void:
+	_have_sea = _wind != null or _ship != null
+	# wind and sea state
+	if _wind != null:
+		_wind_mps = float(_wind.call("speed"))
+		_gust = float(_wind.call("gust_amount"))
+	else:
+		_wind_mps = 6.0
+		_gust = 0.0
+	if _ocean != null:
+		_sea_level = float(_ocean.get("sea_level"))
+	else:
+		# no ocean to ask: the wind says how rough it is (SeaWind's own speeds: 3, 8.5, 14, 22 m/s)
+		_sea_level = clampf(remap(_wind_mps, 3.0, 22.0, 0.0, 3.0), 0.0, 3.0)
+	# the weather
+	_rain = 0.0
+	_storm = 0.0
+	_daylight = 1.0
+	_shore_m = 99999.0
+	if _weather != null:
+		_rain = float(_weather.call("rain_at_ship"))
+		_storm = float(_weather.call("storm_proximity_at_ship"))
+		_daylight = float(_weather.call("daylight"))
+		if _streamer != null:
+			var chart = _streamer.get("chart")
+			if chart != null:
+				var p: Vector2 = _weather.call("ship_chart_pos")
+				_shore_m = float(chart.call("shore_distance_m", p.x, p.y))
+	# the ship and the player
+	_ship_speed = 0.0
+	_on_ship = false
+	if _ship != null:
+		var sp = _ship.get("speed")
+		if sp != null:
+			_ship_speed = absf(float(sp))
+	_swimming = false
+	_head_under = false
+	if _player != null:
+		var sw = _player.get("swimming")
+		var hu = _player.get("head_under")
+		_swimming = sw == true
+		_head_under = hu == true
+		if _ship != null:
+			var d := _player.global_position - _ship.global_position
+			_on_ship = Vector2(d.x, d.z).length() < 14.0 and absf(d.y) < 9.0
+
+
+func _physics_process(delta: float) -> void:
+	# a ray straight up from the camera: a deck, a cabin roof or an awning overhead means "under cover" (as RainEffect does)
+	_cover_t -= delta
+	if _cover_t > 0.0:
+		return
+	_cover_t = 0.2
+	var cam := get_viewport().get_camera_3d()
+	if cam == null or not _have_sea:
+		_covered = false
+		return
+	var from := cam.global_position
+	var q := PhysicsRayQueryParameters3D.create(from, from + Vector3.UP * 12.0)
+	q.collide_with_areas = false
+	if _player is CollisionObject3D:
+		var ex: Array[RID] = [(_player as CollisionObject3D).get_rid()]
+		q.exclude = ex
+	_covered = not cam.get_world_3d().direct_space_state.intersect_ray(q).is_empty()
+
+
+# ------------------------------------------------------------------ the mix
+
+func _set_target(key: String, v: float) -> void:
+	if _layers.has(key):
+		(_layers[key] as Layer).target = maxf(v, 0.0)
+
+
+func _mix() -> void:
+	if not enabled or not _have_sea:
+		for key in _layers:
+			(_layers[key] as Layer).target = 0.0
+		_shore_factor = 0.0
+		_gull_gain = 0.0
+		return
+	var sh := _shelter
+	var un := _under
+	var lvl := clampf(_sea_level / 3.0, 0.0, 1.0)
+	var w := clampf(inverse_lerp(wind_min_mps, wind_max_mps, _wind_mps), 0.0, 1.0)
+	var out_gain := lerpf(1.0, 0.4, sh) * (1.0 - 0.65 * un)     # outdoor sounds, muffled by a roof and by water
+
+	# A gale (wind above about 14 m/s, or a storm sea) takes over the soundscape: the wind howls louder and higher, the
+	# heavy sea comes up under it, and the hull's own sound (the same wooden-ship-on-water loop you hear tied up in port) is
+	# pushed down so it stops sounding like the harbour.
+	var gale := maxf(smoothstep(0.7, 1.0, w), smoothstep(2.3, 3.0, _sea_level))
+
+	# wind: speed, with the gusts riding on top; pitch leans up a little in a blow, and more in a gale
+	var wind_gain := pow(w, 1.15) * (1.0 + 0.4 * _gust) * (1.0 + 0.55 * gale) * lerpf(1.0, 0.5, sh) * (1.0 - 0.9 * un)
+	_set_target("wind", minf(wind_gain, 1.9))
+	if _layers.has("wind"):
+		(_layers["wind"] as Layer).player.pitch_scale = lerpf(0.9, 1.08, w) + 0.06 * gale
+
+	# the sea against the hull: always there on board, more with sea and way on, clearer below deck. On the dock it
+	# is only a distant ship.
+	var hull := 0.5 + 0.25 * lvl + 0.2 * clampf(_ship_speed / 6.0, 0.0, 1.0)
+	hull *= lerpf(1.0, 1.5, sh)
+	hull *= lerpf(1.0, 0.4, gale)
+	if not _on_ship:
+		hull = 0.12
+	_set_target("hull", minf(hull, 1.0) * (1.0 - 0.8 * un))
+
+	# a heavy sea
+	_set_target("rough", smoothstep(1.0, 2.6, _sea_level) * (0.8 + 0.2 * w) * (1.0 + 0.35 * gale) * out_gain)
+
+	# waves on the shore: heard from the coast out to shore_far_m, a little more with a bigger sea
+	_shore_factor = 1.0 - smoothstep(shore_near_m, shore_far_m, _shore_m)
+	_set_target("shore", pow(_shore_factor, 1.3) * lerpf(0.65, 1.0, clampf(_sea_level / 2.0, 0.0, 1.0)) * out_gain)
+
+	# gulls: only near a coast, by day, in fair weather, and they come and go
+	var coast := 1.0 - smoothstep(600.0, gull_range_m, _shore_m)
+	var day := smoothstep(0.05, 0.4, _daylight)
+	var fair := clampf(1.0 - _rain * 1.6 - _storm * 1.3 - maxf(0.0, w - 0.45) * 1.6, 0.0, 1.0)
+	var presence := smoothstep(-0.2, 0.6, _noise.get_noise_1d(_t))
+	_gull_gain = coast * day * fair * presence
+	var gull_lin := db_to_linear(gull_db)
+	# the two gull recordings trade places slowly, so it never sounds like one loop
+	var a := 0.55 + 0.45 * sin(_t * 0.05)
+	var b := 0.55 + 0.45 * sin(_t * 0.037 + 2.0)
+	_set_target("terns", _gull_gain * a * gull_lin * out_gain)
+	_set_target("birds", _gull_gain * b * 0.7 * gull_lin * out_gain)
+
+	# swimming
+	_set_target("swim", 1.0 if _swimming else 0.0)
+
+
+func _surf_tick(delta: float) -> void:
+	if _surf_players.is_empty() or not enabled or not _have_sea:
+		return
+	var near := 1.0 - smoothstep(surf_range_m * 0.3, surf_range_m, _shore_m)
+	if near < 0.05:
+		return
+	_surf_t -= delta
+	if _surf_t > 0.0:
+		return
+	_surf_t = randf_range(lerpf(18.0, 5.0, near), lerpf(30.0, 10.0, near))
+	var cam := get_viewport().get_camera_3d()
+	if cam == null:
+		return
+	for p in _surf_players:
+		if p.playing:
+			continue
+		var ang := randf() * TAU
+		var dist := randf_range(10.0, 28.0)
+		p.global_position = cam.global_position + Vector3(cos(ang) * dist, -1.5, sin(ang) * dist)
+		p.stream = _surf[randi() % _surf.size()]
+		p.pitch_scale = randf_range(0.88, 1.08)
+		p.volume_db = randf_range(-6.0, -1.0) - 6.0 * _shelter - 12.0 * _under
+		p.play()
+		return
+
+
+func _process(delta: float) -> void:
+	_t += delta
+	_update_thunder()
+	_find_t -= delta
+	if _find_t <= 0.0:
+		_find_t = 1.0
+		_find_nodes()
+	_sample_t -= delta
+	if _sample_t <= 0.0:
+		_sample_t = 0.25
+		_sample()
+		_mix()
+	_shelter = move_toward(_shelter, 1.0 if _covered else 0.0, delta * 1.5)
+	_under = move_toward(_under, 1.0 if _head_under else 0.0, delta * 6.0)
+	# every layer glides to its target and is switched off when it cannot be heard
+	for key in _layers:
+		var l := _layers[key] as Layer
+		l.gain = lerpf(l.gain, l.target, 1.0 - exp(-delta / l.tau))
+		if l.gain < 0.004 and l.target < 0.004:
+			if l.player.playing:
+				l.player.stop()
+			continue
+		if not l.player.playing:
+			var length := l.player.stream.get_length()
+			l.player.play(randf() * length if length > 0.0 else 0.0)
+		l.player.volume_db = l.base_db + linear_to_db(maxf(l.gain, 0.0001))
+	_update_filter(delta)
+	_surf_tick(delta)
+
+
+## Closes the low-pass on the outdoor bus under a roof and under water, opens it again outside.
+func _update_filter(delta: float) -> void:
+	if _lowpass == null:
+		return
+	var target := exp(lerpf(log(OPEN_HZ), log(2400.0), _shelter))
+	if _head_under:
+		target = minf(target, 420.0)
+	var tau := 0.12 if _head_under or _under > 0.05 else 0.5
+	_cutoff = exp(lerpf(log(_cutoff), log(target), 1.0 - exp(-delta / tau)))
+	var bi := AudioServer.get_bus_index(BUS_OUTDOOR)
+	if bi < 0:
+		return
+	var closed := _cutoff < OPEN_HZ * 0.9
+	AudioServer.set_bus_effect_enabled(bi, _lowpass_idx, closed)
+	if closed:
+		_lowpass.cutoff_hz = _cutoff
+
+
+## One line for the debug HUD.
+func status_text() -> String:
+	if not _have_sea:
+		return "sound: no sea in this scene"
+	var g := func(k: String) -> float:
+		return (_layers[k] as Layer).gain if _layers.has(k) else -1.0
+	return "sound: wind %.1f m/s  sea %.1f  shore %s  %s%s\n  layers  wind %.2f  rough %.2f  hull %.2f  shore %.2f  terns %.2f  birds %.2f  swim %.2f   cutoff %d Hz" % [
+		_wind_mps, _sea_level, ("%.0f m" % _shore_m) if _shore_m < 90000.0 else "n/a",
+		"on ship" if _on_ship else "off ship", "  under cover" if _covered else "",
+		g.call("wind"), g.call("rough"), g.call("hull"), g.call("shore"), g.call("terns"), g.call("birds"), g.call("swim"),
+		int(_cutoff)]
+
+
+# ------------------------------------------------------------------ thunder
+
+func _load_thunder() -> void:
+	for k in THUNDER_FILES:
+		var path: String = DIR + String(THUNDER_FILES[k])
+		if ResourceLoader.exists(path):
+			var st := load(path) as AudioStream
+			if st is AudioStreamOggVorbis:
+				(st as AudioStreamOggVorbis).loop = false
+			_thunder[k] = st
+	if _thunder.is_empty():
+		return
+	for i in 4:
+		var p := AudioStreamPlayer.new()
+		p.name = "Thunder_%d" % i
+		p.bus = StringName(BUS_OUTDOOR)      # muffled under a roof like the wind
+		add_child(p)
+		_thunder_players.append(p)
+		_thunder_tweens.append(null)
+
+
+## A strike happened distance_m away; its thunder arrives delay_s later.
+func _on_lightning(_cell: StormCell, distance_m: float, delay_s: float) -> void:
+	if not enabled or _thunder.is_empty() or distance_m > THUNDER_MAX_M:
+		return
+	_thunder_queue.append({"due": _t + delay_s, "d": distance_m})
+	if _thunder_queue.size() > 8:
+		_thunder_queue.pop_front()
+
+
+func _update_thunder() -> void:
+	if _thunder_queue.is_empty():
+		return
+	var i := 0
+	while i < _thunder_queue.size():
+		var e: Dictionary = _thunder_queue[i]
+		if _t >= float(e["due"]):
+			_thunder_queue.remove_at(i)
+			_play_thunder(float(e["d"]))
+		else:
+			i += 1
+
+
+func _play_thunder(d: float) -> void:
+	# which recording: decided when the sound arrives, from where the storm is relative to the ship now
+	var kind := "rumble"
+	if _storm >= THUNDER_IN_STORM and d < 12000.0:
+		kind = "boom"
+	elif _storm >= THUNDER_CLOSE_STORM or d < 6000.0:
+		kind = "rain"
+	if not _thunder.has(kind) or _thunder_players.is_empty():
+		return
+	var st: AudioStream = _thunder[kind]
+	var peak_db := 0.0
+	var fade_in := 0.05
+	var fade_out := 1.5
+	var from := 0.0
+	var span := st.get_length()
+	match kind:
+		"rumble":
+			peak_db = lerpf(-6.0, -20.0, clampf((d - 4000.0) / 30000.0, 0.0, 1.0))
+			fade_in = 2.0
+			fade_out = 3.0
+			span = minf(span, randf_range(12.0, 18.0))
+			from = randf_range(0.0, maxf(st.get_length() - span, 0.0))
+		"rain":
+			peak_db = lerpf(-4.0, -12.0, clampf(d / 12000.0, 0.0, 1.0))
+		"boom":
+			peak_db = lerpf(-1.0, -7.0, clampf(d / 10000.0, 0.0, 1.0))
+	var idx := _thunder_next
+	_thunder_next = (_thunder_next + 1) % _thunder_players.size()
+	var p := _thunder_players[idx]
+	if _thunder_tweens[idx] != null and _thunder_tweens[idx].is_valid():
+		_thunder_tweens[idx].kill()
+	p.stream = st
+	p.pitch_scale = randf_range(0.93, 1.05)
+	p.volume_db = -60.0
+	p.play(from)
+	var tw := create_tween()
+	_thunder_tweens[idx] = tw
+	tw.tween_property(p, "volume_db", peak_db, fade_in)
+	tw.tween_interval(maxf(span / p.pitch_scale - fade_in - fade_out, 0.0))
+	tw.tween_property(p, "volume_db", -60.0, fade_out)
+	tw.tween_callback(p.stop)

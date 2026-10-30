@@ -1,4 +1,4 @@
-=== stage2 start 11:30:00 file=C:\Users\Victus\Documents\GitHub\UnchartedOceans\tools\brig_merge\out\s01_static.blend
+=== stage2 start 12:44:39 file=C:\Users\Victus\Documents\GitHub\UnchartedOceans\tools\brig_merge\out\s01_static.blend
 READ Rudder: Rudder
 READ Rudder: RudderHead
 READ Rudder: RudderPort
@@ -135,9 +135,9 @@ PLACED Sail_ForeStaysail: parent=Brig world=(0.0, -13.72, 5.62) (old (0.0, -13.7
 PLACED Sail_Spanker: parent=Brig world=(0.0, 1.6, 6.1) (old (0.0, 1.6, 6.1)) shape_keys=['Basis', 'Furled'] colors=['PinWeights']
 PLACED Flag_Ensign: parent=Brig world=(0.0, 0.64, 16.93) (old (0.0, 0.64, 16.93)) shape_keys=None colors=['PinWeights']
 PLACED Flag_Pennant: parent=Brig world=(0.0, -5.26, 16.23) (old (0.0, -5.26, 16.23)) shape_keys=None colors=['PinWeights']
-unused appended material: M_Brig_Rig (users 6)
 unused appended material: M_Brig_Sails (users 0)
-unused appended material: M_Rope_Tar.001 (users 6)
 unused appended material: M_Rope_Boltrope.001 (users 0)
+unused appended material: M_Rope_Tar.001 (users 6)
+unused appended material: M_Brig_Rig (users 6)
 SAVED C:\Users\Victus\Documents\GitHub\UnchartedOceans\tools\brig_merge\out\s02_animated.blend
 === stage2 finished

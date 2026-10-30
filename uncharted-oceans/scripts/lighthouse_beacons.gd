@@ -2,16 +2,18 @@ extends Node3D
 ## Far-reaching lighthouse lights, so a port can be found from the horizon.
 ##
 ## A port's own scene only spawns inside 6 km (WorldChart.PORT_SPAWN_M), and its lantern is a 40 m point light, so
-## without this nothing at all shows of a port until you are almost there. Here every lighthouse port gets a light
-## that is always present in the world, whatever the port's scene is doing:
-##   - a warm glow that stays a small, constant size on screen (a point of light, however far) and is visible out to the
-##     geometric horizon: 3.57 km x (sqrt(eye height) + sqrt(lamp height)), the same sum WorldChart.horizon_m uses. From
-##     deck level a 22 m capital light shows from about 23 km, a 14 m small-port light from about 19 km, and higher up
-##     (the lookout barrel) it shows from farther. The sea's curve is applied, so land in the way hides it too.
-##   - a turning beam (a long thin ribbon), at night only, visible out to beam_visible_m. The glow flashes each time the
-##     beam points at you. Each port turns at its own pace and shows 1 to 3 flashes a turn, so ports can be told apart.
-##   - by day the glow is just a pale glint (day_strength); at night it is bright. Rain and storm dim it.
-## Once the port's scene has spawned, the beacon sits on its real lantern (the Blender marker "Light_...Lighthouse...")
+## without this nothing at all shows of a port until you are almost there. Here every lighthouse port gets one light
+## that is always present in the world, whatever the port's scene is doing: a single warm dot.
+##   - Far away it is a small dot on the horizon. It swells and fades as the lamp turns (dark, then bright, then dark
+##     again every `period`), so the spin is read from the dot itself, with no beams drawn.
+##   - Closer, it grows: its size is the lamp's glare radius seen from here, so it gets bigger the nearer you come.
+##   - It shows out to the geometric horizon: 3.57 km x (sqrt(eye height) + sqrt(lamp height)), the same sum
+##     WorldChart.horizon_m uses. From deck level a 22 m capital light shows from about 23 km, a 14 m small-port light
+##     from about 19 km, and higher up (the lookout barrel) from farther. The sea's curve is applied, so land in the way
+##     hides it too.
+##   - By day it is just a pale glint (day_strength); at night it is bright. Rain and storm dim it.
+##   - Each port turns at its own pace (period), so ports can be told apart by how fast the dot pulses.
+## Once the port's scene has spawned, the dot sits on its real lantern (the Blender marker "Light_...Lighthouse...")
 ## and that lantern's OmniLight3D gets a longer range.
 ##
 ## Capitals and small "harbor" ports get one. Ports of other types (lagoons, the free port) do not unless listed in
@@ -22,17 +24,28 @@ extends Node3D
 
 @export var streamer: Node
 @export var enabled := true
-## Strength of the glow at night and by day (0..1).
+## Strength of the dot at night and by day (0..1).
 @export var night_strength := 1.0
 @export var day_strength := 0.3
-## How much of the glow stays on between flashes.
-@export_range(0.0, 1.0) var steady_glow := 0.35
-## Size of the glow on screen, in degrees: resting, and at the peak of a flash.
-@export var glow_deg := 0.3
-@export var flash_glow_deg := 0.7
-@export var beams_enabled := true
-@export var beam_length_m := 5000.0
-@export var beam_visible_m := 12000.0
+## How dark the dot gets at the dark point of each turn (0 = out, 1 = no pulse).
+@export_range(0.0, 1.0) var dark_level := 0.12
+## The dot's smallest size on screen, in degrees (a point of light, however far).
+@export var dot_deg := 0.12
+## The lamp's glare radius in metres. Seen from near, the dot is this big, so it grows as you close in.
+@export var glare_m := 5.0
+## The dot swells to this much of the glare at the bright point of the turn (it is 0.6 of it at the dark point).
+@export var bright_swell := 1.0
+## The largest the dot ever gets on screen, in degrees (so it does not become a blob right at the foot of the tower).
+@export var max_deg := 2.5
+## The eye-shaped flare that flashes as the lamp points at you: its width in degrees (far, near) and how strong it is.
+## The flare is the almond-shaped streak across the dot, only at the bright peak of each turn.
+@export var flare_far_deg := 1.6
+@export var flare_near_deg := 7.0
+@export var flare_strength := 1.0
+## Where in the turn the flare starts (pulse value, 0..1): higher = a shorter, sharper flash.
+@export_range(0.5, 0.98) var flare_from := 0.8
+## Seconds per turn: each port gets period_min plus a few seconds of its own.
+@export var period_min := 8.0
 ## Range given to the real lantern's light when its port is loaded (m).
 @export var near_light_range_m := 120.0
 ## Lamp height above the water (m).
@@ -41,15 +54,13 @@ extends Node3D
 @export var extra_ports := PackedStringArray()
 @export var lighthouse_offsets := {"AC00": Vector3(80.0, 0.0, 215.0)}
 
-const FLASH_SIGMA_DEG := 8.0
-const BEAM_SPACING_DEG := 24.0
 const HORIZON_FADE_M := 800.0
 
 var _items := {}                    # port id -> Dictionary
 var _glow_mat: StandardMaterial3D
-var _beam_mat: StandardMaterial3D
 var _quad: QuadMesh
-var _beam_mesh: ArrayMesh
+var _flare_mat: StandardMaterial3D
+var _flare_quad: QuadMesh
 var _sky: Node = null
 var _sky_t := 0.0
 
@@ -86,39 +97,33 @@ func _make_item(p: Dictionary) -> void:
 	glow.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	glow.visible = false
 	add_child(glow)
-	var groups: int = 1 + (h / 7) % 3
-	var rig := Node3D.new()
-	rig.name = "Beams_" + id
-	rig.visible = false
-	for j in groups:
-		var b := MeshInstance3D.new()
-		b.mesh = _beam_mesh
-		b.material_override = _beam_mat
-		b.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-		b.rotation.y = -deg_to_rad(BEAM_SPACING_DEG) * float(j)
-		rig.add_child(b)
-	add_child(rig)
+	var flare := MeshInstance3D.new()
+	flare.name = "Flare_" + id
+	flare.mesh = _flare_quad
+	flare.material_override = _flare_mat
+	flare.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	flare.visible = false
+	add_child(flare)
 	_items[id] = {
 		"id": id,
 		"x": float(p["x"]),
 		"z": float(p["z"]),
 		"lamp": capital_lamp_m if capital else small_lamp_m,
-		"period": 8.0 + float(h % 7),
-		"groups": groups,
+		"period": period_min + float(h % 7),
 		"phase": float((h / 21) % 100) / 100.0,
 		"real": null,
 		"searched": false,
 		"glow": glow,
-		"rig": rig,
+		"flare": flare,
 	}
 
 
 func _build_materials() -> void:
 	var g := Gradient.new()
-	g.offsets = PackedFloat32Array([0.0, 0.12, 0.45, 1.0])
+	g.offsets = PackedFloat32Array([0.0, 0.18, 0.5, 1.0])
 	g.colors = PackedColorArray([
-		Color(1.0, 1.0, 1.0, 1.0), Color(1.0, 0.95, 0.8, 0.85),
-		Color(1.0, 0.8, 0.5, 0.25), Color(1.0, 0.7, 0.4, 0.0)])
+		Color(1.0, 1.0, 0.95, 1.0), Color(1.0, 0.92, 0.7, 0.8),
+		Color(1.0, 0.8, 0.5, 0.2), Color(1.0, 0.7, 0.4, 0.0)])
 	var tex := GradientTexture2D.new()
 	tex.gradient = g
 	tex.fill = GradientTexture2D.FILL_RADIAL
@@ -139,32 +144,42 @@ func _build_materials() -> void:
 	_glow_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
 	_quad = QuadMesh.new()
 	_quad.size = Vector2(1.0, 1.0)
-
-	_beam_mat = StandardMaterial3D.new()
-	_beam_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	_beam_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	_beam_mat.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
-	_beam_mat.vertex_color_use_as_albedo = true
-	_beam_mat.albedo_color = Color(1.0, 0.88, 0.6, 1.0)
-	_beam_mat.disable_fog = true
-	_beam_mat.depth_draw_mode = BaseMaterial3D.DEPTH_DRAW_DISABLED
-	_beam_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
-	_beam_mesh = _build_beam_mesh()
+	_build_flare()
 
 
-## One beam: two thin ribbons (one flat, one upright) running out along -Z from the lamp, widening and fading away.
-func _build_beam_mesh() -> ArrayMesh:
-	var st := SurfaceTool.new()
-	st.begin(Mesh.PRIMITIVE_TRIANGLES)
-	for plane in 2:
-		var a := Vector3.RIGHT if plane == 0 else Vector3.UP
-		var far := Vector3(0.0, 0.0, -beam_length_m)
-		var vs: Array[Vector3] = [-a * 0.6, a * 0.6, a * 60.0 + far, -a * 60.0 + far]
-		var cs: Array[Color] = [Color(1, 1, 1, 1), Color(1, 1, 1, 1), Color(1, 1, 1, 0), Color(1, 1, 1, 0)]
-		for idx in [0, 1, 2, 0, 2, 3]:
-			st.set_color(cs[idx])
-			st.add_vertex(vs[idx])
-	return st.commit()
+## The eye: a wide almond (pointed at both ends, fat in the middle) with a hot core, drawn into a texture.
+func _build_flare() -> void:
+	var w := 256
+	var h := 64
+	var img := Image.create(w, h, false, Image.FORMAT_RGBA8)
+	for y in h:
+		var v := (float(y) + 0.5) / float(h) * 2.0 - 1.0
+		for x in w:
+			var u := (float(x) + 0.5) / float(w) * 2.0 - 1.0
+			var au := absf(u)
+			# half height of the almond at this x: full in the middle, pointed at the ends
+			var hh := pow(maxf(1.0 - au * au, 0.0), 0.9)
+			var a := 0.0
+			if hh > 0.001:
+				var edge := clampf(1.0 - absf(v) / hh, 0.0, 1.0)
+				a = pow(edge, 1.4) * pow(maxf(1.0 - au, 0.0), 0.35)
+			# the hot core in the middle
+			a = maxf(a, exp(-(u * u * 38.0 + v * v * 55.0)))
+			img.set_pixel(x, y, Color(1.0, 1.0, 1.0, clampf(a, 0.0, 1.0)))
+	var tex := ImageTexture.create_from_image(img)
+	_flare_mat = StandardMaterial3D.new()
+	_flare_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	_flare_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	_flare_mat.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
+	_flare_mat.billboard_mode = BaseMaterial3D.BILLBOARD_ENABLED
+	_flare_mat.billboard_keep_scale = true
+	_flare_mat.albedo_texture = tex
+	_flare_mat.albedo_color = Color(1.0, 0.93, 0.74, 1.0)
+	_flare_mat.disable_fog = true
+	_flare_mat.depth_draw_mode = BaseMaterial3D.DEPTH_DRAW_DISABLED
+	_flare_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	_flare_quad = QuadMesh.new()
+	_flare_quad.size = Vector2(1.0, 0.25)
 
 
 func _process(delta: float) -> void:
@@ -188,7 +203,7 @@ func _process(delta: float) -> void:
 	for id in _items:
 		var it: Dictionary = _items[id]
 		var glow: MeshInstance3D = it["glow"]
-		var rig: Node3D = it["rig"]
+		var flare: MeshInstance3D = it["flare"]
 		var lamp_h: float = it["lamp"]
 		var pos: Vector3
 		var real := _real_lamp(it)
@@ -209,40 +224,38 @@ func _process(delta: float) -> void:
 		var vis := clampf((limit - d) / HORIZON_FADE_M, 0.0, 1.0)
 		if vis <= 0.0:
 			glow.visible = false
-			rig.visible = false
+			flare.visible = false
 			continue
-		# where the beam points, and whether it points at the camera right now
-		var period: float = it["period"]
-		var yaw0 := TAU * fposmod(now / period + float(it["phase"]), 1.0)
-		var to_cam := Vector2(cp.x - pos.x, cp.z - pos.z)
-		var flash := 1.0
-		if to_cam.length() > 1.0:
-			flash = 0.0
-			var dir_c := to_cam.normalized()
-			for j in int(it["groups"]):
-				var yj := yaw0 - deg_to_rad(BEAM_SPACING_DEG) * float(j)
-				var bd := Vector2(-sin(yj), -cos(yj))
-				var ang := rad_to_deg(acos(clampf(bd.dot(dir_c), -1.0, 1.0)))
-				flash = maxf(flash, exp(-pow(ang / FLASH_SIGMA_DEG, 2.0)))
+		# the turn: 0 at the dark point, 1 at the bright point, smooth both ways
+		var ph := fposmod(now / float(it["period"]) + float(it["phase"]), 1.0)
+		var pulse := 0.5 - 0.5 * cos(TAU * ph)
+		pulse = pulse * pulse * (3.0 - 2.0 * pulse)
+		var turn := lerpf(dark_level, 1.0, pulse)
 		var base := lerpf(day_strength, night_strength, night)
 		var haze := lerpf(1.0, 0.55, clampf(d / limit, 0.0, 1.0))
-		var k := vis * base * haze * (1.0 - 0.85 * rain)
-		var gk := k * (steady_glow + (1.0 - steady_glow) * flash)
-		glow.visible = gk > 0.01
+		var k := vis * base * haze * (1.0 - 0.85 * rain) * turn
+		glow.visible = k > 0.01
 		if glow.visible:
 			glow.global_position = pos
-			var dist3 := cp.distance_to(pos)
-			var deg := lerpf(glow_deg, flash_glow_deg, flash)
-			glow.scale = Vector3.ONE * maxf(dist3 * tan(deg_to_rad(deg)), 0.6)
-			glow.transparency = 1.0 - clampf(gk, 0.0, 1.0)
-		var show_beam := beams_enabled and night > 0.05 and d < beam_visible_m
-		rig.visible = show_beam
-		if show_beam:
-			rig.global_position = pos
-			rig.rotation.y = yaw0
-			var bt := clampf(night * vis * (1.0 - 0.85 * rain), 0.0, 1.0) * 0.8
-			for m in rig.get_children():
-				(m as MeshInstance3D).transparency = 1.0 - bt
+			var dist3 := maxf(cp.distance_to(pos), 1.0)
+			# size: the lamp's glare seen from here (bigger as you close in), never smaller than a dot; it swells a little as it brightens
+			var swell := lerpf(0.6, bright_swell, pulse)
+			var deg := clampf(rad_to_deg(atan(glare_m * swell / dist3)), dot_deg, max_deg)
+			glow.scale = Vector3.ONE * dist3 * tan(deg_to_rad(deg)) * 2.0
+			glow.transparency = 1.0 - clampf(k, 0.0, 1.0)
+		# the flash: at the bright peak of the turn (the lamp pointing at you) an eye-shaped flare opens across the dot
+		var fk := smoothstep(flare_from, 1.0, pulse) * vis * base * haze * (1.0 - 0.85 * rain) * flare_strength
+		flare.visible = fk > 0.01
+		if flare.visible:
+			flare.global_position = pos
+			var dist_f := maxf(cp.distance_to(pos), 1.0)
+			var near_t := clampf(1.0 - dist_f / 8000.0, 0.0, 1.0)
+			var fdeg := lerpf(flare_far_deg, flare_near_deg, near_t)
+			# it opens: a thin slit at first, then the full eye
+			var open := smoothstep(flare_from, 1.0, pulse)
+			var fw := dist_f * tan(deg_to_rad(fdeg)) * lerpf(0.5, 1.0, open)
+			flare.scale = Vector3(fw, fw * lerpf(0.5, 1.0, open), 1.0)
+			flare.transparency = 1.0 - clampf(fk, 0.0, 1.0)
 
 
 ## The real lantern marker in the port's scene, once that port has spawned (null before, or if it has none).

@@ -43,6 +43,18 @@ var _hint: Label
 var _quad_w := 0.7
 var _quad_d := 0.466
 var _tc_card: Node3D
+## A brass magnifying glass that follows the mouse while the chart fills the screen. It is a second, crisp draw of the
+## chart (a small SubViewport) shown through a round lens, so the zoomed-in text and lines stay sharp.
+@export var lens_radius_px := 170
+@export var lens_zoom := 3.0
+var _layer: CanvasLayer
+var _lens: Control
+var _lens_vp: SubViewport
+var _lens_canvas: Node2D
+var _lens_t := 0.0
+var _lock_dist := 1.0
+var _lock_scale := Vector3.ONE
+var _view_locked := false      # once the camera has arrived over the chart it is held rigidly to it (no lag behind the ship's motion)
 var _quad_turn := 0.0            # the picture is turned this much (radians, about the mesh's up) so its top faces the bow
 
 func _ready() -> void:
@@ -56,8 +68,10 @@ func _ready() -> void:
 		set_process(false)
 		set_process_input(false)
 		return
+	process_priority = 1000      # run after the ship and the player have moved this frame (keeps the lens steady)
 	var layer := CanvasLayer.new()
 	layer.layer = 6
+	_layer = layer
 	add_child(layer)
 	_hint = Label.new()
 	_hint.set_anchors_preset(Control.PRESET_CENTER_TOP)
@@ -167,6 +181,7 @@ func _build() -> void:
 		_frame.add_child(mi)
 	_build_table_compass()
 	_build_barometer()
+	_build_lens(st, chart)
 	_built = true
 
 ## The same card as the binnacle's: it keeps north as the ship turns and the red line is fixed to the bow, so it reads
@@ -236,6 +251,172 @@ func _build_barometer() -> void:
 	var inset := table_barometer_r + 0.02
 	baro.global_position = _quad.to_global(Vector3(-_quad_w * 0.5 + inset, 0.004, _quad_d * 0.5 - inset))
 	baro.call("build", table_barometer_r)
+
+const LENS_SHADER := """
+shader_type canvas_item;
+void fragment() {
+	vec2 q = UV - vec2(0.5);
+	float d = length(q) * 2.0;
+	vec4 c = texture(TEXTURE, UV);
+	vec3 col = mix(vec3(0.09, 0.11, 0.13), c.rgb, c.a);
+	col += vec3(0.07) * smoothstep(0.55, 0.0, length(q - vec2(-0.18, -0.24)));
+	COLOR = vec4(col, 1.0 - smoothstep(0.87, 0.88, d));
+}
+"""
+
+## The round lens (a brass ring, no handle) that rides on the mouse while the chart is open.
+func _build_lens(st: Node, chart: WorldChart) -> void:
+	var r := lens_radius_px
+	_lens_vp = SubViewport.new()
+	_lens_vp.size = Vector2i(r * 2, r * 2)
+	_lens_vp.disable_3d = true
+	_lens_vp.transparent_bg = true
+	_lens_vp.render_target_update_mode = SubViewport.UPDATE_DISABLED
+	add_child(_lens_vp)
+	_lens_canvas = load("res://scripts/chart_canvas.gd").new() as Node2D
+	_lens_canvas.size_px = Vector2(map_px)
+	_lens_canvas.grid_km = grid_km
+	_lens_canvas.ring_base_km = ring_base_km
+	_lens_canvas.ring_per_km = ring_per_km
+	_lens_vp.add_child(_lens_canvas)
+	_lens_canvas.call("setup", st, chart)
+	_lens_canvas.active = false         # redrawn on a short timer instead (moving/scaling it needs no redraw)
+	_lens = Control.new()
+	_lens.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_lens.visible = false
+	_layer.add_child(_lens)
+	var tr := TextureRect.new()
+	tr.texture = _lens_vp.get_texture()
+	tr.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	tr.stretch_mode = TextureRect.STRETCH_SCALE
+	tr.position = Vector2(-r, -r)
+	tr.size = Vector2(r * 2, r * 2)
+	tr.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var sh := Shader.new()
+	sh.code = LENS_SHADER
+	var sm := ShaderMaterial.new()
+	sm.shader = sh
+	tr.material = sm
+	_lens.add_child(tr)
+	_lens.add_child(_build_ring())
+
+## The lens's brass frame: a real torus lit and reflecting a sky, drawn once into a small 3D viewport and laid over the
+## glass (it never changes, so it costs nothing per frame).
+func _build_ring() -> TextureRect:
+	var r := float(lens_radius_px)
+	var vp := SubViewport.new()
+	vp.size = Vector2i(lens_radius_px * 2, lens_radius_px * 2)
+	vp.own_world_3d = true
+	vp.transparent_bg = true
+	vp.msaa_3d = Viewport.MSAA_4X
+	vp.render_target_update_mode = SubViewport.UPDATE_ONCE
+	add_child(vp)
+	var env := Environment.new()
+	env.background_mode = Environment.BG_CLEAR_COLOR
+	var sky := Sky.new()
+	sky.sky_material = ProceduralSkyMaterial.new()
+	env.sky = sky
+	env.ambient_light_source = Environment.AMBIENT_SOURCE_SKY
+	env.reflected_light_source = Environment.REFLECTION_SOURCE_SKY
+	env.tonemap_mode = Environment.TONE_MAPPER_FILMIC
+	var cam := Camera3D.new()
+	cam.environment = env
+	cam.projection = Camera3D.PROJECTION_ORTHOGONAL
+	cam.size = r * 2.0
+	cam.near = 1.0
+	cam.far = 1000.0
+	cam.position = Vector3(0.0, 0.0, 400.0)
+	vp.add_child(cam)
+	cam.current = true
+	var sun := DirectionalLight3D.new()
+	sun.rotation_degrees = Vector3(-35.0, -30.0, 0.0)
+	sun.light_energy = 1.3
+	vp.add_child(sun)
+	var tm := TorusMesh.new()
+	tm.outer_radius = r - 2.0
+	tm.inner_radius = r - 26.0
+	tm.rings = 72
+	tm.ring_segments = 24
+	var brass := StandardMaterial3D.new()
+	brass.albedo_color = Color(0.86, 0.63, 0.26)
+	brass.metallic = 1.0
+	brass.roughness = 0.27
+	var ring := MeshInstance3D.new()
+	ring.mesh = tm
+	ring.material_override = brass
+	ring.rotation_degrees = Vector3(90.0, 0.0, 0.0)     # the torus's axis points at the camera
+	ring.scale = Vector3(1.0, 0.7, 1.0)
+	vp.add_child(ring)
+	var tr := TextureRect.new()
+	tr.texture = vp.get_texture()
+	tr.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	tr.stretch_mode = TextureRect.STRETCH_SCALE
+	tr.position = Vector2(-r, -r)
+	tr.size = Vector2(r * 2.0, r * 2.0)
+	tr.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	return tr
+
+func _open_lens() -> void:
+	if _lens == null:
+		return
+	# the mouse is free (but kept in the window and hidden) so the lens can follow it
+	Input.mouse_mode = Input.MOUSE_MODE_CONFINED_HIDDEN
+	_view_locked = false
+	_lens_t = 0.0
+	_lens_vp.render_target_update_mode = SubViewport.UPDATE_ALWAYS
+	_lens_canvas.queue_redraw()
+
+func _close_lens() -> void:
+	if _lens == null:
+		return
+	_lens.visible = false
+	_lens_vp.render_target_update_mode = SubViewport.UPDATE_DISABLED
+	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+	_view_locked = false
+
+## Chart-picture pixels under a screen point (the chart quad seen through the camera), or INF if the ray misses.
+func _canvas_at(m: Vector2) -> Vector2:
+	# Worked out in the camera's own space, from the distance and scale fixed when the camera locked on, so no world
+	# position goes into it (world positions are rounded to ~2 mm far from the origin, which this lens magnifies).
+	var d := _cam.project_local_ray_normal(m)
+	if d.z > -0.0001:
+		return Vector2.INF
+	var hit := d * (_lock_dist / -d.z)           # the camera looks straight down at the chart, top of the picture up
+	var cx := hit.x / _lock_scale.x
+	var cz := -hit.y / _lock_scale.z
+	return Vector2(cx / _quad_w + 0.5, cz / _quad_d + 0.5) * Vector2(map_px)
+
+## Puts the lens on the mouse and aims its inner picture: the chart, drawn lens_zoom times bigger, centred on the
+## chart point under the mouse. Only shown once the camera has settled over the chart and the mouse is over it.
+func _update_lens(delta: float) -> void:
+	if _lens == null:
+		return
+	if not _open or _camera() == null:
+		_lens.visible = false
+		return
+	var settled := _view_locked
+	var m := get_viewport().get_mouse_position()
+	var c0 := _canvas_at(m)
+	var c1 := _canvas_at(m + Vector2(1.0, 0.0))
+	if not settled or not c0.is_finite() or not c1.is_finite():
+		_lens.visible = false
+		return
+	var s := (c1 - c0).length()          # chart-picture pixels per screen pixel
+	if s < 0.0001 or c0.x < 0.0 or c0.y < 0.0 or c0.x > map_px.x or c0.y > map_px.y:
+		_lens.visible = false
+		return
+	var k := lens_zoom / s
+	_lens_canvas.scale = Vector2(k, k)
+	if absf(float(_lens_canvas.dot_scale) - k) > 0.01:
+		_lens_canvas.dot_scale = k          # the ship's dot stays the size it is on the chart, not magnified
+		_lens_canvas.queue_redraw()
+	_lens_canvas.position = Vector2(lens_radius_px, lens_radius_px) - c0 * k
+	_lens.position = m
+	_lens.visible = true
+	_lens_t += delta
+	if _lens_t > 0.25:
+		_lens_t = 0.0
+		_lens_canvas.queue_redraw()
 
 func _turn_table_compass() -> void:
 	if _tc_card == null:
@@ -309,6 +490,7 @@ func _enter() -> void:
 	_quad_mat.no_depth_test = true
 	_quad_mat.render_priority = 100
 	_hint.visible = true
+	_open_lens()
 	# redraw every frame while you're looking at it (the ship moves), once when you step back
 	_canvas.active = true
 	_vp.render_target_update_mode = SubViewport.UPDATE_ALWAYS
@@ -316,6 +498,7 @@ func _enter() -> void:
 func _close() -> void:
 	_open = false
 	_player.set("input_locked", false)
+	_close_lens()
 	var h = _player.get("hands")
 	if h is Node3D:
 		h.visible = _hands_were_visible
@@ -343,9 +526,19 @@ func _process(delta: float) -> void:
 		_cam_moved = true
 		var a := 1.0 - exp(-delta * follow_rate)
 		var next := cam.global_transform.interpolate_with(want, a)
+		if _open:
+			if not _view_locked and next.origin.distance_to(want.origin) < 0.01 \
+					and next.basis.get_rotation_quaternion().angle_to(want.basis.get_rotation_quaternion()) < 0.015:
+				_view_locked = true
+				var sc := _quad.global_transform.basis.get_scale()
+				_lock_scale = sc
+				_lock_dist = (_quad_d * sc.z * 0.5) / tan(deg_to_rad(cam.fov) * 0.5) * 1.04
+			if _view_locked:
+				next = want
 		cam.global_transform = next
 		if not _open:
 			var ang := next.basis.get_rotation_quaternion().angle_to(rest.basis.get_rotation_quaternion())
 			if next.origin.distance_to(rest.origin) < 0.004 and ang < 0.01:
 				cam.transform = _cam_rest
 				_cam_moved = false
+	_update_lens(delta)

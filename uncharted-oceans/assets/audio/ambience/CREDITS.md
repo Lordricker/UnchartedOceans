@@ -10,6 +10,9 @@ Files in this folder were converted to OGG (and, for three of them, crossfaded t
 | sea_rough.ogg | "Rough sea waves loop" (#1194) | Mixkit | Mixkit License |
 | wind_sea.ogg | "Windy sea loop" (#1200) | Mixkit | Mixkit License |
 | shore_waves.ogg | "Small waves harbor rocks" (#1208) | Mixkit | Mixkit License |
+| thunder_rumble.ogg | "Thunder rumble during a storm" (#2395) | Mixkit | Mixkit License |
+| thunder_rain.ogg | "Thunder with rain in the storm" (#1294) | Mixkit | Mixkit License |
+| thunder_boom.ogg | "Distant thunder explosion" (#1278) | Mixkit | Mixkit License |
 | coast_birds.ogg | "Sea waves with birds loop" (#1185) | Mixkit | Mixkit License |
 | swim_loop.ogg | "Sea swimming loop" (#1181) | Mixkit | Mixkit License |
 

@@ -7,7 +7,8 @@ extends Node3D
 ##   Right click  plug the hole you're looking at
 ##   P            pumps on/off
 ##   Backspace    drain everything and remove all holes
-##   G            show the hold grid (a green tile on the floor of every space water can reach)
+##   G            show the hold grid (a green tile on the floor of every space water can reach) and the deck's
+##                (ship_deck_water.gd: cyan tiles, orange where the deck drops into the hold through the hatch)
 ##
 ## How it works
 ## - The hold is a grid of 25 cm squares in the ship's own frame, found at startup by probing
@@ -223,6 +224,9 @@ func reset() -> void:
 	_holes.clear()
 	_pc = 0
 	water_volume = 0.0
+	var dk := _deck_node()
+	if dk != null:
+		dk.reset()
 	_update_load()
 	_draw_water()
 	_draw_spray()
@@ -238,6 +242,12 @@ func column_count() -> int:
 ## the hull (below the main deck), the sea everywhere else. -INF if there's no water there
 ## (for example a dry part of the hold). Used by the player for wading and swimming.
 func water_surface_at(p: Vector3) -> float:
+	# water lying on the deck (ship_deck_water.gd) comes first
+	var dk := _deck_node()
+	if dk != null:
+		var ds: float = dk.surface_at(p)
+		if ds > -1.0e8:
+			return ds
 	var xf := _rig.global_transform
 	var lp := xf.affine_inverse() * p
 	if _inside_hull(lp):
@@ -248,6 +258,33 @@ func water_surface_at(p: Vector3) -> float:
 			return (xf * Vector3(_cx[si], _b[si] + _d[si], _cz[si])).y
 		return -INF
 	return _ocean.get_height(p.x, p.z) if _ocean else -INF
+
+## ---- deck water (ship_deck_water.gd) ----
+## The hold space at ship-local (x, z) that is open all the way up to the main deck (under the stair hatch: water can drop
+## straight in there), or -1 if the deck is solid above that spot.
+func top_space_at(x: float, z: float) -> int:
+	if not _built:
+		return -1
+	var si := _space_at(Vector3(x, grid_top - 0.04, z))
+	return si if si >= 0 and _b[si] + _cap[si] >= grid_top - 0.06 else -1
+
+## Water falling in from the deck: add vol (m³) to hold space i. Returns how much it took (the space may be full).
+func hold_add_volume(i: int, vol: float) -> float:
+	if i < 0 or i >= _d.size() or vol <= 0.0:
+		return 0.0
+	var area := cell * cell
+	var take := minf(vol, maxf(_cap[i] - _d[i], 0.0) * area)
+	if take > 0.0:
+		_d[i] += take / area
+	return maxf(take, 0.0)
+
+var _deck_cache: Node
+
+## The deck water node (group "ship_deck_water"), or null.
+func _deck_node() -> Node:
+	if _deck_cache == null or not is_instance_valid(_deck_cache):
+		_deck_cache = get_tree().get_first_node_in_group("ship_deck_water")
+	return _deck_cache
 
 ## True if world point p is inside the hull's outline (where hold water, not the sea, applies).
 func is_inside_hull(p: Vector3) -> bool:
@@ -267,6 +304,9 @@ func show_grid(on: bool) -> void:
 		_debug = _make_debug_mesh()
 		_rig.add_child(_debug)
 	_debug.visible = on
+	var dk := _deck_node()
+	if dk != null:
+		dk.show_grid(on)              # the deck's grid too: cyan squares, and orange where it drops into the hold
 	_say("grid view on: %d spaces" % _d.size() if on else "grid view off")
 
 ## Punch a hole where the line from -> to (world space) first hits the ship.
@@ -700,6 +740,10 @@ func _swamp(dt: float, area: float) -> void:
 	if not swamping:
 		swamping = true
 		_say("overloaded: the sea is coming over the rails!")
+	# with the deck grid the sea really does come over the rails onto the deck now, and finds its own way down the hatch
+	var dk := _deck_node()
+	if dk != null and bool(dk.get("active")):
+		return
 	if _low.is_empty():
 		var lo := INF
 		for b in _b:
@@ -740,6 +784,14 @@ func _update_load() -> void:
 	mx += ve * cargo_cx
 	mz += ve * cargo_cz
 	v += ve
+	# water lying on the deck weighs on her too (ship_deck_water.gd)
+	var dk := _deck_node()
+	if dk != null:
+		var dv := float(dk.get("water_volume"))
+		if dv > 0.0:
+			mx += dv * float(dk.get("centre_x"))
+			mz += dv * float(dk.get("centre_z"))
+			v += dv
 	_sink_depth = v / waterplane_area
 	var off := Vector3.ZERO
 	if v > 0.0001:

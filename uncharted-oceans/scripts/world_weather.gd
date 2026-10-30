@@ -58,6 +58,11 @@ class Track extends RefCounted:
 @export var warmup_hours := 30.0
 ## No storm within this distance of the ship at the start.
 @export var clear_start_radius_m := 70000.0
+## A storm waiting outside the starting harbour, so there is weather to look at from the first minute. It sits this far
+## out from the port in the way the harbour mouth faces and drifts slowly in (turn start_storm off for fair weather).
+@export var start_storm := true
+@export var start_storm_distance_m := 30000.0
+@export var start_storm_speed_mps := 5.0
 @export var weather_seed := 1031
 @export var coast_breeze := true
 ## Inside this distance of a port (m) its own breeze takes over from the general coastal breeze: full strength in the
@@ -77,6 +82,12 @@ class Track extends RefCounted:
 ## which reached far out into the fringe of a storm. At 0.7 the zone that stops a sleep is roughly half the area.
 ## (Weak squalls never get this high at all, and are slept through.)
 @export var storm_wake_level := 0.7
+## How much of a storm's depth is its dangerous part. SkySystem draws the cloud, and the dark sky under it, from the cell's
+## own depth_m, so a storm still looks as vast as it should; the wind, the rain and the sleep stop use only this fraction of
+## it. With 0.4 the part you must sail or ride through is about 20 km across, not 55: about an hour for a hurricane and half
+## that for a gale (at 5 m/s, about 70 minutes for the storm waiting at the start). The barometer still falls over the
+## whole cloud's reach, so the glass gives you the early warning. 1 = as deep as the cloud.
+@export_range(0.15, 1.0) var danger_depth_scale := 0.4
 
 const WindFieldS := preload("res://scripts/wind_field.gd")
 
@@ -124,6 +135,8 @@ func _ready() -> void:
 		_streamer.rebased.connect(func(_shift: Vector3) -> void: _sync_sky())
 	if storms_enabled:
 		_warm_up()
+	if start_storm:
+		call_deferred("_spawn_start_storm")      # after the ship has been put in its berth
 	_last_season = season()
 	if rain_enabled:
 		rain_fx = RainScript.new()
@@ -361,9 +374,10 @@ func ship_chart_pos() -> Vector2:
 	return Vector2(_streamer.origin_x + ship.global_position.x, _streamer.origin_z + ship.global_position.z)
 
 
-## 0-1: how deep in a storm's weather a position is.
-func _proximity(t: Track, cx: float, cz: float) -> float:
-	var dp := maxf(t.cell.depth_m, 1.0)
+## 0-1: how deep in a storm's weather a position is. The weather is as deep as danger_depth_scale of the cloud (the cloud
+## itself, and the dark sky, are drawn from the cell's full depth_m); pass scale = 1 for the whole cloud's reach.
+func _proximity(t: Track, cx: float, cz: float, scale := -1.0) -> float:
+	var dp := maxf(t.cell.depth_m * (danger_depth_scale if scale < 0.0 else scale), 1.0)
 	var d := Vector2(cx - t.cx, cz - t.cz).length()
 	return t.cell.intensity * (1.0 - smoothstep(0.8 * dp, 3.5 * dp, d))
 
@@ -400,7 +414,7 @@ func pressure_inhg_at(cx: float, cz: float) -> float:
 	var p := 29.95 + 0.03 * sin(TAU * (h - 4.0) / 12.0) + 0.08 * sin(h / 41.0 + 1.3) + 0.04 * sin(h / 17.0)
 	var worst := 0.0
 	for t in tracks:
-		worst = maxf(worst, _proximity(t, cx, cz))
+		worst = maxf(worst, _proximity(t, cx, cz, 1.0))       # the whole cloud's reach, so the glass falls early
 	return p - STORM_DROP_INHG * worst
 
 
@@ -591,6 +605,40 @@ func _spawn(kind: String) -> void:
 		_sky.storms.append(c)
 
 
+## The storm waiting outside the starting harbour (start_storm): out from the port in the way its mouth faces, heading
+## slowly back in, already at full strength.
+func _spawn_start_storm() -> void:
+	if not storms_enabled or not start_storm:
+		return
+	var sp := ship_chart_pos()
+	var pz := Vector2.ZERO
+	if _streamer != null and _streamer.chart != null:
+		pz = _port_zone(sp.x, sp.y)
+	var bearing := pz.y                          # 0 (north) if the ship is not in a harbour
+	var off := WindFieldS.vec(start_storm_distance_m, bearing)
+	var t := Track.new()
+	t.kind = "gale"
+	t.cx = sp.x + off.x
+	t.cz = sp.y + off.y
+	t.heading = fposmod(bearing + 180.0, 360.0)
+	t.speed = start_storm_speed_mps
+	t.life = 14.0 * 3600.0
+	t.age = 0.2 * t.life
+	t.peak = 1.0
+	t.wind_boost = 15.0
+	var c := StormCell.new()
+	c.set_size(30000.0)
+	c.intensity = 1.0
+	c.rain = 0.85
+	c.shape_seed = 17.0
+	c.velocity = Vector2.ZERO
+	t.cell = c
+	tracks.append(t)
+	if _sky != null:
+		_sky.storms.append(c)
+	_sync_sky()
+
+
 # ------------------------------------------------------------------ the sky
 
 func _find_sky(delta: float) -> void:
@@ -673,7 +721,7 @@ func storm_wake_in(cx: float, cz: float, heading_deg: float, speed_mps: float, h
 			var trk := tracks[i]
 			var u := ta[i] / trk.life
 			var inten := trk.peak * smoothstep(0.0, 0.15, u) * (1.0 - smoothstep(0.7, 1.0, u))
-			var dp := maxf(trk.cell.depth_m, 1.0)
+			var dp := maxf(trk.cell.depth_m * danger_depth_scale, 1.0)
 			var d := Vector2(sx - tx[i], sz - tz[i]).length()
 			if inten * (1.0 - smoothstep(0.8 * dp, 3.5 * dp, d)) >= storm_wake_level:
 				return t / 3600.0
@@ -728,7 +776,7 @@ func sleep_advance(cx: float, cz: float, heading_deg: float, speed_mps: float, h
 func rain_at(cx: float, cz: float) -> float:
 	var best := 0.0
 	for t in tracks:
-		var dp := maxf(t.cell.depth_m, 1.0)
+		var dp := maxf(t.cell.depth_m * danger_depth_scale, 1.0)
 		var d := Vector2(cx - t.cx, cz - t.cz).length()
 		best = maxf(best, t.cell.rain * t.cell.intensity * (1.0 - smoothstep(0.5 * dp, 1.7 * dp, d)))
 	return best

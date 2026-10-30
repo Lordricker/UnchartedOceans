@@ -23,6 +23,12 @@ extends Node3D
 ])
 ## Seconds for the hull to catch up with the water (bigger = heavier, slower ship).
 @export var heave_lag := 0.7
+## Buoyancy in big seas. A heavy hull is slow to follow the water, but on the way UP a swell the sea lifts her: she
+## catches up faster than she settles back (rise_lag, seconds), and she can never sit lower than max_sink metres below
+## where the water and her load put her. (A spring that lags 0.7 s behind a 3 m/s swell face sits about 2 m too low, which
+## is what put the sea over the rails.)
+@export var rise_lag := 0.3
+@export var max_sink := 0.4
 @export var pitch_lag := 0.9
 @export var roll_lag := 1.3
 ## Extra roll on top of the wave slope (a narrow hull rolls more than the slope alone).
@@ -40,6 +46,12 @@ extends Node3D
 @export var windsock_enabled := true
 ## The white puffs thrown up at the bow while she is under way (the wake itself is in the water shader).
 @export var bow_spray := true
+## Spray off the waves: the crests of a storm sea (state 4) throw it, and the hull throws a burst when the sea slams into it
+## (wave_spray.gd).
+@export var wave_spray_enabled := true
+## Water on the deck: the sea comes over the rails, runs about the deck and falls down the stair hatch into the hold
+## (ship_deck_water.gd; needs the ShipFlooding node next to the ship).
+@export var deck_water_enabled := true
 ## The log line: shown only from the wheel's stern view, knots run out with the ship's speed (ship_log_line.gd).
 @export var log_line_enabled := true
 ## The cabin bookshelf: look at the books, read them (ship_bookshelf.gd, book_reader.gd).
@@ -104,9 +116,12 @@ var _amount := 1.0
 ## The wake (see the ocean shader's wake_foam) and the bow spray.
 var _wake_speed := 0.0
 var _hull_bow := 10.0
+var _hull_stern := -10.0
 var _spray: GPUParticles3D
 var _spray_pm: ParticleProcessMaterial
 var _spray_mat: StandardMaterial3D
+var _spray_drop_mat: StandardMaterial3D
+var _spray_blobs: GPUParticles3D
 var _spray_t := 0.0
 
 func _ready() -> void:
@@ -132,6 +147,23 @@ func _ready() -> void:
 	if _ship and hull_skin:
 		_build_hull_skin(_ship)
 	_unsync_bodies(self)
+	# the deck's own flood grid (water over the rails runs down the hatch into the hold)
+	if deck_water_enabled and get_node_or_null("ShipDeckWater") == null:
+		var dw = load("res://scripts/ship_deck_water.gd").new()
+		dw.name = "ShipDeckWater"
+		add_child(dw)
+	# spray off the crests and where the sea hits the hull (added to the Ocean, which follows the camera)
+	if wave_spray_enabled and _ocean and _ocean.get_node_or_null("WaveSpray") == null:
+		var ws = load("res://scripts/wave_spray.gd").new()
+		ws.name = "WaveSpray"
+		ws.ocean = _ocean
+		ws.motion = self
+		_ocean.add_child.call_deferred(ws)
+	# the wake that stays behind her on the High water setting (does nothing on Standard)
+	if _ocean and get_node_or_null("WakeTrail") == null:
+		var wt = load("res://scripts/wake_trail.gd").new()
+		wt.name = "WakeTrail"
+		add_child(wt)
 	if test_rock and get_parent() and get_parent().get_node_or_null("SeaRock") == null:
 		var rock := Node3D.new()
 		rock.set_script(load("res://scripts/sea_rock.gd"))
@@ -329,7 +361,11 @@ func _physics_process(delta: float) -> void:
 	var target := water_pose() * _amount if _ocean else Vector3.ZERO
 	target += load_offset
 	target.z += sail_roll
-	_heave = _spring(_heave, target.x, heave_lag, delta, 0)
+	_heave = _spring(_heave, target.x, rise_lag if target.x > _heave else heave_lag, delta, 0)
+	var lowest := target.x - max_sink
+	if _heave < lowest:
+		_heave = lowest
+		_heave_v = maxf(_heave_v, 0.0)
 	_pitch = _spring(_pitch, target.y, pitch_lag, delta, 1)
 	_roll = _spring(_roll, target.z, roll_lag, delta, 2)
 	position.y = _heave + draft_offset
@@ -384,6 +420,7 @@ func _setup_wake(mat: ShaderMaterial, ex: Dictionary) -> void:
 	var a := -(y0 + float(lo) * st) * fwd.z
 	var b := -(y0 + float(hi) * st) * fwd.z
 	_hull_bow = maxf(a, b)
+	_hull_stern = minf(a, b)
 	mat.set_shader_parameter("wake_fwd", fwd)
 	mat.set_shader_parameter("hull_bow", _hull_bow)
 	mat.set_shader_parameter("hull_stern", minf(a, b))
@@ -399,8 +436,8 @@ func _make_spray(beam: float) -> void:
 	_spray.name = "BowSpray"
 	# just ahead of the stem, outside the hull: puffs start in front of the bow and travel with the ship (see _update_spray)
 	_spray.position = Vector3(0.0, 0.25, -(_hull_bow + 0.6))
-	_spray.amount = 120
-	_spray.lifetime = 1.1
+	_spray.amount = 80
+	_spray.lifetime = 1.0
 	_spray.local_coords = false
 	_spray.explosiveness = 0.0
 	_spray.randomness = 0.5
@@ -417,39 +454,86 @@ func _make_spray(beam: float) -> void:
 	_spray_pm.initial_velocity_min = 1.5
 	_spray_pm.initial_velocity_max = 4.5
 	_spray_pm.gravity = Vector3(0.0, -9.8, 0.0)
-	_spray_pm.scale_min = 0.5
-	_spray_pm.scale_max = 1.3
+	_spray_pm.damping_min = 0.1
+	_spray_pm.damping_max = 0.4
+	_spray_pm.particle_flag_align_y = true     # the drops stretch along their flight
+	_spray_pm.scale_min = 0.6
+	_spray_pm.scale_max = 1.4
 	var ramp := Gradient.new()
-	ramp.offsets = PackedFloat32Array([0.0, 0.12, 1.0])
-	ramp.colors = PackedColorArray([Color(1, 1, 1, 0.0), Color(1, 1, 1, 0.7), Color(1, 1, 1, 0.0)])
+	ramp.offsets = PackedFloat32Array([0.0, 0.04, 0.75, 1.0])
+	ramp.colors = PackedColorArray([Color(1, 1, 1, 0.0), Color(1, 1, 1, 1.0), Color(1, 1, 1, 0.85), Color(1, 1, 1, 0.0)])
 	var ramp_tex := GradientTexture1D.new()
 	ramp_tex.gradient = ramp
 	_spray_pm.color_ramp = ramp_tex
 	_spray.process_material = _spray_pm
-	# a soft round puff that always faces the camera
-	var puff := Gradient.new()
-	puff.offsets = PackedFloat32Array([0.0, 1.0])
-	puff.colors = PackedColorArray([Color(1, 1, 1, 1), Color(1, 1, 1, 0)])
-	var puff_tex := GradientTexture2D.new()
-	puff_tex.gradient = puff
-	puff_tex.fill = GradientTexture2D.FILL_RADIAL
-	puff_tex.fill_from = Vector2(0.5, 0.5)
-	puff_tex.fill_to = Vector2(1.0, 0.5)
-	puff_tex.width = 64
-	puff_tex.height = 64
+	# Solid water, like the wave spray (wave_spray.gd): thin white drops stretched along their flight, with a few hard-edged
+	# blobs of whitewater among them (a child system sharing the same process material). Soft gradient puffs looked like
+	# white dandelion fluff.
+	_spray_drop_mat = StandardMaterial3D.new()
+	_spray_drop_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	_spray_drop_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	_spray_drop_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	_spray_drop_mat.vertex_color_use_as_albedo = true
+	_spray_drop_mat.albedo_color = Color(1, 1, 1, 0.95)
+	_spray.draw_pass_1 = _bow_drop_mesh()
+	var blob := Gradient.new()
+	blob.offsets = PackedFloat32Array([0.0, 0.8, 1.0])
+	blob.colors = PackedColorArray([Color(1, 1, 1, 1), Color(1, 1, 1, 1), Color(1, 1, 1, 0)])
+	var blob_tex := GradientTexture2D.new()
+	blob_tex.gradient = blob
+	blob_tex.fill = GradientTexture2D.FILL_RADIAL
+	blob_tex.fill_from = Vector2(0.5, 0.5)
+	blob_tex.fill_to = Vector2(1.0, 0.5)
+	blob_tex.width = 64
+	blob_tex.height = 64
 	_spray_mat = StandardMaterial3D.new()
 	_spray_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	_spray_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 	_spray_mat.billboard_mode = BaseMaterial3D.BILLBOARD_PARTICLES
 	_spray_mat.billboard_keep_scale = true
 	_spray_mat.vertex_color_use_as_albedo = true
-	_spray_mat.albedo_texture = puff_tex
-	_spray_mat.albedo_color = Color(1, 1, 1, 0.8)
+	_spray_mat.albedo_texture = blob_tex
+	_spray_mat.albedo_color = Color(1, 1, 1, 0.9)
 	var quad := QuadMesh.new()
 	quad.size = Vector2(0.5, 0.5)
 	quad.material = _spray_mat
-	_spray.draw_pass_1 = quad
+	_spray_blobs = GPUParticles3D.new()
+	_spray_blobs.amount = 24
+	_spray_blobs.lifetime = 0.9
+	_spray_blobs.local_coords = false
+	_spray_blobs.explosiveness = 0.0
+	_spray_blobs.randomness = 0.5
+	_spray_blobs.fixed_fps = 30
+	_spray_blobs.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_spray_blobs.visibility_aabb = _spray.visibility_aabb
+	_spray_blobs.amount_ratio = 0.0
+	_spray_blobs.emitting = false
+	_spray_blobs.process_material = _spray_pm
+	_spray_blobs.draw_pass_1 = quad
+	_spray.add_child(_spray_blobs)
 	add_child(_spray)
+
+## A crossed pair of thin quads, +Y along the flight (the head), the tail end fading: a drop of water in motion.
+func _bow_drop_mesh() -> ArrayMesh:
+	var w := 0.03
+	var h := 0.5
+	var verts := PackedVector3Array([
+		Vector3(-w, 0, 0), Vector3(w, 0, 0), Vector3(w, h, 0), Vector3(-w, h, 0),
+		Vector3(0, 0, -w), Vector3(0, 0, w), Vector3(0, h, w), Vector3(0, h, -w)])
+	var tail := Color(1, 1, 1, 0.2)
+	var head := Color(1, 1, 1, 1.0)
+	var cols := PackedColorArray([tail, tail, head, head, tail, tail, head, head])
+	var idx := PackedInt32Array([0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7])
+	var arr := []
+	arr.resize(Mesh.ARRAY_MAX)
+	arr[Mesh.ARRAY_VERTEX] = verts
+	arr[Mesh.ARRAY_COLOR] = cols
+	arr[Mesh.ARRAY_INDEX] = idx
+	var m := ArrayMesh.new()
+	m.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr)
+	m.surface_set_material(0, _spray_drop_mat)
+	m.custom_aabb = AABB(Vector3(-1, 0, -1), Vector3(2, h, 2))
+	return m
 
 func _update_spray(delta: float) -> void:
 	if _spray == null:
@@ -458,6 +542,9 @@ func _update_spray(delta: float) -> void:
 	var r := clampf((_wake_speed - 1.2) / 4.0, 0.0, 1.0) * (0.35 + 0.65 * sea)
 	_spray.amount_ratio = r
 	_spray.emitting = r > 0.02
+	if _spray_blobs:
+		_spray_blobs.amount_ratio = r
+		_spray_blobs.emitting = r > 0.02
 	_spray_t -= delta
 	if _spray_t <= 0.0:
 		_spray_t = 0.5
@@ -474,7 +561,8 @@ func _update_spray(delta: float) -> void:
 			var sun := _ocean.get_node_or_null(_ocean.sun_path) as DirectionalLight3D
 			if sun:
 				lit = (0.2 + 0.8 * clampf(sun.light_energy, 0.0, 1.0)) if sun.visible else 0.2
-		_spray_mat.albedo_color = Color(lit, lit, lit, 0.8)
+		_spray_mat.albedo_color = Color(lit, lit, lit, 0.9)
+		_spray_drop_mat.albedo_color = Color(lit, lit, lit, 0.95)
 
 func _process(delta: float) -> void:
 	if _ocean and _ship and _ocean.get_ocean_material():

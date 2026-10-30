@@ -58,6 +58,8 @@ uniform float foam_amount = 0.6;
 uniform float foam_z = 1.8;            // whitecaps where the crest-fold score is above this many standard deviations (ocean.gd, per sea state)
 uniform float jac_v = 0.156;           // variance of one wave's fold term for the current peak (ocean.gd)
 uniform vec3 bubble_color : source_color = vec3(0.16, 0.42, 0.42);   // water full of bubbles round a whitecap
+uniform float foam_bump : hint_range(0.0, 1.0) = 0.3;    // High setting: how much the foam's bubbles bump its normal
+uniform float foam_glow : hint_range(0.0, 0.6) = 0.14;   // High setting: sunlight showing through thin foam when it is backlit
 
 // ---- weather (set by SkySystem; the defaults leave the water as it was) ----
 uniform vec3 horizon_color : source_color = vec3(0.58, 0.6, 0.62);
@@ -75,6 +77,14 @@ uniform vec2 wake_pos = vec2(0.0);             // the ship (rig origin) on the w
 uniform vec2 wake_dir = vec2(0.0, -1.0);       // her bow direction on the water, world xz
 uniform float wake_wave_amount = 1.0;          // scales the wake's waves and dark slick (0 = off)
 uniform float wake_foam_amount = 0.5;          // scales the wake's white water (0 = none)
+
+// ---- High water setting (Ocean.water_quality) ----
+uniform float high_water = 0.0;                // 1 = the High setting: more small waves, foam that lingers behind crests
+uniform float wake_trail_on = 0.0;             // 1 = the wake is drawn from the records below (set by wake_trail.gd)
+// One record per ~1.5 m the ship has travelled: x, z (world), the time it was made (ocean_time) and her speed then.
+// The bow's records become rings of water spreading out (which overlap into the V of arms) and the stern's become a patch of churned water.
+uniform vec4 wake_bow[64];
+uniform vec4 wake_stern[64];
 uniform sampler2D foam_noise : hint_default_white, filter_linear_mipmap, repeat_enable;
 
 // ---- see-through ----
@@ -146,7 +156,7 @@ float chart_scale(vec2 p) {
 // fx also comes back: x = the Jacobian of the domain warp (1 = waves evenly spread; below 1 where the sea bunches its wave
 // fronts up into a crest about to break, see the foam), y = the variance of that Jacobian (to turn it into a score), and
 // z = the slope variance of the waves too small to draw at this distance (it roughens the glitter instead).
-vec3 waves(vec2 p, int n, float footprint, out vec3 fx) {
+vec3 waves_at(vec2 p, int n, float footprint, float t, out vec3 fx) {
 	float h = 0.0;
 	vec2 grad = vec2(0.0);
 	float jac = 1.0;
@@ -164,7 +174,7 @@ vec3 waves(vec2 p, int n, float footprint, out vec3 fx) {
 			break;
 		}
 		vec2 d = vec2(w_dx[i], w_dz[i]);
-		float x = dot(d, p) * w_k[i] + ocean_time * w_w[i] + w_p[i];
+		float x = dot(d, p) * w_k[i] + t * w_w[i] + w_p[i];
 		float s = sin(x);
 		float c = cos(x);
 		float e = exp(peak * (s - 1.0));
@@ -185,6 +195,11 @@ vec3 waves(vec2 p, int n, float footprint, out vec3 fx) {
 	}
 	fx = vec3(jac, jvar, lost);
 	return vec3(h + height_offset, grad);
+}
+
+// The waves right now (waves_at with the time of the sea).
+vec3 waves(vec2 p, int n, float footprint, out vec3 fx) {
+	return waves_at(p, n, footprint, ocean_time, fx);
 }
 
 // Gradient noise with its derivative, computed in the shader (full float precision and it
@@ -263,6 +278,36 @@ vec2 foam_pattern(vec2 p, float footprint) {
 	return vec2(lace_v, streak_v);
 }
 
+// The High setting's foam body: one round bubble-cluster dome per cell of a jittered grid (a Worley field).
+// Returns x = dome height 0..1, yz = d height / d p, w = a random number 0..1 for the nearest cell. Foam keeps or
+// drops whole cells by that number as it thins, so it breaks up into clumps and holes instead of just fading, and the
+// dome gives the bubbles their shading.
+vec4 foam_cells(vec2 p) {
+	vec2 i = floor(p);
+	vec2 f = fract(p);
+	float best = 16.0;
+	vec2 bv = vec2(0.0);
+	vec2 bid = i;
+	for (int y = -1; y <= 1; y++) {
+		for (int x = -1; x <= 1; x++) {
+			vec2 g = vec2(float(x), float(y));
+			vec2 o = hash22(i + g) * 0.5 + 0.5;
+			vec2 r = g + o - f;            // from p to that cell's centre
+			float d = dot(r, r);
+			if (d < best) {
+				best = d;
+				bv = r;
+				bid = i + g;
+			}
+		}
+	}
+	const float K = 1.5;
+	float dome = sqrt(max(1.0 - K * K * best, 0.0));
+	vec2 grad = K * K * bv / max(dome, 0.3);
+	float rnd = hash22(bid + vec2(13.7, 5.1)).x * 0.5 + 0.5;
+	return vec4(dome, grad, rnd);
+}
+
 // Half-beam of the hull's waterline at zl (= -z in the hull's space, the same index the hull mask reads); 0 off the ends.
 float hull_half_beam(float zl) {
 	float f = (zl - y_min) / y_step;
@@ -280,7 +325,7 @@ float hull_half_beam(float zl) {
 // world-fixed foam pattern, so the white seems to stay in the water while the ship moves through it.
 // Returns (foam, how thick it is).
 vec2 wake_foam(vec3 hl, vec2 pat, float nz) {
-	float sp = smoothstep(0.2, 5.0, wake_speed);
+	float sp = smoothstep(0.1, 3.0, wake_speed);
 	float along = dot(hl, wake_fwd);            // + toward the bow
 	float across = abs(hl.x);
 	// distance outside the waterline outline
@@ -309,7 +354,7 @@ vec2 wake_foam(vec3 hl, vec2 pat, float nz) {
 	float trail = (1.0 - smoothstep(0.0, half_w, across)) * smoothstep(-2.0, 0.5, s)
 		* (1.0 - smoothstep(0.25 * trail_len, trail_len, s));
 	trail *= sp * (0.35 + 0.95 * pat.x * (0.6 + 0.8 * pat.y));
-	float trail_f = smoothstep(0.2, 0.55, trail);
+	float trail_f = smoothstep(0.2, 0.55, trail) * (1.0 - wake_trail_on);   // (the High setting's trail records do this)
 
 	float w = max(ring, max(bow_line, trail_f));
 	float t = max(ring * 0.9, trail_f * (1.0 - smoothstep(0.0, trail_len * 0.5, s)));
@@ -322,8 +367,8 @@ vec2 wake_foam(vec3 hl, vec2 pat, float nz) {
 // swings with her in a turn instead of bending. Used by the vertex stage (the geometry) and, by differences, the
 // fragment stage (the shading).
 float wake_height(vec2 p) {
-	float sp = smoothstep(0.2, 5.0, wake_speed) * wake_wave_amount;
-	if (sp <= 0.001) {
+	float sp = smoothstep(0.1, 3.0, wake_speed) * wake_wave_amount;
+	if (sp <= 0.001 || wake_trail_on > 0.5) {      // (the High setting draws the wake from the trail records instead)
 		return 0.0;
 	}
 	vec2 r = p - wake_pos;
@@ -342,14 +387,14 @@ float wake_height(vec2 p) {
 	float kt = 9.81 / max(wake_speed * wake_speed, 1.0);
 	float inside = 1.0 - smoothstep(arm_c * 0.35, arm_c, a);
 	float trans = cos(back * kt) * inside;
-	return env * sp * (0.4 * arm + 0.16 * trans);
+	return env * sp * (0.55 * arm + 0.2 * trans);
 }
 
 // How much the boat's slick darkens and smooths the water here, 0..1: the flattened, churned water behind the stern,
 // widening and fading with distance, plus a faint trace along the two arms of the V.
 float wake_calm(vec2 p) {
-	float sp = smoothstep(0.2, 5.0, wake_speed) * wake_wave_amount;
-	if (sp <= 0.001) {
+	float sp = smoothstep(0.1, 3.0, wake_speed) * wake_wave_amount;
+	if (sp <= 0.001 || wake_trail_on > 0.5) {
 		return 0.0;
 	}
 	vec2 r = p - wake_pos;
@@ -371,6 +416,82 @@ float wake_calm(vec2 p) {
 	return clamp(max(slick, arms), 0.0, 1.0) * sp;
 }
 
+// ---- the High setting's wake: water that stays behind the ship ----
+// The bow's records (wake_bow) are the centres of rings of water. A ring made `age` seconds ago has radius 0.34 * speed * age,
+// so the rings of a moving ship overlap into a V whose arms sit about 20 degrees off her track whatever her speed (the
+// envelope of circles, how a Mach wake forms), and because each ring stays where it was made the V bends when she turns
+// and carries on after she stops. A ring is a Ricker wavelet (a crest between two troughs) that widens, thins out and
+// fades as it travels. Returns (height, d/dx, d/dz).
+vec3 trail_waves(vec2 p) {
+	vec3 acc = vec3(0.0);
+	if (wake_trail_on < 0.5 || wake_wave_amount <= 0.0) {
+		return acc;
+	}
+	vec2 dr = p - wake_pos;
+	if (dot(dr, dr) > 16900.0) {        // nothing of the wake is more than ~130 m from the ship
+		return acc;
+	}
+	for (int i = 0; i < 64; i++) {
+		vec4 e = wake_bow[i];
+		float age = ocean_time - e.z;
+		if (age < 0.05 || age > 24.0) {
+			continue;
+		}
+		float ring_r = e.w * 0.34 * age;
+		float w = 0.9 + 0.12 * ring_r;
+		vec2 r = p - e.xy;
+		float d = max(length(r), 0.001);
+		float u = (d - ring_r) / w;
+		if (u < -3.0 || u > 3.0) {
+			continue;
+		}
+		float ex = exp(-0.5 * u * u);
+		float amp = 0.09 * smoothstep(0.1, 3.0, e.w) * smoothstep(0.05, 0.8, age) * exp(-age / 9.0) * inversesqrt(1.0 + ring_r / 5.0);
+		acc.x += amp * (1.0 - u * u) * ex;
+		float dh = amp * ex * u * (u * u - 3.0) / w;     // d(height) / d(distance from the ring's centre)
+		acc.yz += dh * r / d;
+	}
+	return acc * wake_wave_amount;
+}
+
+// The churned water behind the stern: x = how much it darkens and smooths the water (the same water, darker), y = white
+// water. Each of the stern's records is a soft round patch that widens and fades with age; the white goes first.
+vec2 trail_slick(vec2 p) {
+	vec2 acc = vec2(0.0);
+	if (wake_trail_on < 0.5 || wake_wave_amount <= 0.0) {
+		return acc;
+	}
+	vec2 dr = p - wake_pos;
+	if (dot(dr, dr) > 16900.0) {
+		return acc;
+	}
+	for (int i = 0; i < 64; i++) {
+		vec4 e = wake_stern[i];
+		float age = ocean_time - e.z;
+		if (age < 0.0 || age > 30.0) {
+			continue;
+		}
+		float rad = hull_beam * 0.9 + 0.22 * age;
+		vec2 r = p - e.xy;
+		float d2 = dot(r, r);
+		if (d2 > rad * rad) {
+			continue;
+		}
+		float s = 1.0 - smoothstep(0.35 * rad, rad, sqrt(d2));
+		float spd = smoothstep(0.1, 3.0, e.w);
+		acc = max(acc, vec2(s * spd * exp(-age / 14.0), s * spd * exp(-age / 4.5)));
+	}
+	return acc * vec2(wake_wave_amount, 1.0);
+}
+
+// What the vertex stage displaces: the rings, and a slight hollow along the churned track.
+float trail_height(vec2 p) {
+	if (wake_trail_on < 0.5) {
+		return 0.0;
+	}
+	return trail_waves(p).x - 0.12 * trail_slick(p).x;
+}
+
 void vertex() {
 	vec3 wp = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
 	world_xz = wp.xz;
@@ -385,7 +506,7 @@ void vertex() {
 	}
 	shoal_v = sc;
 	wave_h = w.x * sc;
-	VERTEX.y += w.x * sc - dist * dist * curve_k + wake_height(wp.xz);
+	VERTEX.y += w.x * sc - dist * dist * curve_k + wake_height(wp.xz) + trail_height(wp.xz);
 }
 
 void fragment() {
@@ -424,6 +545,14 @@ void fragment() {
 			wake_height(world_xz + vec2(we, 0.0)) - wake_height(world_xz - vec2(we, 0.0)),
 			wake_height(world_xz + vec2(0.0, we)) - wake_height(world_xz - vec2(0.0, we))) / (2.0 * we);
 	}
+	// the High setting's wake: slope of the rings and the churned track from the trail records
+	vec2 tslick = vec2(0.0);
+	if (wake_trail_on > 0.5) {
+		vec3 tw = trail_waves(world_xz);
+		wslope += tw.yz;
+		tslick = trail_slick(world_xz);
+		wcalm = max(wcalm, tslick.x);
+	}
 	vec2 slope = w.yz + rip.yz * ripple_depth * (1.0 - 0.7 * wcalm) + wslope;
 	vec3 n_world = normalize(vec3(-slope.x, 1.0, -slope.y));
 	NORMAL = normalize((VIEW_MATRIX * vec4(n_world, 0.0)).xyz);
@@ -461,18 +590,39 @@ void fragment() {
 	// Shoaled waves break less out here (the shore has its own surf).
 	float fold_z = (1.0 - fx.x) * shoal_v / max(sqrt(fx.y * jac_v), 0.004);
 	float crest = smoothstep(foam_z - 0.5, foam_z + 0.6, fold_z + (nz - 0.5) * 0.8);
+	// High setting: foam lingers behind a breaking crest. The same fold score a moment ago at this very spot (the sea is a
+	// formula of time, so we can ask it) leaves thinning lace: the more recent the break, the stronger. Only the lace and
+	// the streaks use it; the thick white stays on the crest itself.
+	float crest_p = 0.0;
+	if (high_water > 0.5 && foam_amount > 0.0) {
+		vec3 fx1;
+		vec3 fx2;
+		vec3 fx3;
+		vec3 h1 = waves_at(world_xz, 10, footprint, ocean_time - 0.7, fx1);   // (only the fold score, fx, is used)
+		vec3 h2 = waves_at(world_xz, 10, footprint, ocean_time - 1.5, fx2);
+		vec3 h3 = waves_at(world_xz, 10, footprint, ocean_time - 2.6, fx3);
+		float z1 = (1.0 - fx1.x) * shoal_v / max(sqrt(fx1.y * jac_v), 0.004);
+		float z2 = (1.0 - fx2.x) * shoal_v / max(sqrt(fx2.y * jac_v), 0.004);
+		float z3 = (1.0 - fx3.x) * shoal_v / max(sqrt(fx3.y * jac_v), 0.004);
+		float c1 = smoothstep(foam_z - 0.5, foam_z + 0.6, z1 + (nz - 0.5) * 0.8) * 0.7;
+		float c2 = smoothstep(foam_z - 0.5, foam_z + 0.6, z2 + (nz - 0.5) * 0.8) * 0.5;
+		float c3 = smoothstep(foam_z - 0.5, foam_z + 0.6, z3 + (nz - 0.5) * 0.8) * 0.32;
+		crest_p = max(max(c1, c2), c3);
+	}
+	float crest_l = max(crest, crest_p);
 	// layers: thick white on the highest crests, lacy veins and wind streaks on the flanks around them
 	vec3 hl = (ship_inv * vec4(wpos, 1.0)).xyz;                  // this pixel in the hull's own space
 	float h_along = dot(hl, wake_fwd);
 	bool near_ship = sample_count > 0 && abs(hl.x) < 30.0 && h_along > hull_stern - 60.0 && h_along < hull_bow + 15.0;
 	vec2 fp = vec2(0.3, 0.35);                                   // each pattern's average, used where it is not drawn
-	if (crest > 0.02 || near_ship) {
+	if (crest_l > 0.02 || near_ship || tslick.y > 0.02) {
 		fp = foam_pattern(world_xz, footprint);
 	}
 	float breakup = smoothstep(0.35, 0.75, nz + crest * 0.3);
+	float breakup_l = smoothstep(0.35, 0.75, nz + crest_l * 0.3);
 	float thick = smoothstep(0.55, 0.9, crest + (nz - 0.5) * 0.45) * breakup;
-	float lace_f = fp.x * smoothstep(0.08, 0.65, crest) * breakup;
-	float streak_f = fp.y * smoothstep(0.2, 0.75, crest) * breakup * 0.85;
+	float lace_f = fp.x * smoothstep(0.08, 0.65, crest_l) * breakup_l;
+	float streak_f = fp.y * smoothstep(0.2, 0.75, crest_l) * breakup_l * 0.85;
 	float foam = clamp(max(thick, max(lace_f, streak_f)) * foam_amount * 1.6, 0.0, 1.0);
 	thick = clamp(thick * foam_amount * 1.6, 0.0, 1.0);
 	// the ship's own wake
@@ -480,6 +630,13 @@ void fragment() {
 		vec2 wf = wake_foam(hl, fp, nz);
 		foam = max(foam, wf.x * wake_foam_amount);
 		thick = max(thick, wf.y * wake_foam_amount);
+	}
+	// the High setting's churned track behind the stern: white water that thins out into the pattern as it ages
+	if (tslick.y > 0.02) {
+		float tr = tslick.y * (0.35 + 0.95 * fp.x * (0.6 + 0.8 * fp.y));
+		float tf = smoothstep(0.2, 0.55, tr);
+		foam = max(foam, tf * wake_foam_amount);
+		thick = max(thick, tf * smoothstep(0.35, 0.8, tslick.y) * wake_foam_amount);
 	}
 	float crest_foam = foam;
 
@@ -492,6 +649,39 @@ void fragment() {
 		float lace = smoothstep(0.30, 0.62, nz + zone * 0.45);
 		float edge = 1.0 - smoothstep(0.0, 0.18, depth_here);       // solid line right at the water line
 		foam = max(foam, clamp(zone * lace * 1.0 + edge * 0.7, 0.0, 1.0) * smoothstep(0.0, 0.05, 1.0 - float(isl.x > 0.0)));
+	}
+
+	// High setting: give all of the foam above (crests, the ship's wake and track, the surf) a bubble structure. Its
+	// density says how many of the cells stay: solid white where it is 1, clumps and holes as it thins, a faint film
+	// between them. Two cell sizes; each fades out once its cells are only a few pixels across (the plain foam then
+	// shows). The domes also give the foam a bumpy normal and creases between the bubbles.
+	float hq_w = 0.0;
+	float billow = 1.0;
+	vec2 fbump = vec2(0.0);
+	if (high_water > 0.5 && foam > 0.03) {
+		float dens = foam;
+		float fa = 1.0 - smoothstep(0.18, 0.45, footprint * 2.4);
+		float fb = 1.0 - smoothstep(0.18, 0.45, footprint * 6.1);
+		hq_w = fa;
+		if (fa > 0.0) {
+			vec2 q = world_xz + wind_dir * ocean_time * 0.3;
+			vec4 ca = foam_cells(q * 2.4);
+			vec4 cb = foam_cells(q * 6.1 + vec2(31.7, 12.3));
+			float wob = (nz - 0.5) * 0.3;
+			float thr_a = 1.15 * (1.0 - dens) - 0.12;
+			float thr_b = 1.15 * (1.0 - dens * 0.85) - 0.12;
+			float al_a = smoothstep(thr_a, thr_a + 0.1, ca.w * 0.75 + ca.x * 0.25 + wob);
+			float al_b = smoothstep(thr_b, thr_b + 0.1, cb.w * 0.75 + cb.x * 0.25 + wob) * fb;
+			float present = smoothstep(0.03, 0.2, dens);
+			float hq = max(max(al_a, al_b) * present, foam * 0.3);
+			foam = mix(foam, hq, fa);
+			billow = mix(ca.x, cb.x, 0.35 * fb);
+			fbump = (ca.yz * 0.6 + cb.yz * 0.4 * fb) * foam_bump;
+		}
+	}
+	if (hq_w > 0.0) {
+		vec3 nf = normalize(vec3(-(slope.x + fbump.x * foam), 1.0, -(slope.y + fbump.y * foam)));
+		NORMAL = normalize((VIEW_MATRIX * vec4(nf, 0.0)).xyz);
 	}
 
 	vec3 body = mix(deep_color, shallow_color, clarity);
@@ -507,6 +697,7 @@ void fragment() {
 	body *= 1.0 + rip.x * ripple_tint;               // ripples: slightly lighter/darker bands
 	thick = max(thick, clamp(foam - crest_foam, 0.0, 1.0) * 1.2);   // surf along the shore is thick white water
 	vec3 foam_col = mix(foam_color * 0.72 + body * 0.35, foam_color, clamp(thick * 1.3, 0.0, 1.0));   // thin foam shows the water through it
+	foam_col *= mix(1.0, 0.66 + 0.34 * billow, hq_w * smoothstep(0.1, 0.5, foam));   // High setting: shaded creases between the bubbles
 	ALBEDO = mix(body, foam_col, foam);
 	// Glitter by distance: waves too small to draw at this distance (fx.z, their slope variance) roughen the surface
 	// instead. Up close the sun breaks into sparkles; further out they average into a broad, smooth path. GGX alpha
@@ -515,6 +706,7 @@ void fragment() {
 	ROUGHNESS = mix(rough_water, 0.85, foam);
 	SPECULAR = 0.5;
 	EMISSION = scatter * (1.0 - foam);
+	EMISSION += foam_color * sun_color * pow(max(dot(l_world, -v_world), 0.0), 3.0) * foam * foam_glow * hq_w * (1.0 - 0.6 * water_dark);   // High setting: backlit foam glows
 
 	// see-through where the water is thin; reflections (grazing angles) and foam stay opaque
 	float fresnel = pow(1.0 - max(dot(n_world, v_world), 0.0), 5.0);

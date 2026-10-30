@@ -1,4 +1,4 @@
-=== start 11:29:48 skip=[]
+=== start 12:44:23 skip=[]
 -- read group Hull: 55 objects
 START Hull mods=['SOLIDIFY', 'SUBSURF'] v=480
 OK Hull polys=3772
@@ -78,8 +78,8 @@ START DeckWaterway mods=['BEVEL'] v=1032
 OK DeckWaterway polys=2096
 START Stanchions mods=['BEVEL'] v=192
 OK Stanchions polys=1296
-START PoopDeck mods=['SOLIDIFY'] v=476
-OK PoopDeck polys=824
+START PoopDeck mods=['SOLIDIFY'] v=569
+OK PoopDeck polys=1012
 START PoopRail mods=[] v=1162
 OK PoopRail polys=1112
 START PoopBalusters mods=[] v=3600
@@ -90,8 +90,8 @@ START CabinFrontWindow mods=[] v=8
 OK CabinFrontWindow polys=6
 START CabinDoorFrame mods=['BEVEL'] v=64
 OK CabinDoorFrame polys=208
-START PoopSkylight mods=['BEVEL'] v=14
-OK PoopSkylight polys=28
+START PoopSkylight mods=['SOLIDIFY', 'BEVEL'] v=14
+OK PoopSkylight polys=96
 START PoopSkylightBars mods=[] v=136
 OK PoopSkylightBars polys=90
 START PoopSkylightGlass mods=[] v=8
@@ -110,7 +110,7 @@ START Lamp_Stern_Glass mods=[] v=48
 OK Lamp_Stern_Glass polys=12
 START Lamp_Stern_Hardware mods=[] v=464
 OK Lamp_Stern_Hardware polys=304
-READ Hull: verts=46934 faces=43844
+READ Hull: verts=47174 faces=44100
 -- read group MainDeck: 1 objects
 START DeckLow mods=['BOOLEAN', 'BOOLEAN'] v=611
 OK DeckLow polys=434
@@ -533,7 +533,7 @@ OK LowerStairPosts polys=756
 START GalleyUtensilRail mods=[] v=24
 OK GalleyUtensilRail polys=18
 READ Interiors: verts=29436 faces=26482
-DONE Hull: verts=46702 tris=88950 mats=['M_Brig_HullClean', 'M_Brig_Stripe', 'M_Brig_Tar', 'M_Brig_Walnut', 'M_Brig_BulwarkClean', 'BR_PortRed', 'M_Brig_Iron', 'BR_Glow', 'BR_Gilt', 'BR_Lead', 'M_Brig_OakLight', 'M_Brig_DeckClean', 'M_Brig_Lining', 'BR_GlassDim', 'M_Brig_DarkWood', 'BR_Wax', 'BR_Flame', 'BR_Brass', 'BR_LanternGlass']
+DONE Hull: verts=46942 tris=89440 mats=['M_Brig_HullClean', 'M_Brig_Stripe', 'M_Brig_Tar', 'M_Brig_Walnut', 'M_Brig_BulwarkClean', 'BR_PortRed', 'M_Brig_Iron', 'BR_Glow', 'BR_Gilt', 'BR_Lead', 'M_Brig_OakLight', 'M_Brig_DeckClean', 'M_Brig_Lining', 'BR_GlassDim', 'M_Brig_DarkWood', 'BR_Wax', 'BR_Flame', 'BR_Brass', 'BR_LanternGlass']
 DONE MainDeck: verts=507 tris=884 mats=['M_Brig_DeckClean']
 DONE DeckFittings: verts=19080 tris=36064 mats=['M_Brig_Walnut', 'M_Brig_Iron', 'M_Rope_Hemp', 'M_Brig_OakLight', 'M_Rope_Tar']
 DONE DeckExtras: verts=808 tris=1552 mats=['M_Rope_Tar', 'M_Brig_Walnut', 'M_Brig_Iron', 'BR_Brass']

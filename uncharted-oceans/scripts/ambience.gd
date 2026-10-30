@@ -21,7 +21,7 @@ extends Node
 ## The hull sound goes straight to Ambience (it should stay clear below deck), the rest to AmbOutdoor.
 ##
 ## Debug: the layers' levels are in the debug HUD (status_text), H shows it.
-## Not here yet: rain on the water and the deck, thunder (SkySystem.lightning gives the delay), creaking rigging, bells.
+## Not here yet: rain on the water and the deck, creaking rigging, bells. (Thunder is at the bottom of this file.)
 
 const DIR := "res://assets/audio/ambience/"
 const BUS_AMBIENCE := "Ambience"
@@ -102,6 +102,24 @@ var _storm := 0.0
 var _daylight := 1.0
 var _ship_speed := 0.0
 var _on_ship := false
+
+## Thunder: one-shot recordings played when the thunder of a lightning strike reaches the ship (SkySystem.lightning
+## says how far off it was and how many seconds the sound takes). Which one depends on where the storm is:
+##   rumble  the storm is way off: a long low roll
+##   rain    the storm is close to you (just about upon you): thunder with the rain coming
+##   boom    you are in the storm itself (inside the no-sleep zone): the big crack
+const THUNDER_FILES := {"rumble": "thunder_rumble.ogg", "rain": "thunder_rain.ogg", "boom": "thunder_boom.ogg"}
+const THUNDER_MAX_M := 75000.0         # farther strikes are not heard at all (lightning is drawn out to 70 km)
+const THUNDER_DELAY_SCALE := 0.5       # real sound takes 3 s per km; it is a game, so halve the wait ...
+const THUNDER_MAX_DELAY_S := 10.0      # ... and never make it wait longer than this
+const THUNDER_CLOSE_STORM := 0.25      # storm_proximity_at_ship from here on: "rain" thunder
+const THUNDER_IN_STORM := 0.7          # ... and from here (WorldWeather.storm_wake_level): "boom"
+var _thunder := {}
+var _thunder_players: Array[AudioStreamPlayer] = []
+var _thunder_next := 0
+var _thunder_queue: Array = []         # of {"due": seconds on _t, "d": strike distance in metres}
+var _sky: SkySystem
+var _thunder_note := "thunder: none heard yet"
 var _swimming := false
 var _head_under := false
 var _covered := false
@@ -121,6 +139,7 @@ func _ready() -> void:
 	_ensure_buses()
 	_load_layers()
 	_load_surf()
+	_load_thunder()
 	_apply_bus_volume()
 
 
@@ -229,6 +248,10 @@ func _find_nodes() -> void:
 		_ship = get_tree().get_first_node_in_group("ships") as Node3D
 	if _player == null or not is_instance_valid(_player):
 		_player = get_tree().get_first_node_in_group("player") as Node3D
+	if _sky == null or not is_instance_valid(_sky):
+		_sky = get_tree().get_first_node_in_group("sky_system") as SkySystem
+		if _sky != null and not _sky.lightning.is_connected(_on_lightning):
+			_sky.lightning.connect(_on_lightning)
 	if _ocean == null or not is_instance_valid(_ocean):
 		_ocean = null
 		if _wind != null:
@@ -323,22 +346,28 @@ func _mix() -> void:
 	var w := clampf(inverse_lerp(wind_min_mps, wind_max_mps, _wind_mps), 0.0, 1.0)
 	var out_gain := lerpf(1.0, 0.4, sh) * (1.0 - 0.65 * un)     # outdoor sounds, muffled by a roof and by water
 
-	# wind: speed, with the gusts riding on top; pitch leans up a little in a blow
-	var wind_gain := pow(w, 1.15) * (1.0 + 0.4 * _gust) * lerpf(1.0, 0.5, sh) * (1.0 - 0.9 * un)
-	_set_target("wind", minf(wind_gain, 1.25))
+	# A gale (wind above about 14 m/s, or a storm sea) takes over the soundscape: the wind howls louder and higher, the
+	# heavy sea comes up under it, and the hull's own sound (the same wooden-ship-on-water loop you hear tied up in port) is
+	# pushed down so it stops sounding like the harbour.
+	var gale := maxf(smoothstep(0.7, 1.0, w), smoothstep(2.3, 3.0, _sea_level))
+
+	# wind: speed, with the gusts riding on top; pitch leans up a little in a blow, and more in a gale
+	var wind_gain := pow(w, 1.15) * (1.0 + 0.4 * _gust) * (1.0 + 0.55 * gale) * lerpf(1.0, 0.5, sh) * (1.0 - 0.9 * un)
+	_set_target("wind", minf(wind_gain, 1.9))
 	if _layers.has("wind"):
-		(_layers["wind"] as Layer).player.pitch_scale = lerpf(0.9, 1.08, w)
+		(_layers["wind"] as Layer).player.pitch_scale = lerpf(0.9, 1.08, w) + 0.06 * gale
 
 	# the sea against the hull: always there on board, more with sea and way on, clearer below deck. On the dock it
 	# is only a distant ship.
 	var hull := 0.5 + 0.25 * lvl + 0.2 * clampf(_ship_speed / 6.0, 0.0, 1.0)
 	hull *= lerpf(1.0, 1.5, sh)
+	hull *= lerpf(1.0, 0.4, gale)
 	if not _on_ship:
 		hull = 0.12
 	_set_target("hull", minf(hull, 1.0) * (1.0 - 0.8 * un))
 
 	# a heavy sea
-	_set_target("rough", smoothstep(1.0, 2.6, _sea_level) * (0.8 + 0.2 * w) * out_gain)
+	_set_target("rough", smoothstep(1.0, 2.6, _sea_level) * (0.8 + 0.2 * w) * (1.0 + 0.35 * gale) * out_gain)
 
 	# waves on the shore: heard from the coast out to shore_far_m, a little more with a bigger sea
 	_shore_factor = 1.0 - smoothstep(shore_near_m, shore_far_m, _shore_m)
@@ -389,6 +418,7 @@ func _surf_tick(delta: float) -> void:
 
 func _process(delta: float) -> void:
 	_t += delta
+	_update_thunder()
 	_find_t -= delta
 	if _find_t <= 0.0:
 		_find_t = 1.0
@@ -444,4 +474,69 @@ func status_text() -> String:
 		_wind_mps, _sea_level, ("%.0f m" % _shore_m) if _shore_m < 90000.0 else "n/a",
 		"on ship" if _on_ship else "off ship", "  under cover" if _covered else "",
 		g.call("wind"), g.call("rough"), g.call("hull"), g.call("shore"), g.call("terns"), g.call("birds"), g.call("swim"),
-		int(_cutoff)]
+		int(_cutoff)] + "\n  " + _thunder_note + ("" if _sky != null else "  (no SkySystem found)") + ("" if not _thunder.is_empty() else "  (thunder files not loaded)")
+
+
+# ------------------------------------------------------------------ thunder
+
+func _load_thunder() -> void:
+	for k in THUNDER_FILES:
+		var path: String = DIR + String(THUNDER_FILES[k])
+		if ResourceLoader.exists(path):
+			var st := load(path) as AudioStream
+			if st is AudioStreamOggVorbis:
+				(st as AudioStreamOggVorbis).loop = false
+			_thunder[k] = st
+	if _thunder.is_empty():
+		return
+	for i in 4:
+		var p := AudioStreamPlayer.new()
+		p.name = "Thunder_%d" % i
+		p.bus = StringName(BUS_OUTDOOR)      # muffled under a roof like the wind
+		add_child(p)
+		_thunder_players.append(p)
+
+
+## A strike happened distance_m away; its thunder arrives delay_s later.
+func _on_lightning(_cell: StormCell, distance_m: float, delay_s: float) -> void:
+	if not enabled or _thunder.is_empty() or distance_m > THUNDER_MAX_M:
+		return
+	var wait := minf(delay_s * THUNDER_DELAY_SCALE, THUNDER_MAX_DELAY_S)
+	_thunder_queue.append({"due": _t + wait, "d": distance_m})
+	_thunder_note = "thunder: strike %.1f km off, sound in %.0f s" % [distance_m / 1000.0, wait]
+	if _thunder_queue.size() > 8:
+		_thunder_queue.pop_front()
+
+
+func _update_thunder() -> void:
+	if _thunder_queue.is_empty():
+		return
+	var i := 0
+	while i < _thunder_queue.size():
+		var e: Dictionary = _thunder_queue[i]
+		if _t >= float(e["due"]):
+			_thunder_queue.remove_at(i)
+			_play_thunder(float(e["d"]))
+		else:
+			i += 1
+
+
+func _play_thunder(d: float) -> void:
+	# which recording: decided when the sound arrives, from where the storm is relative to the ship now
+	var kind := "rumble"
+	if _storm >= THUNDER_IN_STORM and d < 12000.0:
+		kind = "boom"
+	elif _storm >= THUNDER_CLOSE_STORM or d < 6000.0:
+		kind = "rain"
+	if not _thunder.has(kind) or _thunder_players.is_empty():
+		return
+	var st: AudioStream = _thunder[kind]
+	_thunder_note = "thunder: played %s (%.1f km off, storm %.2f)" % [kind, d / 1000.0, _storm]
+	print("Ambience: ", _thunder_note)
+	# the recordings already fall away the way thunder does, so they play whole, at their own level (no fades, no slicing)
+	var p := _thunder_players[_thunder_next]
+	_thunder_next = (_thunder_next + 1) % _thunder_players.size()
+	p.stream = st
+	p.pitch_scale = 1.0
+	p.volume_db = 0.0
+	p.play()

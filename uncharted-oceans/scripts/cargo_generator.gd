@@ -107,7 +107,7 @@ func prompt() -> String:
 		return "Port box: empty"
 	var g := CargoData.get_shared().get_good(String(s[0]))
 	var next := g.display_name if g != null else String(s[0])
-	return "Click: take %s  (%d in the port box)" % [next, s.size()]
+	return "Click: take all %d %s  (%d in the port box)" % [s.count(String(s[0])), next, s.size()]
 
 
 func _refresh_label() -> void:

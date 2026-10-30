@@ -32,9 +32,21 @@ var _note_t := 0.0
 ## Waves used for per-pixel detail (the main GPU cost). The ripple pattern carries the finest
 ## detail, so 16 is plenty; 28 = the old full detail, 12 = cheapest.
 @export_range(10, 32) var detail_octaves := 16
+## Water quality, like SkySystem.volumetric_quality. Standard is the sea as it is. High costs more GPU and adds: more small
+## waves (HIGH_EXTRA_OCTAVES more octaves of chop), foam that lingers behind breaking crests, and the ship's wake as water
+## that stays behind her (WakeTrail: the V of arms and the churned track, which bend when she turns and outlast her).
+## O (or F3) flips it while playing.
+@export_enum("Standard:0", "High:1") var water_quality := 0:
+	set(v):
+		water_quality = v
+		if is_inside_tree():
+			_apply_quality()
 ## World mode (see WorldStreamer): radius of the planet in metres, for the curved horizon (0 = flat sea, as before).
 ## Earth is 6370000. The sea drops away by d^2 / (2R), so an eye 3 m up sees the horizon at about 6 km.
 @export var curvature_radius_m := 0.0
+## The storm sea (key 4, the big swells) is blocked, and any storm sea eases down to rough, this close to a port (m). It
+## used to be the 6 km ring in which a port scene loads, which was far too wide; harbours themselves are only 200-300 m.
+@export var port_calm_radius_m := 1500.0
 @export_group("Mesh")
 @export var radius := 2500.0
 @export var segments := 320
@@ -71,9 +83,14 @@ const SWELL_LAMBDAS := [250.0, 205.0, 170.0]
 const SWELL_HEIGHTS := [9.0, 6.0, 4.0]
 const SWELL_SPREAD := 0.45   ## swell directions are this much tighter around the wind than the chop's
 const WAVELENGTH_FALLOFF := 1.18   ## each octave's wavelength = previous / this
+const HIGH_EXTRA_OCTAVES := 6      ## more small waves per pixel on the High water setting (down to about 2.6 m)
 
 var time := 0.0
 var octaves := 16
+## The whitecap threshold and fold variance of the current sea state (what the water shader gets as foam_z and jac_v);
+## get_fold_z() and WaveSpray read them.
+var foam_z_now := 1.8
+var jac_v_now := 0.156
 var vertex_octaves := 10
 var peak := 1.0
 var warp := 0.5
@@ -110,8 +127,8 @@ func _ready() -> void:
 		_mat.set_shader_parameter("curve_k", 0.5 / curvature_radius_m if curvature_radius_m > 0.0 else 0.0)
 	_apply_sea_state()
 
-## Storm seas (key 4, sea level 3: the big swell) are not allowed close to a port. "Close" is the ring inside which
-## a port scene is loaded (WorldChart.PORT_SPAWN_M). It needs the chart, so outside the world scene it is always false.
+## Storm seas (key 4, sea level 3: the big swell) are not allowed close to a port. "Close" is port_calm_radius_m (1.5 km).
+## It needs the chart, so outside the world scene it is always false.
 func near_port() -> bool:
 	if chart == null:
 		return false
@@ -119,7 +136,7 @@ func near_port() -> bool:
 	if ship == null:
 		return false
 	var np := chart.nearest_port(ship.global_position.x + _ox, ship.global_position.z + _oz)
-	return not np.is_empty() and float(np["dist_m"]) <= WorldChart.PORT_SPAWN_M
+	return not np.is_empty() and float(np["dist_m"]) <= port_calm_radius_m
 
 func storm_allowed() -> bool:
 	return not near_port()
@@ -190,6 +207,14 @@ func wave_scale(x: float, z: float) -> float:
 
 func _unhandled_input(e: InputEvent) -> void:
 	if e is InputEventKey and e.pressed and not e.echo:
+		# O flips the water quality (F3 too, but many laptops need Fn for the F row, so it may never reach the game)
+		if e.physical_keycode == KEY_O or e.physical_keycode == KEY_F3:
+			water_quality = 1 - water_quality
+			var q_name := "High" if water_quality >= 1 else "Standard"
+			print("Ocean: water quality ", q_name)
+			storm_note = "water quality: " + q_name         # shows on the debug readout (H)
+			_note_t = 3.0
+			return
 		# in the world the SeaWind takes these keys (it sets the wind and the sea follows), so leave them to it
 		var wind_node = get_tree().get_first_node_in_group("wind")
 		if wind_node != null and wind_node.has_method("owns_sea_keys") and wind_node.owns_sea_keys():
@@ -244,6 +269,30 @@ func get_height(x: float, z: float, n: int = -1) -> float:
 	h += height_offset
 	return h * wave_scale(x, z)
 
+## The crest-fold score the water shader draws whitecaps from (fold_z in ocean.gdshader): high where a crest is bunching
+## up to break, and it is a whitecap where it is above foam_z_now. Same maths as the shader with every wave added up.
+## WaveSpray uses it to find the crests that should throw spray.
+func get_fold_z(x: float, z: float, n: int = -1) -> float:
+	if n < 0:
+		n = octaves
+	var px := x
+	var pz := z
+	var jac := 1.0
+	var jvar := 0.0
+	for i in mini(n, _k.size()):
+		var xx := (_dx[i] * px + _dz[i] * pz) * _k[i] + time * _w[i] + _p[i]
+		var s := sin(xx)
+		var c := cos(xx)
+		var e := exp(peak * (s - 1.0))
+		var a := _a[i]
+		var d := a * peak * e * c
+		var fk := warp * a * peak * _k[i]
+		jac *= maxf(1.0 + fk * e * (peak * c * c - s), 0.02)
+		jvar += fk * fk
+		px += _dx[i] * d * warp
+		pz += _dz[i] * d * warp
+	return (1.0 - jac) * wave_scale(x, z) / maxf(sqrt(jvar * jac_v_now), 0.004)
+
 func _apply_sea_state() -> void:
 	var pr: Array = _preset_at(sea_level)
 	var lambda0: float = pr[0]
@@ -255,7 +304,9 @@ func _apply_sea_state() -> void:
 	var ripple: float = pr[6]
 	var swell: float = pr[7]
 	var foam_z: float = pr[8]
-	octaves = detail_octaves
+	foam_z_now = foam_z
+	jac_v_now = _fold_variance(peak)
+	octaves = _octaves_now()
 	vertex_octaves = 10
 
 	var rng := RandomNumberGenerator.new()
@@ -308,6 +359,7 @@ func _apply_sea_state() -> void:
 		_mat.set_shader_parameter("w_w", _w)
 		_mat.set_shader_parameter("w_p", _p)
 		_mat.set_shader_parameter("octaves", octaves)
+		_mat.set_shader_parameter("high_water", 1.0 if water_quality >= 1 else 0.0)
 		_mat.set_shader_parameter("vertex_octaves", vertex_octaves)
 		_mat.set_shader_parameter("peak", peak)
 		_mat.set_shader_parameter("warp", warp)
@@ -341,6 +393,17 @@ static func _fold_variance(k: float) -> float:
 		var g := exp(k * (s - 1.0)) * (k * c * c - s)
 		sum += g * g
 	return sum / float(n)
+
+## How many waves the fragment stage adds up per pixel: detail_octaves, plus the extra small waves of the High setting.
+func _octaves_now() -> int:
+	return mini(detail_octaves + (HIGH_EXTRA_OCTAVES if water_quality >= 1 else 0), MAX_WAVES)
+
+## Switch the water quality without rebuilding the wave table (so the sea does not jump): only the shader's settings change.
+func _apply_quality() -> void:
+	octaves = _octaves_now()
+	if _mat:
+		_mat.set_shader_parameter("octaves", octaves)
+		_mat.set_shader_parameter("high_water", 1.0 if water_quality >= 1 else 0.0)
 
 func _build_mesh() -> ArrayMesh:
 	var radii := PackedFloat32Array([0.0])

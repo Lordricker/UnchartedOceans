@@ -69,6 +69,8 @@ float hash13(vec3 p3) {
 	return fract((p3.x + p3.y) * p3.z);
 }
 
+#include "res://shaders/storm_volume.gdshaderinc"
+
 float stars(vec3 dir) {
 	vec3 sp = dir * 150.0;
 	vec3 cell = floor(sp);
@@ -81,6 +83,18 @@ float stars(vec3 dir) {
 }
 
 void sky() {
+	// Low-res passes: only the raymarched storms are drawn here (premultiplied colour + coverage). The pass that
+	// is not in use writes nothing, so switching vol_quarter at run time costs nothing extra.
+	// (the half / quarter resolution passes are not used: their buffer came back as flat white, so the storms are
+	// marched right here in the normal pass; this branch is dead code kept only so the structure stays the same)
+	if (false) {
+		vec4 vv = vec4(0.0);
+		if (vol_enabled && ((AT_QUARTER_RES_PASS && vol_quarter) || (AT_HALF_RES_PASS && !vol_quarter))) {
+			vv = storm_volume(EYEDIR);
+		}
+		COLOR = vv.rgb;
+		ALPHA = vv.a;
+	} else {
 	vec3 dir = EYEDIR;
 	float y = dir.y;
 	float sd = dot(dir, sun_dir);
@@ -213,7 +227,8 @@ void sky() {
 	col = mix(col, low_col, dl);
 
 	// ---- storm cells: a wide shelf cloud / rain wall, layered and dark, with a bright gap under its lifted edge ----
-	if (y > -0.02) {
+	// (the painted storm wall stays in the reflection cubemap and whenever the volumetric storms are off)
+	if (y > -0.02 && !(vol_enabled && !AT_CUBEMAP_PASS && !vol_paint_behind)) {
 		float az = atan(dir.x, -dir.z);
 		float el = asin(clamp(y, -1.0, 1.0));
 		for (int i = 0; i < MAX_STORMS; i++) {
@@ -283,5 +298,12 @@ void sky() {
 		}
 	}
 
+	// ---- raymarched storms (drawn in the low-res pass, laid over everything else here) ----
+	if (vol_enabled && !AT_CUBEMAP_PASS) {
+		vec4 vlow = storm_volume(dir);
+		col = col * (1.0 - vlow.a) + vlow.rgb;
+	}
+
 	COLOR = col;
+	}
 }

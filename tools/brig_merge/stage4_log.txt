@@ -1,5 +1,5 @@
-=== stage4 start 11:30:06
-PREP Hull: 88950 tris, ratio 0.55, rope-preserved faces=0
+=== stage4 start 12:44:53
+PREP Hull: 89440 tris, ratio 0.55, rope-preserved faces=0
 PREP Interiors: 52815 tris, ratio 0.55, rope-preserved faces=146
 PREP DeckFittings: 36064 tris, ratio 0.58, rope-preserved faces=10316
 PREP Rig_Spars: 37268 tris, ratio 0.55, rope-preserved faces=1248
@@ -13,7 +13,7 @@ PREP Gun_3: 2024 tris, ratio 0.42, rope-preserved faces=284
 PREP Gun_4: 2024 tris, ratio 0.42, rope-preserved faces=284
 PREP Gun_5: 2024 tris, ratio 0.42, rope-preserved faces=284
 EVAL Hull
-EVAL Hull ok: 48920 tris
+EVAL Hull ok: 49190 tris
 EVAL Interiors
 EVAL Interiors ok: 28883 tris
 EVAL DeckFittings
@@ -36,7 +36,7 @@ EVAL Gun_4
 EVAL Gun_4 ok: 608 tris
 EVAL Gun_5
 EVAL Gun_5 ok: 608 tris
-DONE Hull: 88950 -> 48920 tris (55%) | mats ['M_Brig_HullClean', 'M_Brig_Stripe', 'M_Brig_Tar', 'M_Brig_Walnut', 'M_Brig_BulwarkClean', 'BR_PortRed']...
+DONE Hull: 89440 -> 49190 tris (55%) | mats ['M_Brig_HullClean', 'M_Brig_Stripe', 'M_Brig_Tar', 'M_Brig_Walnut', 'M_Brig_BulwarkClean', 'BR_PortRed']...
 DONE Interiors: 52815 -> 29183 tris (55%) | mats ['M_Brig_CabinFloor', 'BR_Glow', 'M_Brig_DarkWood', 'M_Brig_Lining', 'BR_GlassDim', 'M_Brig_BulwarkClean']...
 DONE DeckFittings: 36064 -> 29652 tris (82%) | mats ['M_Brig_Walnut', 'M_Brig_Iron', 'M_Rope_Hemp', 'M_Brig_OakLight', 'M_Rope_Tar']...
 DONE Rig_Spars: 37268 -> 21698 tris (58%) | mats ['M_Brig_MastOak', 'M_Brig_FlamedBlack', 'M_Brig_Walnut', 'M_Brig_Iron', 'M_Brig_OakLight', 'M_Rope_Tar']...
@@ -48,6 +48,6 @@ DONE Gun_2: 2024 -> 1180 tris (58%) | mats ['M_Brig_Walnut', 'M_Rope_Hemp']...
 DONE Gun_3: 2024 -> 1180 tris (58%) | mats ['M_Brig_Walnut', 'M_Rope_Hemp']...
 DONE Gun_4: 2024 -> 1180 tris (58%) | mats ['M_Brig_Walnut', 'M_Rope_Hemp']...
 DONE Gun_5: 2024 -> 1180 tris (58%) | mats ['M_Brig_Walnut', 'M_Rope_Hemp']...
-TOTAL base tris now 231237
+TOTAL base tris now 231507
 SAVED C:\Users\Victus\Documents\GitHub\UnchartedOceans\tools\brig_merge\out\s04_decimated.blend
 === stage4 finished

@@ -84,6 +84,15 @@ signal lightning(cell: StormCell, distance_m: float, thunder_delay_s: float)
 ## Beyond this distance a storm cannot be seen at all, metres.
 @export var storm_view_range_m := 70000.0
 
+@export_group("Volumetric storms")
+## Draw storm clouds as real raymarched volumes (costs GPU time). Off = the painted storm wall. F2 flips it in game.
+@export var volumetric_storms := true
+## How many steps each ray is marched: 0 = low (12), 1 = medium (18), 2 = high (26). Only pixels looking at a storm cost anything.
+@export_enum("Low:0", "Medium:1", "High:2") var volumetric_quality := 1
+## Keep the painted storm wall behind the raymarched cloud (off = the volumetric cloud alone). The painted wall is part of
+## the sky, so any land at all hides it, even land farther away than the storm; off by default for that reason.
+@export var volumetric_paint_behind := false
+
 @export_group("Rendering")
 ## The custom sky shader. Off = the built-in sky with the same colours (no clouds, no stars, no storms).
 @export var use_shader_sky := true:
@@ -110,6 +119,9 @@ var _last_hor := Color.BLACK
 var _last_energy := 0.0
 var _last_ambient := 0.0
 var _last_thunder := ""
+var _lightning_gap := 0.0
+## Shortest time between two strikes, seconds, however many storms there are.
+@export var lightning_min_gap_s := 10.0
 var _storm_exposure := 0.0
 var _ocean_mat: ShaderMaterial
 var _ocean_find_t := 0.0
@@ -123,8 +135,15 @@ var _moon_cloud_target := 0.0
 var _moon_ring := 0.0
 var _moon_ring_target := 0.0
 var _last_moon_str := 0.0
+# the 3D noise the volumetric storms are carved from (generated on a thread, so the sky waits for it)
+var _noise3d: NoiseTexture3D
+var _vol_ready := false
+var _vol_wait := 0.0
+var _vol_time := 0.0
+var _diag_t := 2.0
 
 func _ready() -> void:
+	add_to_group("sky_system")      # Ambience finds it here to play the thunder
 	_rng.randomize()
 	_find_scene_nodes()
 	_setup()
@@ -174,6 +193,7 @@ func _setup() -> void:
 	_mat = ShaderMaterial.new()
 	_mat.shader = load("res://shaders/sky.gdshader")
 	_mat.set_shader_parameter("cloud_noise", tex)
+	_make_vol_noise()
 	_proc = ProceduralSkyMaterial.new()
 
 	_env.background_mode = Environment.BG_SKY
@@ -235,9 +255,11 @@ func _observer_pos() -> Vector2:
 	return Vector2(n.global_position.x, n.global_position.z)
 
 func _step_storms(delta: float) -> void:
+	_lightning_gap -= delta
 	for c in storms:
 		c.step(delta * storm_time_scale)
-		if c.step_lightning(delta, _rng):
+		if c.step_lightning(delta, _rng, _lightning_gap <= 0.0):
+			_lightning_gap = lightning_min_gap_s
 			var d := distance_to(c)
 			var delay := d / 343.0
 			_last_thunder = "last lightning: %.1f km away, thunder in %.0f s" % [d / 1000.0, delay]
@@ -255,8 +277,14 @@ func _apply_storms(p: Dictionary, e: float, mid: Color, cloud_lit: Color) -> Arr
 
 	var sa := PackedVector4Array()
 	var sb := PackedVector4Array()
+	var va := PackedVector4Array()
+	var vb := PackedVector4Array()
+	var vc := PackedVector4Array()
 	sa.resize(MAX_STORMS)
 	sb.resize(MAX_STORMS)
+	va.resize(MAX_STORMS)
+	vb.resize(MAX_STORMS)
+	vc.resize(MAX_STORMS)
 	var exposure := 0.0
 	var sun_block := 0.0
 	var flash_light := 0.0
@@ -280,6 +308,18 @@ func _apply_storms(p: Dictionary, e: float, mid: Color, cloud_lit: Color) -> Arr
 		sa[i] = Vector4(az, half_w, top, vis)
 		sb[i] = Vector4(haze, c.rain, c.shape_seed, c.flash)
 
+		# the same cell as a real volume for the raymarched sky (the observer is the origin; +z of the cell = the way it travels)
+		var trav := (-rel).normalized()
+		if c.velocity.length() > 0.5:
+			trav = c.velocity.normalized()
+		if trav.length() < 0.5:
+			trav = Vector2(0.0, 1.0)
+		# unlike the painted wall this does not fade out when the observer is inside: from under it you see its dark underside
+		var vol_fade := c.intensity * (1.0 - smoothstep(0.8 * storm_view_range_m, storm_view_range_m, dist))
+		va[i] = Vector4(rel.x, rel.y, r, dp)
+		vb[i] = Vector4(trav.x, trav.y, c.height_m, vol_fade)
+		vc[i] = Vector4(c.rain, c.shape_seed, c.flash, c.intensity)
+
 		# the observer being inside / near the storm
 		exposure = maxf(exposure, c.intensity * (1.0 - smoothstep(0.45 * dp, 1.0 * dp, dist)))
 		exposure = maxf(exposure, c.intensity * (1.0 - smoothstep(dp, 3.5 * dp, dist)) * 0.6)
@@ -293,11 +333,57 @@ func _apply_storms(p: Dictionary, e: float, mid: Color, cloud_lit: Color) -> Arr
 
 	_mat.set_shader_parameter("storm_a", sa)
 	_mat.set_shader_parameter("storm_b", sb)
+	_mat.set_shader_parameter("vol_a", va)
+	_mat.set_shader_parameter("vol_b", vb)
+	_mat.set_shader_parameter("vol_c", vc)
 	_mat.set_shader_parameter("storm_base_color", _tone(mid.darkened(0.88), 0.3, 0.0))
 	_mat.set_shader_parameter("storm_top_color", _tone(cloud_lit, 0.15, 0.0))
 	var light := maxf(float(p["sun_vis"]), 0.55 * smoothstep(-8.0, -1.0, e))
 	_mat.set_shader_parameter("storm_light", light)
 	return [exposure, sun_block, flash_light]
+
+# ---------------------------------------------------------------- volumetric storm noise
+
+## The 3D noise the raymarched storm clouds are carved from. It is generated on a thread, so the volumetric sky
+## waits until it is ready (changed fires when it is done; the timer is a fallback).
+func _make_vol_noise() -> void:
+	var n3 := FastNoiseLite.new()
+	n3.noise_type = FastNoiseLite.TYPE_SIMPLEX_SMOOTH
+	n3.fractal_type = FastNoiseLite.FRACTAL_FBM
+	n3.fractal_octaves = 4
+	n3.frequency = 0.045
+	n3.seed = 11
+	var t3 := NoiseTexture3D.new()
+	t3.noise = n3
+	t3.width = 64
+	t3.height = 64
+	t3.depth = 64
+	t3.seamless = true
+	t3.normalize = true
+	_noise3d = t3
+	_mat.set_shader_parameter("vol_noise", t3)
+	t3.changed.connect(_on_vol_noise_changed)
+
+func _on_vol_noise_changed() -> void:
+	_vol_ready = true
+
+## Temporary: a line in the log every few seconds saying what the storms look like to the sky.
+func _diag(delta: float) -> void:
+	_diag_t -= delta
+	if _diag_t > 0.0:
+		return
+	_diag_t = 3.0
+	var parts := PackedStringArray()
+	for c in storms:
+		parts.append("%.1f km bearing %.0f intensity %.2f depth %.1f km radius %.1f km" % [distance_to(c) / 1000.0, bearing_to(c), c.intensity, c.depth_m / 1000.0, c.radius_m / 1000.0])
+	print("SkyDiag: storms=", storms.size(), " [", ", ".join(parts), "] exposure=%.2f" % _storm_exposure, " vol_ready=", _vol_ready, " vol_on=", volumetric_storms, " observer=", _observer_pos())
+
+func _tick_vol_ready(delta: float) -> void:
+	if _vol_ready:
+		return
+	_vol_wait += delta
+	if _vol_wait > 4.0:
+		_vol_ready = true
 
 # ---------------------------------------------------------------- per frame
 
@@ -306,6 +392,9 @@ func _process(delta: float) -> void:
 		time_hours = fposmod(time_hours + hours_per_second * delta, 24.0)
 	var a := deg_to_rad(wind_dir_deg)
 	_wind_off += Vector2(sin(a), -cos(a)) * cloud_speed * delta
+	_vol_time += delta
+	_tick_vol_ready(delta)
+	_diag(delta)
 	_step_storms(delta)
 	_update_moon_cloud(delta)
 	_apply()
@@ -314,6 +403,9 @@ func _process(delta: float) -> void:
 func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventKey and event.pressed and not event.echo and event.physical_keycode == KEY_F1:
 		use_shader_sky = not use_shader_sky
+	if event is InputEventKey and event.pressed and not event.echo and event.physical_keycode == KEY_F2:
+		volumetric_storms = not volumetric_storms
+		print("SkySystem: volumetric storms ", "on" if volumetric_storms else "off (painted storm wall)")
 
 # ---------------------------------------------------------------- sun and moon positions
 
@@ -543,6 +635,18 @@ func _apply() -> void:
 	_mat.set_shader_parameter("wind_dir", Vector2(sin(deg_to_rad(wind_dir_deg)), -cos(deg_to_rad(wind_dir_deg))))
 	_mat.set_shader_parameter("cloud_scale", cloud_scale)
 
+	# ---- raymarched storms (the shader falls back to the painted storm wall when this is off) ----
+	var vol_on := volumetric_storms and use_shader_sky and _vol_ready and not storms.is_empty()
+	var vol_q := clampi(volumetric_quality, 0, 2)
+	_mat.set_shader_parameter("vol_enabled", vol_on)
+	_mat.set_shader_parameter("vol_quarter", vol_q == 0)
+	_mat.set_shader_parameter("vol_paint_behind", volumetric_paint_behind)
+	_mat.set_shader_parameter("vol_steps", [12, 18, 26][vol_q])
+	_mat.set_shader_parameter("vol_max_dist", storm_view_range_m * 1.2)
+	_mat.set_shader_parameter("vol_haze_m", storm_view_range_m * 0.65)
+	var vw := deg_to_rad(wind_dir_deg)
+	_mat.set_shader_parameter("vol_drift", Vector3(sin(vw), 0.0, -cos(vw)) * _vol_time * 0.0004)
+
 	_mat.set_shader_parameter("moon_dir", md)
 	_mat.set_shader_parameter("moon_right", axes[0])
 	_mat.set_shader_parameter("moon_up", axes[1])
@@ -662,7 +766,7 @@ func _update_debug() -> void:
 	if moon_enabled:
 		moon_line = "moon: %s (day %.1f)   %+.0f deg   moonlight %.2f   cloud over moon %.2f   ring %.2f" % [
 			phase_name(moon_phase), moon_age_days(), moon_elevation_deg(), _last_moon_str, _moon_cloud, _moon_ring]
-	_dbg.text = "SKY DEBUG   F1 = swap sky renderer\nrenderer: %s   ambient: %s\nsun %+.1f deg   light %.2f   ambient %.2f\nzenith #%s   horizon #%s\n%s\n%s" % [
+	_dbg.text = "SKY DEBUG   F1 = swap sky renderer   F2 = volumetric storms on/off\nrenderer: %s   ambient: %s\nsun %+.1f deg   light %.2f   ambient %.2f\nzenith #%s   horizon #%s\n%s\n%s" % [
 		"custom shader" if use_shader_sky else "built-in (same colours)",
 		"sky cubemap" if ambient_from_sky else "single colour",
 		sun_elevation_deg(), _last_energy, _last_ambient,

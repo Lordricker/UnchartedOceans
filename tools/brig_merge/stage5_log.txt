@@ -1,4 +1,4 @@
-=== stage5c start 11:30:10
+=== stage5c start 12:45:01
 READ Rig: 20274 faces, 6 materials
 PREP Rig_LOD1: 21698 tris -> ratio 0.313
 PREP Rig_LOD2: 21698 tris -> ratio 0.157

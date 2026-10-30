@@ -19,8 +19,8 @@ extends GPUParticles3D
 @export var height_m := 15.0
 @export var fall_speed := 11.0
 ## Streak size, metres.
-@export var streak_length := 0.75
-@export var streak_width := 0.014
+@export var streak_length := 1.1
+@export var streak_width := 0.024
 ## Slant of the fall per m/s of wind.
 @export var wind_slant := 0.04
 
@@ -75,7 +75,7 @@ func _streak_mesh() -> ArrayMesh:
 	var verts := PackedVector3Array([
 		Vector3(-w, 0, 0), Vector3(w, 0, 0), Vector3(w, h, 0), Vector3(-w, h, 0),
 		Vector3(0, 0, -w), Vector3(0, 0, w), Vector3(0, h, w), Vector3(0, h, -w)])
-	var tail := Color(1, 1, 1, 0.0)
+	var tail := Color(1, 1, 1, 0.12)
 	var head := Color(1, 1, 1, 1.0)
 	var cols := PackedColorArray([tail, tail, head, head, tail, tail, head, head])
 	var norms := PackedVector3Array()
@@ -97,7 +97,15 @@ func _streak_mesh() -> ArrayMesh:
 	_draw_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 	_draw_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
 	_draw_mat.vertex_color_use_as_albedo = true
-	_draw_mat.albedo_color = Color(0.78, 0.84, 0.92, 0.5)
+	_draw_mat.albedo_color = Color(0.96, 0.98, 1.0, 0.6)
+	# The sea is see-through too, so it is sorted with the rain, and it was being drawn after it: every drop in front of a
+	# far wave was painted over by that wave (a big streak seemed to fall behind it). Draw the rain after the sea (the same
+	# fix as the docking light), still depth-tested, so only waves that really are in front of a drop hide it.
+	_draw_mat.render_priority = 64
+	# drops far across the box fade out instead of showing as fat streaks against distant waves
+	_draw_mat.distance_fade_mode = BaseMaterial3D.DISTANCE_FADE_PIXEL_ALPHA
+	_draw_mat.distance_fade_max_distance = 10.0    # (max < min: fades OUT from here ...)
+	_draw_mat.distance_fade_min_distance = 24.0    # ... to gone at here
 	m.surface_set_material(0, _draw_mat)
 	m.custom_aabb = AABB(Vector3(-1, 0, -1), Vector3(2, h, 2))
 	return m
@@ -122,8 +130,8 @@ func _process(delta: float) -> void:
 	if _slant_t <= 0.0:
 		_slant_t = 0.25
 		_mat.direction = Vector3(wind.x * wind_slant, -1.0, wind.y * wind_slant).normalized()
-		var lit := lerpf(0.35, 1.0, clampf(daylight, 0.0, 1.0))
-		_draw_mat.albedo_color = Color(0.78 * lit, 0.84 * lit, 0.92 * lit, 0.25 + 0.3 * _shown)
+		var lit := lerpf(0.5, 1.0, clampf(daylight, 0.0, 1.0))
+		_draw_mat.albedo_color = Color(0.96 * lit, 0.98 * lit, 1.0 * lit, 0.45 + 0.4 * _shown)
 
 
 func _physics_process(delta: float) -> void:

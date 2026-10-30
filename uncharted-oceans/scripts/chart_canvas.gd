@@ -24,6 +24,8 @@ var grid_km := 50.0
 var ring_base_km := 2.0
 var ring_per_km := 0.02
 var active := true
+## The ship's dot is drawn 1/dot_scale of its size: the magnifying glass sets this to its zoom so the dot stays small.
+var dot_scale := 1.0
 
 var _chart: WorldChart
 var _scale := 1.0                 # canvas pixels per chart pixel
@@ -148,8 +150,8 @@ func _draw() -> void:
 	draw_circle(sp, ring_px, Color(1.0, 0.95, 0.4, 0.12))
 	draw_arc(sp, ring_px, 0.0, TAU, 64, Color(1.0, 0.95, 0.4, 0.8), 2.5)
 	# just a dot: the way you are pointing is read off the compass, not the chart
-	draw_circle(sp, 9.0, Color(1.0, 0.95, 0.4))
-	draw_arc(sp, 9.0, 0.0, TAU, 24, Color(0, 0, 0, 0.9), 2.5)
+	draw_circle(sp, 9.0 / dot_scale, Color(1.0, 0.95, 0.4))
+	draw_arc(sp, 9.0 / dot_scale, 0.0, TAU, 24, Color(0, 0, 0, 0.9), 2.5 / dot_scale)
 	# scale bar (100 km) and north
 	var bar := 100000.0 / _chart.mpp * _scale
 	var bp := Vector2(40.0, h_px - 46.0)

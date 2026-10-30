@@ -78,6 +78,7 @@ var flood: ShipFlooding
 var rig: Node3D
 
 var carried: GoodDef
+var carried_qty := 0                   # boxes of `carried` in your arms: you hold the whole stack, one is placed at a time
 var hand_cells: Array[Vector3i] = []   # orientation as you hold it (x right, y up, z back)
 var cur_cells: Array[Vector3i] = []    # the same mapped to the ship by the way you face
 var carried_mesh: ArrayMesh            # plain cell mesh of cur_cells (the ghost and the lattice)
@@ -520,8 +521,9 @@ func _forward_local() -> Vector3:
 
 # ------------------------------------------------------------------ carrying
 
-func _carry(g: GoodDef, shape: Array[Vector3i] = []) -> void:
+func _carry(g: GoodDef, shape: Array[Vector3i] = [], qty: int = 1) -> void:
 	carried = g
+	carried_qty = maxi(qty, 1)
 	hand_cells = shape.duplicate() if not shape.is_empty() else normalized(g.cells)
 	_hand_changed()
 	_held.visible = true
@@ -558,11 +560,14 @@ func _turn() -> void:
 
 ## Q: send the box back to the port box pool (never lose something you paid for).
 func _stow_away() -> void:
-	preload("res://scripts/trade_state.gd").box_stock("").append(carried.id)
+	var stock := preload("res://scripts/trade_state.gd").box_stock("")
+	var n := carried_qty
+	for i in n:
+		stock.append(carried.id)
 	_let_go()
 	if _ghost != null:
 		_ghost.visible = false
-	_say("Box sent back to the port box")
+	_say("%d sent back to the port box" % n if n > 1 else "Box sent back to the port box")
 
 
 func _say(t: String) -> void:
@@ -780,15 +785,26 @@ func _place() -> void:
 			how = "on floor at cell %s (footprint floor y %.2f, hold floor %.2f)" % [str(c), _footprint(c).x, flood.cargo_floor_y()]
 			break
 	print("cargo placed %s at %s, resting %s" % [carried.id, str(ghost_anchor), how])
-	_let_go()
-	if _ghost != null:
-		_ghost.visible = false
+	_used_one()
 
 
 func _let_go() -> void:
 	carried = null
+	carried_qty = 0
 	_held.visible = false
 	_release_hands()
+
+
+## One box of the stack in your arms is gone (placed or set down). The rest stay in your hands, the way you hold
+## them, until the last one goes.
+func _used_one() -> void:
+	carried_qty -= 1
+	if carried_qty <= 0:
+		_let_go()
+	else:
+		_say("%d left in your arms" % carried_qty)
+	if _ghost != null:
+		_ghost.visible = false
 
 
 ## Right click: set the box down on the ground a little ahead of you, the way you hold it. It's an ordinary
@@ -823,9 +839,7 @@ func _drop() -> void:
 	mi.global_transform = Transform3D(basis, centre - basis * (sz * 0.5))
 	l.node = mi
 	loose.append(l)
-	_let_go()
-	if _ghost != null:
-		_ghost.visible = false
+	_used_one()
 
 
 func _pick_up(p: Placed) -> void:
@@ -909,8 +923,10 @@ func _push_load() -> void:
 
 ## Put the box in your hands back into the port box (it joins the shared pool).
 func _put_in_port_box(gen: Node3D) -> void:
-	(gen as CargoGenerator).put_good(carried)
-	_say("Put back in the port box")
+	var n := carried_qty
+	for i in n:
+		(gen as CargoGenerator).put_good(carried)
+	_say("Put %d back in the port box" % n if n > 1 else "Put back in the port box")
 	_let_go()
 	if _ghost != null:
 		_ghost.visible = false
@@ -924,7 +940,13 @@ func _take_from_crate(gen: Node3D) -> void:
 	if g == null:
 		_say("The port box is empty")
 	else:
-		_carry(g)
+		# the whole stack of that good comes out into your arms
+		var stock := preload("res://scripts/trade_state.gd").box_stock((gen as CargoGenerator).stock_key)
+		var n := 1
+		while stock.has(g.id):
+			stock.erase(g.id)
+			n += 1
+		_carry(g, [], n)
 
 
 func _input(e: InputEvent) -> void:
@@ -992,9 +1014,9 @@ func _process(delta: float) -> void:
 func _update_label() -> void:
 	var t := ""
 	if carried != null:
-		t = "%s  (%s, %d kg)\n" % [carried.display_name, carried.container, roundi(carried.weight_kg)]
+		t = "%s  (%s, %d kg)%s\n" % [carried.display_name, carried.container, roundi(carried.weight_kg), ("   qty %d" % carried_qty) if carried_qty > 1 else ""]
 		if snapping:
-			t += "Click to place" if ghost_ok else "Won't fit here: no room, or nothing to rest on"
+			t += ("Click to place one" if carried_qty > 1 else "Click to place") if ghost_ok else "Won't fit here: no room, or nothing to rest on"
 			t += "\nE flip   R turn   Right click drop   Q send back"
 		elif _aim_gen != null:
 			t += "Click: put it back in the port box\nE flip   R turn   Right click drop   Q send back"
