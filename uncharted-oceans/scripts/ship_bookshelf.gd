@@ -45,6 +45,10 @@ var _data := {}
 var _hover := -1
 var _outlined_book := -1
 var _frame_outlined := false
+## A model with no CabinBookshelf_Frame mesh (the cutter's shelf is part of its cabin) is aimed at through a box
+## round its books instead, and the books themselves take the white outline.
+var _no_frame := false
+var _aim_box := AABB()
 var _player: Node
 var _cam: Camera3D
 var _head: Node3D
@@ -75,6 +79,9 @@ func _ready() -> void:
 		var parsed = JSON.parse_string(f.get_as_text())
 		if parsed is Dictionary:
 			_data = parsed
+	if _frame == null and not _books.is_empty():
+		_no_frame = true
+		_aim_box = _books_box().grow(0.06)
 	_add_missing_books()
 	_make_ui()
 
@@ -83,9 +90,15 @@ func _ready() -> void:
 ## shelf, set down in the row with the fewest books, next to the end of that row (the other end if the first has no
 ## room left). Give it its own mesh in the model later and this does nothing for it.
 func _add_missing_books() -> void:
-	if _books.is_empty() or _frame == null:
+	if _books.is_empty():
 		return
-	var fb := _frame.transform * _frame.get_aabb()          # the frame, in the shelf's space
+	var fb: AABB                                            # the frame, in the shelf's space
+	if _frame != null:
+		fb = _frame.transform * _frame.get_aabb()
+	else:
+		# no frame to measure: new books may go anywhere between the outermost books already there, and no further
+		var bx := _books_box()
+		fb = AABB(bx.position - Vector3(0.03, 0.0, 0.0), bx.size + Vector3(0.06, 0.0, 0.0))
 	var rows := {}
 	for i in _books.size():
 		var key := roundi(_base[i].y / 0.03)
@@ -132,6 +145,27 @@ func _add_missing_books() -> void:
 		_base.append(pos)
 		_ids.append(String(id))
 		row.append(_books.size() - 1)
+
+## Every book on the shelf, as one box in the shelf's space.
+func _books_box() -> AABB:
+	var box := AABB()
+	var first := true
+	for b in _books:
+		var bb: AABB = b.transform * b.get_aabb()
+		if first:
+			box = bb
+			first = false
+		else:
+			box = box.merge(bb)
+	return box
+
+## The white outline that says the shelf can be clicked: on the frame, or on the books when there is no frame mesh.
+func _outline_shelf(on: bool) -> void:
+	if _frame != null:
+		Outline.set_on(_frame, on)
+	elif _no_frame:
+		for b in _books:
+			Outline.set_on(b, on)
 
 func _book_id(n: Node) -> String:
 	if n.has_meta("extras"):
@@ -250,11 +284,11 @@ func _process(delta: float) -> void:
 	# outlines: the shelf while you can click it, the book under the mouse once you're at it
 	if aimed != _frame_outlined:
 		_frame_outlined = aimed
-		Outline.set_on(_frame, aimed)
+		_outline_shelf(aimed)
 	var want_book := _hover if _state == S.SHELF else -1
 	if want_book != _outlined_book:
 		if _outlined_book >= 0:
-			Outline.set_on(_books[_outlined_book], false)
+			Outline.set_on(_books[_outlined_book], _no_frame and _frame_outlined)
 		if want_book >= 0:
 			Outline.set_on(_books[want_book], true)
 		_outlined_book = want_book
@@ -272,7 +306,7 @@ func _process(delta: float) -> void:
 
 ## True while you're looking at the shelf from close enough, free to click it.
 func _aimed() -> bool:
-	if _frame == null or Input.mouse_mode != Input.MOUSE_MODE_CAPTURED:
+	if (_frame == null and not _no_frame) or Input.mouse_mode != Input.MOUSE_MODE_CAPTURED:
 		return false
 	var wheel := get_parent().get_node_or_null("ShipWheel")
 	if wheel != null and bool(wheel.get("held")):
@@ -281,9 +315,11 @@ func _aimed() -> bool:
 		return false
 	var o := _cam.global_position
 	var d := -_cam.global_transform.basis.z
-	var inv := _frame.global_transform.affine_inverse()
-	var hit = _frame.get_aabb().grow(0.04).intersects_ray(inv * o, (inv.basis * d).normalized())
-	return hit != null and o.distance_to(_frame.global_transform * (hit as Vector3)) <= reach
+	var box: AABB = _frame.get_aabb().grow(0.04) if _frame != null else _aim_box
+	var xf: Transform3D = _frame.global_transform if _frame != null else _shelf.global_transform
+	var inv := xf.affine_inverse()
+	var hit = box.intersects_ray(inv * o, (inv.basis * d).normalized())
+	return hit != null and o.distance_to(xf * (hit as Vector3)) <= reach
 
 ## The book under the mouse, or -1.
 func _pick() -> int:

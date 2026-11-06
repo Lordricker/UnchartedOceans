@@ -38,6 +38,7 @@ To see farther, climb to the **lookout barrel** on the main mast. Go to the rope
 - *Of the Log and Line* and *Of the Chart and of Sleep*: how fast, how far, and how long.
 - *Of Docking and Mooring*: how to arrive.
 - *Of the Compass and the Stars*, *Of Weight and Sinking* and *Of Crew and Hammocks*: the rest of the trade.
+- *Of the Ship and Her Words*: every word a sailor uses, from bow and stern to belay. Open it whenever a word in these books is new to you.
 
 ## Your ship
 

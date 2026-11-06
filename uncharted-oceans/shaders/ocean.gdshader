@@ -60,6 +60,18 @@ uniform float jac_v = 0.156;           // variance of one wave's fold term for t
 uniform vec3 bubble_color : source_color = vec3(0.16, 0.42, 0.42);   // water full of bubbles round a whitecap
 uniform float foam_bump : hint_range(0.0, 1.0) = 0.3;    // High setting: how much the foam's bubbles bump its normal
 uniform float foam_glow : hint_range(0.0, 0.6) = 0.14;   // High setting: sunlight showing through thin foam when it is backlit
+uniform vec3 plume_color : source_color = vec3(0.22, 0.62, 0.62);   // High setting, stormy seas: the lighter greenish blue of water full of air bubbles driven under the surface by breaking waves
+uniform float plume_glow : hint_range(0.0, 3.0) = 0.6;               // High setting: how much that water glows with the daylight (0 = only its colour, no glow)
+uniform float foam_drift = 0.35;       // m/s: how fast foam rides downwind on the surface (set by ocean.gd per sea state)
+// Where the foam and ripple patterns have got to, added up by ocean.gd frame by frame. They used to be worked out here as
+// speed * ocean_time along wind_dir, so every small change of the wind's speed or direction moved them by that change
+// times the whole time played: a jump of metres each time the weather nudged the sea. Added up on the CPU, a change of
+// the wind only changes how fast they move.
+uniform vec2 flow_dir = vec2(0.57, -0.82);  // the way the patterns lie (follows wind_dir)
+uniform vec2 flow_o = vec2(0.0);            // their origin, world xz: moved when the wind turns, so they turn about the viewer
+uniform vec2 foam_scroll = vec2(0.0);       // how far the foam has drifted so far (m, world xz)
+uniform float foam_run = 0.0;               // the same, measured along the wind (m)
+uniform float high_detail : hint_range(0.0, 1.0) = 1.0;  // High setting: the finest detail of a close view (thin foam veins, bubbles a few cm across, capillary ripples); 0 = off
 
 // ---- weather (set by SkySystem; the defaults leave the water as it was) ----
 uniform vec3 horizon_color : source_color = vec3(0.58, 0.6, 0.62);
@@ -122,6 +134,17 @@ uniform sampler2D chart_shore : filter_linear, repeat_disable;
 uniform float curve_k = 0.0;               // 1 / (2 * planet radius)
 uniform vec2 foam_off1 = vec2(0.0);
 uniform vec2 foam_off2 = vec2(0.0);
+// For the surf along the world's coasts: the same ground the terrain draws (world_ground.gdshaderinc). relief_m,
+// coast_level and detail_m must match world_terrain.gdshader's (they only shape the land, so a mismatch would barely move
+// the surf).
+uniform sampler2D chart_height16 : filter_nearest, repeat_disable;
+uniform vec2 chart_px = vec2(1536.0, 1024.0);
+uniform float relief_m = 1100.0;
+uniform float coast_level = 0.2431;
+uniform float detail_m = 55.0;
+uniform float coast_surf = 1.0;            // 0 = no surf along the world's coasts
+
+#include "res://shaders/world_ground.gdshaderinc"
 
 // ---- hull mask (set by ship_motion.gd; same data as the old sea shader) ----
 uniform mat4 ship_inv;
@@ -235,12 +258,13 @@ vec3 gnoised(vec2 p) {
 vec3 ripple_layer(vec2 p, float scale, float speed, float angle, float px_size) {
 	float c = cos(angle);
 	float s = sin(angle);
-	vec2 along = mat2(vec2(c, s), vec2(-s, c)) * wind_dir;
+	vec2 along = mat2(vec2(c, s), vec2(-s, c)) * flow_dir;
 	vec2 across = vec2(-along.y, along.x);
-	vec2 r = p - along * ocean_time * speed;
+	vec2 r = p - flow_o;
 	vec2 kx = across * scale;                    // rows of the world -> noise matrix
 	vec2 ky = along * scale * ripple_stretch;
-	vec3 n = gnoised(vec2(dot(r, kx), dot(r, ky)));
+	// the drift is along the layer's own axis, at its own fixed speed (so it never jumps)
+	vec3 n = gnoised(vec2(dot(r, kx), dot(r, ky) - ocean_time * speed * scale * ripple_stretch));
 	vec2 grad = kx * n.y + ky * n.z;
 	// fade once a ripple is less than ~4 pixels long
 	float fade = 1.0 - smoothstep(0.12, 0.28, px_size * scale * ripple_stretch);
@@ -252,18 +276,26 @@ vec3 ripples(vec2 p, float px_size) {
 	vec3 c = ripple_layer(p - 57.1, ripple_scale * 0.4, ripple_speed * 0.7, -0.35, px_size);
 	vec3 a = ripple_layer(p, ripple_scale, ripple_speed, 0.0, px_size);
 	vec3 b = ripple_layer(p + 31.7, ripple_scale * 2.3, ripple_speed * 1.5, 0.5, px_size);
-	return c * 0.7 + a + b * 0.45;
+	vec3 r = c * 0.7 + a + b * 0.45;
+	if (high_water > 0.5 && high_detail > 0.0) {
+		// High setting: a much finer layer of capillary ripples (a few cm across), the sparkle of a close view. It fades
+		// out with distance on its own, long before it could shimmer.
+		r += ripple_layer(p + 77.3, ripple_scale * 6.0, ripple_speed * 2.0, -0.7, px_size) * 0.3 * high_detail;
+	}
+	return r;
 }
 
 // Two foam patterns from the world position: x = lacy veins (ridged noise), y = streaks stretched along the wind.
 // Both drift slowly with the wind, and fade to their average where their cells get down to a few pixels.
 vec2 foam_pattern(vec2 p, float footprint) {
-	vec2 along = wind_dir;
+	vec2 along = flow_dir;
 	vec2 across = vec2(-along.y, along.x);
+	vec2 pf = p - flow_o;                        // for the streaks, which lie along the wind
+	vec2 pl = p - foam_scroll;                   // for the lace, which just drifts
 	float lace_v = 0.3;
 	float lf = 1.0 - smoothstep(0.07, 0.22, footprint);
 	if (lf > 0.0) {
-		vec2 q = p * 2.2 + along * ocean_time * 0.45;
+		vec2 q = pl * 2.2;
 		float a = 1.0 - abs(gnoised(q).x * 1.45);
 		float b = 1.0 - abs(gnoised(q * 2.13 + vec2(17.3, 41.7)).x * 1.45);
 		lace_v = mix(0.3, smoothstep(0.62, 0.92, a * 0.65 + b * 0.35), lf);
@@ -271,9 +303,28 @@ vec2 foam_pattern(vec2 p, float footprint) {
 	float streak_v = 0.35;
 	float sf = 1.0 - smoothstep(0.3, 0.9, footprint);
 	if (sf > 0.0) {
-		vec2 q2 = vec2(dot(p, across) * 1.5, dot(p, along) * 0.2 - ocean_time * 0.12);
+		vec2 q2 = vec2(dot(pf, across) * 1.5, (dot(pf, along) - foam_run) * 0.2);
 		float n = gnoised(q2).x * 1.4 + gnoised(q2 * 2.3 + vec2(9.1, 3.7)).x * 0.5;
 		streak_v = mix(0.35, smoothstep(0.1, 0.55, n + 0.25), sf);
+	}
+	// High setting: a second, much finer set laid over the coarse one: thin veins of lace (cells ~14 cm and ~7 cm) and
+	// thin streaks along the wind, like the marbled filaments of foam in a close view. Each fades out where its cells
+	// shrink to a few pixels, leaving the coarse pattern. high_detail scales how much of it shows.
+	if (high_water > 0.5 && high_detail > 0.0) {
+		float ff = (1.0 - smoothstep(0.012, 0.05, footprint)) * high_detail;
+		if (ff > 0.0) {
+			vec2 q3 = pl * 7.0 + vec2(31.7, 12.3);
+			float a3 = 1.0 - abs(gnoised(q3).x * 1.45);
+			float b3 = 1.0 - abs(gnoised(q3 * 2.07 + vec2(5.1, 77.7)).x * 1.45);
+			float fine_lace = smoothstep(0.74, 0.93, a3 * 0.6 + b3 * 0.4);
+			lace_v = mix(lace_v, max(lace_v * 0.55, fine_lace), ff);
+		}
+		float sf2 = (1.0 - smoothstep(0.03, 0.12, footprint)) * high_detail;
+		if (sf2 > 0.0) {
+			vec2 q4 = vec2(dot(pf, across) * 5.0, (dot(pf, along) - foam_run) * 0.6);
+			float n4 = gnoised(q4).x * 1.4 + gnoised(q4 * 2.3 + vec2(2.9, 8.3)).x * 0.5;
+			streak_v = mix(streak_v, max(streak_v * 0.6, smoothstep(0.15, 0.55, n4 + 0.2)), sf2);
+		}
 	}
 	return vec2(lace_v, streak_v);
 }
@@ -492,6 +543,14 @@ float trail_height(vec2 p) {
 	return trail_waves(p).x - 0.12 * trail_slick(p).x;
 }
 
+// The foam breakup noise (two scrolling texture layers at unrelated scales) at world xz. The fragment's own nz is the
+// same thing at world_xz; the High setting's drifting foam asks it upwind, where its water came from.
+float foam_nz(vec2 p) {
+	vec2 uv1 = p * 0.071 + foam_off1 + vec2(ocean_time * 0.011, ocean_time * 0.004);
+	vec2 uv2 = mat2(vec2(0.8, 0.6), vec2(-0.6, 0.8)) * p * 0.193 + foam_off2 - vec2(ocean_time * 0.007, 0.0);
+	return texture(foam_noise, uv1).r * 0.6 + texture(foam_noise, uv2).r * 0.4;
+}
+
 void vertex() {
 	vec3 wp = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
 	world_xz = wp.xz;
@@ -590,26 +649,42 @@ void fragment() {
 	// Shoaled waves break less out here (the shore has its own surf).
 	float fold_z = (1.0 - fx.x) * shoal_v / max(sqrt(fx.y * jac_v), 0.004);
 	float crest = smoothstep(foam_z - 0.5, foam_z + 0.6, fold_z + (nz - 0.5) * 0.8);
-	// High setting: foam lingers behind a breaking crest. The same fold score a moment ago at this very spot (the sea is a
+	// High setting: foam lingers behind a breaking crest. The same fold score a moment ago, upwind by as far as foam drifts in that time (the sea is a
 	// formula of time, so we can ask it) leaves thinning lace: the more recent the break, the stronger. Only the lace and
 	// the streaks use it; the thick white stays on the crest itself.
 	float crest_p = 0.0;
+	float plume_p = 0.0;      // the same moments, but for the wider zone round a breaking crest (the aerated water below)
 	if (high_water > 0.5 && foam_amount > 0.0) {
-		vec3 fx1;
-		vec3 fx2;
-		vec3 fx3;
-		vec3 h1 = waves_at(world_xz, 10, footprint, ocean_time - 0.7, fx1);   // (only the fold score, fx, is used)
-		vec3 h2 = waves_at(world_xz, 10, footprint, ocean_time - 1.5, fx2);
-		vec3 h3 = waves_at(world_xz, 10, footprint, ocean_time - 2.6, fx3);
-		float z1 = (1.0 - fx1.x) * shoal_v / max(sqrt(fx1.y * jac_v), 0.004);
-		float z2 = (1.0 - fx2.x) * shoal_v / max(sqrt(fx2.y * jac_v), 0.004);
-		float z3 = (1.0 - fx3.x) * shoal_v / max(sqrt(fx3.y * jac_v), 0.004);
-		float c1 = smoothstep(foam_z - 0.5, foam_z + 0.6, z1 + (nz - 0.5) * 0.8) * 0.7;
-		float c2 = smoothstep(foam_z - 0.5, foam_z + 0.6, z2 + (nz - 0.5) * 0.8) * 0.5;
-		float c3 = smoothstep(foam_z - 0.5, foam_z + 0.6, z3 + (nz - 0.5) * 0.8) * 0.32;
-		crest_p = max(max(c1, c2), c3);
+		// Foam drifts: the foam here now was made `age` seconds ago upwind, where this water was then. So each moment is
+		// asked at the spot the water came from, with that spot's noise, and the patch travels as one piece. Older foam
+		// thins out into holes (the noise has to clear a rising bar) instead of only fading. Older moments add up fewer
+		// waves: their foam is already broken up, so the finest waves' share of the fold no longer shows.
+		float ages[4] = float[](0.8, 1.8, 3.2, 5.0);
+		int n_oct[4] = int[](10, 10, 8, 7);
+		float keep[4] = float[](0.75, 0.55, 0.38, 0.24);
+		for (int k = 0; k < 4; k++) {
+			float age = ages[k];
+			vec2 src = world_xz - wind_dir * foam_drift * age;
+			vec3 fxk;
+			vec3 hk = waves_at(src, n_oct[k], footprint, ocean_time - age, fxk);   // (only the fold score, fxk, is used)
+			float zk = (1.0 - fxk.x) * shoal_v / max(sqrt(fxk.y * jac_v), 0.004);
+			float nzk = foam_nz(src);
+			float dissolve = smoothstep(0.12 * age, 0.3 + 0.12 * age, nzk);
+			crest_p = max(crest_p, smoothstep(foam_z - 0.5, foam_z + 0.6, zk + (nzk - 0.5) * 0.8) * keep[k] * dissolve);
+			plume_p = max(plume_p, smoothstep(foam_z - 0.5, foam_z + 0.9, zk) * (0.85 - 0.07 * float(k)));
+		}
 	}
 	float crest_l = max(crest, crest_p);
+	// High setting, stormy seas: the air that breaking waves drive under the surface turns the water round and behind a
+	// whitecap a lighter, greenish blue (the patches among the foam in a gale). It comes from the wider zone of a
+	// steepening crest (starting half a sigma below the score that makes foam, so about 30% of a storm sea gets any, fading
+	// in softly), as it is now and a few seconds ago, broken into patches by the foam noise. storm_k brings it in with the stormy sea states: all of it at the storm sea, a little in rough.
+	float plume = 0.0;
+	if (high_water > 0.5) {
+		float storm_k = 1.0 - smoothstep(1.0, 2.2, foam_z);
+		float near_now = smoothstep(foam_z - 0.5, foam_z + 0.9, fold_z + (nz - 0.5) * 0.8);
+		plume = max(near_now, plume_p) * smoothstep(0.2, 0.65, nz + 0.25) * storm_k * shoal_v;
+	}
 	// layers: thick white on the highest crests, lacy veins and wind streaks on the flanks around them
 	vec3 hl = (ship_inv * vec4(wpos, 1.0)).xyz;                  // this pixel in the hull's own space
 	float h_along = dot(hl, wake_fwd);
@@ -651,6 +726,29 @@ void fragment() {
 		foam = max(foam, clamp(zone * lace * 1.0 + edge * 0.7, 0.0, 1.0) * smoothstep(0.0, 0.05, 1.0 - float(isl.x > 0.0)));
 	}
 
+	// Surf along the world's coasts (world mode): the island's white water, where the chart's ground comes up to the
+	// surface. The depth comes from chart_ground_y(), the very ground the terrain draws, so it lies on the terrain's
+	// waterline. Bands roll in toward the shore with the swell. Rocky stretches (coast_kind) get a narrower band of
+	// heavier white water breaking against the rock; beaches get the wide, lacy wash. Skipped (one texture read) more
+	// than ~1.2 km from any coast.
+	if (chart_on > 0.5 && coast_surf > 0.0) {
+		vec2 cuv = (world_xz + chart_origin) / chart_size;
+		float shore_m = textureLod(chart_shore, cuv, 0.0).r * 255.0 * chart_mpp;
+		if (shore_m < 1200.0) {
+			float gy = chart_ground_y(world_xz);
+			if (gy < 0.0) {
+				float depth_here = -gy;
+				vec3 ck = coast_kind(world_xz + chart_origin);
+				float reach = (shore_foam_width + sea_amplitude * 1.2) * mix(1.0, 0.45, ck.y);
+				float pulse = 0.5 + 0.5 * sin(ocean_time * 0.9 + depth_here * 2.2 + nz * 3.0);
+				float zone = 1.0 - smoothstep(0.0, reach * (0.55 + 0.6 * pulse), depth_here);
+				float lace = smoothstep(0.30, 0.62, nz + zone * 0.45);
+				float edge = 1.0 - smoothstep(0.0, mix(0.18, 0.35, ck.y), depth_here);   // solid line right at the water line
+				foam = max(foam, clamp(zone * lace + edge * mix(0.7, 0.95, ck.y), 0.0, 1.0) * coast_surf);
+			}
+		}
+	}
+
 	// High setting: give all of the foam above (crests, the ship's wake and track, the surf) a bubble structure. Its
 	// density says how many of the cells stay: solid white where it is 1, clumps and holes as it thins, a faint film
 	// between them. Two cell sizes; each fades out once its cells are only a few pixels across (the plain foam then
@@ -662,9 +760,10 @@ void fragment() {
 		float dens = foam;
 		float fa = 1.0 - smoothstep(0.18, 0.45, footprint * 2.4);
 		float fb = 1.0 - smoothstep(0.18, 0.45, footprint * 6.1);
+		float fc = (1.0 - smoothstep(0.18, 0.45, footprint * 18.0)) * high_detail;   // the finest cells, ~5.5 cm across
 		hq_w = fa;
 		if (fa > 0.0) {
-			vec2 q = world_xz + wind_dir * ocean_time * 0.3;
+			vec2 q = world_xz - foam_scroll;
 			vec4 ca = foam_cells(q * 2.4);
 			vec4 cb = foam_cells(q * 6.1 + vec2(31.7, 12.3));
 			float wob = (nz - 0.5) * 0.3;
@@ -673,10 +772,19 @@ void fragment() {
 			float al_a = smoothstep(thr_a, thr_a + 0.1, ca.w * 0.75 + ca.x * 0.25 + wob);
 			float al_b = smoothstep(thr_b, thr_b + 0.1, cb.w * 0.75 + cb.x * 0.25 + wob) * fb;
 			float present = smoothstep(0.03, 0.2, dens);
-			float hq = max(max(al_a, al_b) * present, foam * 0.3);
+			// the finest cells don't make foam of their own: they carve small holes and speckle into the clumps above,
+			// so the foam reads as fine bubbles and thin lace instead of solid white patches
+			float al_c = 1.0;
+			vec4 cc = vec4(0.0);
+			if (fc > 0.0) {
+				cc = foam_cells(q * 18.0 + vec2(7.3, 51.9));
+				float thr_c = 1.15 * (1.0 - dens * 0.7) - 0.12;
+				al_c = mix(1.0, 0.3 + 0.7 * smoothstep(thr_c, thr_c + 0.1, cc.w * 0.75 + cc.x * 0.25 + wob), fc);
+			}
+			float hq = max(max(al_a, al_b) * present * al_c, foam * 0.3 * (0.6 + 0.4 * al_c));
 			foam = mix(foam, hq, fa);
-			billow = mix(ca.x, cb.x, 0.35 * fb);
-			fbump = (ca.yz * 0.6 + cb.yz * 0.4 * fb) * foam_bump;
+			billow = mix(mix(ca.x, cb.x, 0.35 * fb), cc.x, 0.3 * fc);
+			fbump = (ca.yz * 0.6 + cb.yz * 0.4 * fb + cc.yz * 0.5 * fc) * foam_bump;
 		}
 	}
 	if (hq_w > 0.0) {
@@ -689,6 +797,7 @@ void fragment() {
 	// (the wider soft zone of the crest, so it is not just under the white)
 	float aerated = smoothstep(0.02, 0.7, crest) * min(foam_amount * 1.6, 1.0);
 	body = mix(body, bubble_color, aerated * 0.5);
+	body = mix(body, plume_color, plume * 0.4);                   // High, stormy seas: the lighter greenish blue of aerated water
 	float body_l = dot(body, vec3(0.333));
 	body = mix(body, vec3(body_l * 1.15), water_gray * 0.5);       // duller, greyer water under heavy cloud
 	body = mix(body, horizon_color * 0.07, sky_tint);               // some of the sky's colour shows through the water
@@ -706,6 +815,9 @@ void fragment() {
 	ROUGHNESS = mix(rough_water, 0.85, foam);
 	SPECULAR = 0.5;
 	EMISSION = scatter * (1.0 - foam);
+	// aerated water scatters daylight back (so it is not a dark patch in a dark sea); it follows the sky's brightness and
+	// is gone at night
+	EMISSION += plume_color * plume * (1.0 - foam) * plume_glow * clamp(dot(horizon_color, vec3(0.333)) * 2.0, 0.0, 1.0) * (1.0 - 0.5 * water_dark);
 	EMISSION += foam_color * sun_color * pow(max(dot(l_world, -v_world), 0.0), 3.0) * foam * foam_glow * hq_w * (1.0 - 0.6 * water_dark);   // High setting: backlit foam glows
 
 	// see-through where the water is thin; reflections (grazing angles) and foam stay opaque

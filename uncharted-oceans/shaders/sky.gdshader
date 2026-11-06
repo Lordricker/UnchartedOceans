@@ -3,6 +3,7 @@ shader_type sky;
 // All colour logic (time of day, air type, storms) is worked out on the CPU in SkySystem and handed in as
 // uniforms, so this shader stays cheap: one gradient, two glow terms, two cloud layers, a few stars,
 // the moon, and up to three storm cells drawn as towering cloud walls on the horizon.
+// On the High quality tier the flat low cloud layer is swapped for raymarched cumulus (cumulus_volume.gdshaderinc).
 
 #define MAX_STORMS 3
 
@@ -19,6 +20,11 @@ uniform vec4 shadow_color : source_color = vec4(0.25, 0.3, 0.45, 1.0);
 uniform vec4 cloud_lit_color : source_color = vec4(1.0, 0.9, 0.8, 1.0);
 uniform vec4 cloud_shade_color : source_color = vec4(0.5, 0.55, 0.65, 1.0);
 uniform vec4 cirrus_color : source_color = vec4(1.0, 0.9, 0.85, 1.0);
+// Sunset clouds: sunset_k (0 by day .. 1 as the sun touches the horizon) turns the sides facing away from the sun
+// toward cloud_accent_color (rose / magenta / red) and the shaded sides toward cloud_dark_color (purple).
+uniform vec4 cloud_accent_color : source_color = vec4(0.8, 0.4, 0.55, 1.0);
+uniform vec4 cloud_dark_color : source_color = vec4(0.3, 0.25, 0.45, 1.0);
+uniform float sunset_k = 0.0;
 uniform vec3 sun_color = vec3(3.0, 2.7, 2.2);
 
 uniform float glow_strength = 1.0;
@@ -70,6 +76,7 @@ float hash13(vec3 p3) {
 }
 
 #include "res://shaders/storm_volume.gdshaderinc"
+#include "res://shaders/cumulus_volume.gdshaderinc"
 
 float stars(vec3 dir) {
 	vec3 sp = dir * 150.0;
@@ -98,6 +105,8 @@ void sky() {
 	vec3 dir = EYEDIR;
 	float y = dir.y;
 	float sd = dot(dir, sun_dir);
+	// the raymarched cumulus replace the flat layer in the main view (the reflection cubemap keeps the flat one)
+	bool use_cu = cu_enabled && !AT_CUBEMAP_PASS;
 
 	// ---- base gradient: horizon -> mid -> zenith ----
 	float k = pow(max(y, 0.0), 0.5);
@@ -126,7 +135,7 @@ void sky() {
 	// ---- low clouds: big soft cumulus on a flat layer, shaded by looking toward the sun ----
 	float dl = 0.0;
 	vec3 low_col = col;
-	if (y > 0.0) {
+	if (y > 0.0 && !use_cu) {
 		vec2 uv = dir.xz / (y + 0.10) * 0.10 * cloud_scale + wind_offset;
 		float n = texture(cloud_noise, uv).r * 0.8 + texture(cloud_noise, uv * 3.1 + vec2(0.37, 0.11)).r * 0.2;
 		float thr = mix(0.66, 0.36, coverage);
@@ -144,7 +153,11 @@ void sky() {
 		lit *= mix(1.0, 0.6, smoothstep(0.7, 1.0, d) * (1.0 - overcast * 0.5));   // thick cores are a bit darker underneath
 		lit *= mix(0.8, 1.0, 0.5 + 0.5 * sd);
 		lit = mix(1.0, lit, interior);
-		vec3 cc = mix(cloud_shade_color.rgb, cloud_lit_color.rgb, lit);
+		// sunset: clouds facing away from the sun go rose / magenta, shaded sides go purple
+		float away = smoothstep(0.85, -0.35, sd);
+		vec3 lit_c = mix(cloud_lit_color.rgb, cloud_accent_color.rgb, sunset_k * (0.3 + 0.7 * away));
+		vec3 shade_c = mix(cloud_shade_color.rgb, cloud_dark_color.rgb, sunset_k * 0.75);
+		vec3 cc = mix(shade_c, lit_c, lit);
 
 		// bright rim on cloud edges facing the sun (silver lining)
 		float rim = d * (1.0 - d) * 4.0;
@@ -225,6 +238,12 @@ void sky() {
 	}
 
 	col = mix(col, low_col, dl);
+
+	// ---- raymarched cumulus (High quality): drawn over the sky, sun and moon, under the storms ----
+	if (use_cu) {
+		vec4 cv = cumulus_volume(dir, FRAGCOORD.xy);
+		col = col * (1.0 - cv.a) + cv.rgb;
+	}
 
 	// ---- storm cells: a wide shelf cloud / rain wall, layered and dark, with a bright gap under its lifted edge ----
 	// (the painted storm wall stays in the reflection cubemap and whenever the volumetric storms are off)

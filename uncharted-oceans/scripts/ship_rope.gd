@@ -7,7 +7,7 @@ extends Node3D
 ## of whatever rope has been hauled in. Hold the left button on the tail and pull the mouse down to
 ## haul it (hands go hand over hand), move the mouse up to ease it out. Let go and the pin holds it.
 
-enum { HAUL, BRACE }
+enum { HAUL, BRACE, LINE }	 ## LINE: a passive line (a sheet) that only follows the spars, nobody can take hold of it
 
 const Outline := preload("res://scripts/interact_outline.gd")
 const ROPE_RADIUS := 0.02
@@ -25,6 +25,10 @@ var block := Vector3.ZERO           ## BRACE: the block the line runs through
 var deck_y := 1.8
 var travel := 2.5                   ## metres of rope between fully eased and fully hauled
 var tail_hang := 0.8
+var route: Array = []			   ## HAUL, from the ship class: the points above the sail's anchor up to the last block (see ShipSails.route_point)
+var up_point := Vector3.ZERO		## HAUL with a route: the last block the line runs through (the part you take hold of rises toward it)
+var tail_dir := 1.0				 ## HAUL: +1 the tail hangs and the coil lies aft of the pin, -1 forward of it (a pin on the fore side of the rail)
+var spec: Dictionary = {}		   ## LINE: {"pts": [...], "sail": id, "side": +-1}, see ShipSails.line_points
 
 var _mi: MeshInstance3D
 var _mat: StandardMaterial3D
@@ -76,6 +80,12 @@ func _span() -> PackedVector3Array:
 		var down_x := pin.x * 0.35
 		var aft := mz + 0.52
 		pts.append(sails.anchor_ship(r))
+		if not route.is_empty():
+			for tok in route:
+				pts.append(sails.route_point(r, tok))
+			pts.append(pin + Vector3(0.0, 0.12, 0.0))
+			pts.append(pin)
+			return pts
 		if r.kind == 0:
 			var off := (float(r.level) - 1.0) * 0.12
 			pts.append(sails.yard_point(r, Vector3(-off, -0.12, 0.92)))
@@ -107,7 +117,7 @@ func _tail() -> PackedVector3Array:
 	var pts := PackedVector3Array()
 	var hang := minf(tail_hang, pin.y - deck_y - 0.15)
 	var inward := -signf(pin.x) * 0.04 if kind == BRACE else 0.0
-	var zoff := 0.05
+	var zoff := 0.05 * tail_dir
 	pts.append(pin)
 	pts.append(pin + Vector3(inward * 0.5, -hang * 0.5, zoff * 0.6))
 	pts.append(pin + Vector3(inward, -hang, zoff))
@@ -117,16 +127,16 @@ func _tail() -> PackedVector3Array:
 func _coil(length: float) -> PackedVector3Array:
 	var pts := PackedVector3Array()
 	var hang := minf(tail_hang, pin.y - deck_y - 0.15)
-	var end := pin + Vector3(0, -hang, 0.05)
-	var cdir := Vector3(0, 0, 1.0) if kind == HAUL else Vector3(-signf(pin.x) * 0.9, 0, 0.45).normalized()
+	var end := pin + Vector3(0, -hang, 0.05 * tail_dir)
+	var cdir := Vector3(0, 0, tail_dir) if kind == HAUL else Vector3(-signf(pin.x) * 0.9, 0, 0.45).normalized()
 	var centre := Vector3(pin.x, deck_y + 0.03, pin.z) + cdir * (0.16 + COIL_RADIUS)
 	if kind == BRACE:
 		centre = Vector3(pin.x, deck_y + 0.03, pin.z) + cdir * (0.22 + COIL_RADIUS)
 	if length < 0.04:
 		# nothing hauled: the tail just touches the deck
-		pts.append(Vector3(end.x, deck_y + 0.03, end.z + 0.04))
+		pts.append(Vector3(end.x, deck_y + 0.03, end.z + 0.04 * tail_dir))
 		return pts
-	pts.append(Vector3(end.x, deck_y + 0.18, end.z + 0.04))
+	pts.append(Vector3(end.x, deck_y + 0.18, end.z + 0.04 * tail_dir))
 	var first := centre + Vector3(COIL_RADIUS, 0.0, 0.0)
 	first.y = deck_y + 0.03
 	pts.append(first)
@@ -149,6 +159,15 @@ func _coil(length: float) -> PackedVector3Array:
 
 func refresh() -> void:
 	if sails == null:
+		return
+	if kind == LINE:
+		var lp := sails.line_points(spec)
+		var lsig := ""
+		for q in lp:
+			lsig += "%.3f,%.3f,%.3f;" % [q.x, q.y, q.z]
+		if lsig != _sig:
+			_sig = lsig
+			_mi.mesh = _tube(lp)
 		return
 	var value := sails.rope_value(self)
 	var sig := ""
@@ -246,16 +265,18 @@ func _tube(pts: PackedVector3Array) -> ArrayMesh:
 func grab_segment() -> Array:
 	var hang := minf(tail_hang, pin.y - deck_y - 0.15)
 	var inward := -signf(pin.x) * 0.04 if kind == BRACE else 0.0
-	var top := pin + Vector3(0.0, -0.12, 0.04)
+	var top := pin + Vector3(0.0, -0.12, 0.04 * tail_dir)
 	if sails != null and grab_up > 0.0:
-		if kind == HAUL:
+		if kind == HAUL and not route.is_empty():
+			top = pin + (up_point - pin).normalized() * 1.2 * grab_up
+		elif kind == HAUL:
 			var r: ShipSails.SailRec = sails.recs[key]
 			var mz: float = ShipSails.MAST_Z[r.mast]
 			# the line runs up from the pin to this point (see _span)
 			top = pin.lerp(Vector3(pin.x * 0.2, 3.5, mz + 0.52), grab_up)
 		else:
 			top = pin.lerp(block, grab_up)
-	var b := pin + Vector3(inward, -hang + 0.06, 0.05)
+	var b := pin + Vector3(inward, -hang + 0.06, 0.05 * tail_dir)
 	return [top, b]
 
 func grab_segment_world() -> Array:

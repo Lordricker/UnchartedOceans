@@ -193,10 +193,11 @@ func bollards_world() -> PackedVector3Array:
 		out.append(to_global(Vector3(-0.35, deck_y + 0.5, -along)))
 	return out
 
-## Where the docked ship's origin rests, for a ship of this class.
+## Where the docked ship's origin rests, for a ship of this class. A class can ask to lie further out (slot_offset in
+## ShipClasses, e.g. the cutter on the outer edge of the light so its gangway is gentler).
 func slot_position(cls: int) -> Vector3:
 	var d := ShipClasses.data(cls)
-	var r := right2() * (float(d.beam) * 0.5 + gap)
+	var r := right2() * (float(d.beam) * 0.5 + gap + float(d.get("slot_offset", 0.0)))
 	return global_position + Vector3(r.x, 0.0, r.y)
 
 ## How a ship stands against the berth. lat / along are the centre's offsets from the slot (m):
@@ -242,7 +243,7 @@ func evaluate(ship_pos: Vector3, heading_deg: float, speed: float, cls: int) -> 
 func set_light(ship_pos: Vector3, cls: int, can_dock: bool, moored: bool) -> void:
 	var slot := slot_position(cls)
 	var dist := Vector2(ship_pos.x - slot.x, ship_pos.z - slot.z).length()
-	var fits := cls <= max_ship_class
+	var fits := ShipClasses.berth_class(cls) <= max_ship_class
 	if moored or not fits:
 		_want_fade = 0.0
 	else:

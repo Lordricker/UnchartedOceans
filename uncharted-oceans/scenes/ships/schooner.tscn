@@ -1,0 +1,138 @@
+[gd_scene format=3 uid="uid://c6431cg2vwqbm"]
+
+[ext_resource type="PackedScene" uid="uid://ctks4vatfghu6" path="res://assets/ships/schooner/Schooner.glb" id="1_model"]
+[ext_resource type="Script" uid="uid://333hynt1dnxh" path="res://scripts/ship_ladder.gd" id="2_ladder"]
+[ext_resource type="Script" uid="uid://bempejdnt7ram" path="res://scripts/ship_climb_point.gd" id="3_point"]
+
+[sub_resource type="BoxShape3D" id="Box_0"]
+size = Vector3(0.4558838, 2.5947876, 0.4)
+
+[sub_resource type="BoxShape3D" id="Box_1"]
+size = Vector3(0.46479493, 2.4569092, 0.4)
+
+[sub_resource type="BoxShape3D" id="Box_2"]
+size = Vector3(0.5609375, 7.864275, 0.175)
+
+[sub_resource type="BoxShape3D" id="Box_3"]
+size = Vector3(0.66829836, 7.901986, 0.175)
+
+[sub_resource type="BoxShape3D" id="Box_4"]
+size = Vector3(0.6949707, 8.830811, 0.175)
+
+[sub_resource type="BoxShape3D" id="Box_5"]
+size = Vector3(0.6834961, 8.885498, 0.175)
+
+[sub_resource type="BoxShape3D" id="Box_6"]
+size = Vector3(0.3762207, 2.3, 0.1)
+
+[node name="SchoonerShip" type="Node3D" unique_id=1735567024]
+
+[node name="Schooner" parent="." unique_id=495944863 instance=ExtResource("1_model")]
+transform = Transform3D(-1, 0, -8.742278e-08, 0, 1, 0, 8.742278e-08, 0, -1, 0, 0, 0)
+
+[node name="Climbing" type="Node3D" parent="." unique_id=2092605525]
+
+[node name="HullLadder_Port" type="Area3D" parent="Climbing" unique_id=1220964938]
+transform = Transform3D(0, 0, -1, 0, 1, 0, 1, 0, 0, -2.3, 0.9, -0.7)
+script = ExtResource("2_ladder")
+
+[node name="Box" type="CollisionShape3D" parent="Climbing/HullLadder_Port" unique_id=745122648]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -8.5413456e-05, 0.12239385, 0.1500001)
+shape = SubResource("Box_0")
+
+[node name="HullLadder_Stbd" type="Area3D" parent="Climbing" unique_id=1518182158]
+transform = Transform3D(0, 0, 1, 0, 1, 0, -1, 0, 0, 2.3, 0.9, -0.7)
+script = ExtResource("2_ladder")
+
+[node name="Box" type="CollisionShape3D" parent="Climbing/HullLadder_Stbd" unique_id=305619052]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.009301722, 0.053454638, 0.1500001)
+shape = SubResource("Box_1")
+
+[node name="Shroud_Fore_Port" type="Area3D" parent="Climbing" unique_id=896872500]
+transform = Transform3D(0, 0.233547, -0.972345, -0.0369522, 0.971681, 0.233388, 0.999317, 0.0359303, 0.00863009, -1.17667, 6.43667, -3.11667)
+script = ExtResource("2_ladder")
+grab_slack = 0.5
+snap_depth = true
+center_on_grab = false
+rigging_id = "shroud_a"
+rigging_mast = "fore"
+
+[node name="Box" type="CollisionShape3D" parent="Climbing/Shroud_Fore_Port" unique_id=1554653395]
+transform = Transform3D(1, 1.1138618e-06, 2.4121255e-07, -6.7055225e-08, 1, 5.7014404e-08, 0, -1.1794618e-06, 1, 0.013476849, 0.4444213, 0.17050982)
+shape = SubResource("Box_2")
+
+[node name="Shroud_Fore_Stbd" type="Area3D" parent="Climbing" unique_id=1619224238]
+transform = Transform3D(0, -0.233547, 0.972345, 0.0369522, 0.971681, 0.233388, -0.999317, 0.0359303, 0.00863009, 1.17667, 6.43667, -3.11667)
+script = ExtResource("2_ladder")
+grab_slack = 0.5
+snap_depth = true
+center_on_grab = false
+rigging_id = "shroud_b"
+rigging_mast = "fore"
+
+[node name="Box" type="CollisionShape3D" parent="Climbing/Shroud_Fore_Stbd" unique_id=2077151880]
+transform = Transform3D(1, -2.9727817e-06, -5.1036477e-07, 6.7055225e-08, 1.0000005, 6.670598e-08, 0, -2.5938498e-06, 1, 0.008502483, 0.4324336, 0.14191341)
+shape = SubResource("Box_3")
+
+[node name="Shroud_Main_Port" type="Area3D" parent="Climbing" unique_id=1699465293]
+transform = Transform3D(0, 0.228723, -0.973491, -0.0405463, 0.972691, 0.228535, 0.999178, 0.0394715, 0.00927389, -1.27167, 6.88667, 2.41667)
+script = ExtResource("2_ladder")
+grab_slack = 0.5
+snap_depth = true
+center_on_grab = false
+rigging_id = "shroud_a"
+
+[node name="Box" type="CollisionShape3D" parent="Climbing/Shroud_Main_Port" unique_id=19138490]
+transform = Transform3D(1, 0, 4.9360096e-08, -2.9802322e-08, 1.0000014, 1.4653779e-07, -7.450581e-09, -2.2613676e-08, 1.0000088, 0.0022711754, 0.4107542, 0.22553754)
+shape = SubResource("Box_4")
+
+[node name="Shroud_Main_Stbd" type="Area3D" parent="Climbing" unique_id=2036901663]
+transform = Transform3D(0, -0.228723, 0.973491, 0.0405463, 0.972691, 0.228535, -0.999178, 0.0394715, 0.00927389, 1.27167, 6.88667, 2.41667)
+script = ExtResource("2_ladder")
+grab_slack = 0.5
+snap_depth = true
+center_on_grab = false
+rigging_id = "shroud_b"
+
+[node name="Box" type="CollisionShape3D" parent="Climbing/Shroud_Main_Stbd" unique_id=1689507441]
+transform = Transform3D(1, 0, -3.632158e-08, 2.9802322e-08, 1.0000014, 1.4601392e-07, 7.450581e-09, -2.2613676e-08, 1.0000088, 0.009716749, 0.39719057, 0.16690087)
+shape = SubResource("Box_5")
+
+[node name="HoldLadder" type="Area3D" parent="Climbing" unique_id=1539350111]
+transform = Transform3D(-1, 0, 0, 0, 1, 0, 0, 0, -1, 0, -1, -0.58)
+script = ExtResource("2_ladder")
+
+[node name="Box" type="CollisionShape3D" parent="Climbing/HoldLadder" unique_id=1006969249]
+transform = Transform3D(1, 0, 0, 0, 0.99097484, 0.13404784, 0, -0.13404784, 0.99097484, 0.009643555, 1.15, -0.00054615736)
+shape = SubResource("Box_6")
+
+[node name="Perch_Main" type="Marker3D" parent="Climbing" unique_id=1146331164]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 12.3, 2.66)
+script = ExtResource("3_point")
+
+[node name="ShroudTop_Main_Port" type="Marker3D" parent="Climbing" unique_id=454137407]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.5, 11.38, 2.62)
+script = ExtResource("3_point")
+point_id = "shroud_top_a"
+
+[node name="ShroudTop_Main_Stbd" type="Marker3D" parent="Climbing" unique_id=1682737519]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.5, 11.38, 2.62)
+script = ExtResource("3_point")
+point_id = "shroud_top_b"
+
+[node name="Perch_Fore" type="Marker3D" parent="Climbing" unique_id=1904247257]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 10.9, -2.95)
+script = ExtResource("3_point")
+mast = "fore"
+
+[node name="ShroudTop_Fore_Port" type="Marker3D" parent="Climbing" unique_id=174257531]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.5, 10.48, -2.94)
+script = ExtResource("3_point")
+point_id = "shroud_top_a"
+mast = "fore"
+
+[node name="ShroudTop_Fore_Stbd" type="Marker3D" parent="Climbing" unique_id=286518126]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.5, 10.48, -2.94)
+script = ExtResource("3_point")
+point_id = "shroud_top_b"
+mast = "fore"

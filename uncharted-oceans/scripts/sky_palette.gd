@@ -32,6 +32,7 @@ static func _build() -> void:
 			"z": _c("1f3f7a"), "m": _c("8a82a8"), "h": _c("f0b38a"),
 			"g": _c("ff9a4a"), "c": _c("ffd08a"), "o": _c("e89ab4"), "s": _c("3a4a73"),
 			"cl": _c("ffb070"), "ci": _c("ff9f7a"),
+			"cr": _c("d05a8a"), "csh": _c("4a4078"),
 			"dz": _c("131f45"), "dm": _c("3b3d78"), "dh": _c("a24f6c"),
 			"dg": _c("c8452f"), "do": _c("8a5a9a"), "dci": _c("d9748a"),
 		},
@@ -40,6 +41,7 @@ static func _build() -> void:
 			"z": _c("5a78a8"), "m": _c("c4a9b0"), "h": _c("f6d3a8"),
 			"g": _c("ffbd7a"), "c": _c("ffe2b0"), "o": _c("f0c2cf"), "s": _c("7f8db0"),
 			"cl": _c("ffd0a0"), "ci": _c("ffcdb0"),
+			"cr": _c("d08aa0"), "csh": _c("7a6a90"),
 			"dz": _c("3a4a78"), "dm": _c("8a7590"), "dh": _c("d99a86"),
 			"dg": _c("f0a27a"), "do": _c("b890a8"), "dci": _c("f0b8a8"),
 		},
@@ -48,6 +50,7 @@ static func _build() -> void:
 			"z": _c("3b3550"), "m": _c("8a4a3c"), "h": _c("e0622a"),
 			"g": _c("ff4a1c"), "c": _c("ffa040"), "o": _c("b86a5a"), "s": _c("4a3548"),
 			"cl": _c("ff5a2a"), "ci": _c("e04a2a"),
+			"cr": _c("c0301e"), "csh": _c("4a2a3c"),
 			"dz": _c("1f1830"), "dm": _c("5a2a3a"), "dh": _c("a8321e"),
 			"dg": _c("c8301a"), "do": _c("6a3a48"), "dci": _c("a8321e"),
 		},
@@ -56,6 +59,7 @@ static func _build() -> void:
 			"z": _c("1c3f8a"), "m": _c("b0508f"), "h": _c("ff8c5a"),
 			"g": _c("ff6a4a"), "c": _c("ffc070"), "o": _c("e86aa0"), "s": _c("2a3f7a"),
 			"cl": _c("ff7a8a"), "ci": _c("ff6ab0"),
+			"cr": _c("d8409a"), "csh": _c("5a2f8a"),
 			"dz": _c("1a1a5a"), "dm": _c("6a2f8a"), "dh": _c("d8467a"),
 			"dg": _c("e8506a"), "do": _c("8a3fa0"), "dci": _c("e04a9a"),
 		},
@@ -64,6 +68,7 @@ static func _build() -> void:
 			"z": _c("1a3a8a"), "m": _c("d070a0"), "h": _c("ffc860"),
 			"g": _c("ffb030"), "c": _c("fff0a0"), "o": _c("ff8ac0"), "s": _c("2a4090"),
 			"cl": _c("ffb84a"), "ci": _c("ff7ab8"),
+			"cr": _c("e060a8"), "csh": _c("5a3a9a"),
 			"dz": _c("101a5a"), "dm": _c("5a3a9a"), "dh": _c("e0507a"),
 			"dg": _c("e8703a"), "do": _c("a050b0"), "dci": _c("f060a8"),
 		},
@@ -90,6 +95,11 @@ static func _blend(i: int, e: float) -> Dictionary:
 	d["shadow"] = t["s"]
 	d["cloud_lit"] = _phase(e, _c("101828"), (t["dci"] as Color).darkened(0.55), t["cl"], _c("fcfbf8"))
 	d["cirrus"] = _phase(e, _c("0c1424"), t["dci"], t["ci"], _c("f4f7ff"))
+	# sunset clouds: the side facing away from the sun goes rose / magenta / red (cr), the shaded sides and undersides
+	# go purple (csh). sunset_k is how much of that there is: none by day, most as the sun touches the horizon.
+	d["cloud_accent"] = _phase(e, _c("101828"), (t["do"] as Color).darkened(0.35), t["cr"], _c("fcfbf8"))
+	d["cloud_dark"] = _phase(e, _c("0c1020"), (t["dm"] as Color).darkened(0.2), t["csh"], _c("8090a8"))
+	d["sunset_k"] = smoothstep(-8.0, -1.0, e) * (1.0 - smoothstep(2.0, 20.0, e))
 	d["glow_strength"] = _phase(e, 0.0, 0.55, 1.0, 0.4)
 	d["glow_power"] = _phase(e, 3.0, 2.5, 3.2, 7.0)
 	d["glow_height"] = _phase(e, 0.3, 0.45, 0.6, 0.18)

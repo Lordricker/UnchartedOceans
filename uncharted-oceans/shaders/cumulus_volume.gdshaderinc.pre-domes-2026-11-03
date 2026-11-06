@@ -1,0 +1,138 @@
+// Raymarched fair-weather cumulus for sky.gdshader (included right after storm_volume.gdshaderinc, which
+// provides vol_tex() and the 3D noise). Only used on the High quality tier (SkySystem.volumetric_quality = 2); the
+// other tiers keep the flat cloud layer. The reflection cubemap always uses the flat layer too.
+//
+// The clouds fill a slab of sky between cu_base_m and cu_top_m, camera relative (they do not parallax, like the flat
+// layer). Where they stand comes from the same 2D noise and coverage / overcast sliders as the flat layer; how tall
+// each one is comes from how thick that footprint is, and the billows come from the 3D noise. Every ray is marched
+// through the slab, with two density samples toward the sun for self-shadowing. The cheap part of the airy look:
+// cloud bottoms pick up a little of the sky colour, and the sun's silver lining shows on thin edges.
+//
+// SkySystem sets cu_* (and SkySystem.cumulus_base_m / cumulus_top_m / cumulus_density / cumulus_steps are the knobs).
+// cu_xz_scale is 1 / (1.4 * 18000): at the default cloud_scale one 2D noise tile is 18 km across, a cloud cell ~3 km.
+
+uniform bool cu_enabled = false;
+uniform int cu_steps : hint_range(6, 40, 1) = 22;
+uniform float cu_base_m = 1500.0;
+uniform float cu_top_m = 3800.0;
+uniform float cu_max_dist = 90000.0;
+uniform float cu_haze_m = 31500.0;
+uniform float cu_sigma = 0.0028;
+uniform float cu_xz_scale = 0.0000396825;
+
+// How far the wind has carried the clouds, in the units of a 3D noise lookup that is scale_m metres per unit.
+vec3 cu_drift(float scale_m) {
+	return vec3(wind_offset.x, 0.0, wind_offset.y) / (cloud_scale * cu_xz_scale * scale_m);
+}
+
+// Cloud density 0-1 at a point (metres, camera at the origin, y = altitude). hv = 0 at the cloud base .. 1 at the top.
+float cu_dens(vec3 p, bool detail, out float hv) {
+	float H = max(cu_top_m - cu_base_m, 1.0);
+	hv = (p.y - cu_base_m) / H;
+	if (hv < 0.0 || hv > 1.0) {
+		return 0.0;
+	}
+	// footprint: where the clouds stand (the flat layer's noise and thresholds, with a firmer edge)
+	vec2 uv = p.xz * (cloud_scale * cu_xz_scale) + wind_offset;
+	float n = textureLod(cloud_noise, uv, 0.0).r * 0.8 + textureLod(cloud_noise, uv * 3.1 + vec2(0.37, 0.11), 0.0).r * 0.2;
+	float thr = mix(0.66, 0.36, coverage);
+	float shape = smoothstep(thr, thr + 0.18, n);
+	shape = mix(shape, 0.7 + 0.3 * n, overcast);
+	if (shape < 0.02) {
+		return 0.0;
+	}
+	// cumulus profile: a flat-ish base and a rounded top, taller over the thick part of the footprint
+	float ht = mix(0.25, 1.0, shape);
+	float prof = smoothstep(0.0, 0.12, hv) * (1.0 - smoothstep(ht - 0.4, ht, hv));
+	float base = shape * prof;
+	if (base < 0.01) {
+		return 0.0;
+	}
+	// billows: big lumps, plus finer ones when this sample is for what we see (not for the sun shadow)
+	vec3 q = vec3(p.x / 3400.0, p.y / 2200.0, p.z / 3400.0) + cu_drift(3400.0);
+	float e = vol_tex(q);
+	if (detail) {
+		float e2 = vol_tex(vec3(p.x / 1100.0, p.y / 800.0, p.z / 1100.0) + cu_drift(1100.0) + vec3(0.41, 0.77, 0.13));
+		e = e * 0.72 + e2 * 0.28;
+	}
+	return clamp((base - (1.0 - e) * 0.5) * 1.8, 0.0, 1.0);
+}
+
+// How much sunlight reaches a point inside the cloud (0 = in its own shadow .. 1 = lit).
+float cu_light(vec3 p, vec3 ld) {
+	float h;
+	float d1 = cu_dens(p + ld * 300.0, false, h);
+	float d2 = cu_dens(p + ld * 1100.0, false, h);
+	return exp(-(d1 * 300.0 + d2 * 800.0) * cu_sigma);
+}
+
+// Marches the cumulus slab along one sky direction. Returns premultiplied light in rgb and coverage in a, ready to
+// be laid over the sky: sky * (1 - a) + rgb.
+vec4 cumulus_volume(vec3 dir) {
+	if (dir.y < 0.012) {
+		return vec4(0.0);
+	}
+	float cam_h = 12.0;
+	float inv_y = 1.0 / dir.y;
+	float t0 = (cu_base_m - cam_h) * inv_y;
+	float tmax = min((cu_top_m - cam_h) * inv_y, cu_max_dist);
+	if (tmax <= t0) {
+		return vec4(0.0);
+	}
+	float len = tmax - t0;
+	int n = clamp(cu_steps, 4, 40);
+	// a small random offset per ray hides the stepping bands without turning the edges to grain
+	float jit = 0.5 + (hash13(dir * 517.3 + vec3(2.1, 5.3, 9.7)) - 0.5) * 0.6;
+
+	float cs = dot(dir, sun_dir);
+	float g = 0.5;
+	float hg = (1.0 - g * g) / pow(max(1.0 + g * g - 2.0 * g * cs, 0.05), 1.5);
+	float phase = 0.62 + 0.2 * min(hg, 3.0);
+	float mdc = max(dot(dir, moon_dir), 0.0);
+	vec3 sky_under = mix(horizon_color.rgb, mid_color.rgb, 0.5);
+
+	float T = 1.0;
+	vec3 L = vec3(0.0);
+	for (int k = 0; k < 40; k++) {
+		if (k >= n || T < 0.03) {
+			break;
+		}
+		// steps get longer with distance; the sample sits at a jittered spot inside its step
+		float a0 = pow(float(k) / float(n), 1.3);
+		float a1 = pow(float(k + 1) / float(n), 1.3);
+		float ds = len * (a1 - a0);
+		float s = t0 + len * (a0 + (a1 - a0) * jit);
+		vec3 p = vec3(0.0, cam_h, 0.0) + dir * s;
+
+		float hv;
+		float d = cu_dens(p, true, hv);
+		if (d < 0.004) {
+			continue;
+		}
+		float a = 1.0 - exp(-d * cu_sigma * ds);
+
+		float lt = cu_light(p, sun_dir);
+		float Lk = clamp(lt * phase, 0.0, 1.0);
+		float hvc = clamp(hv, 0.0, 1.0);
+		// shade colour darker underneath and brighter on top, mixed up to the lit colour where the sun reaches
+		vec3 amb = cloud_shade_color.rgb * mix(0.78, 1.08, smoothstep(0.0, 0.9, hvc));
+		vec3 sc = mix(amb, cloud_lit_color.rgb, Lk);
+		// the bottoms pick up some of the sky: light that has come through the cloud and out under it
+		sc = mix(sc, sky_under * 0.9, (1.0 - smoothstep(0.0, 0.35, hvc)) * 0.2);
+		// silver lining on thin edges facing the sun
+		sc += glow_core_color.rgb * pow(max(cs, 0.0), 5.0) * 0.45 * clamp(lt * 1.6 - 0.5, 0.0, 1.0) * (1.0 - overcast);
+		// moonlight, like the flat layer
+		sc += moon_cloud_light * (0.12 + 0.88 * pow(mdc, 3.0)) * (0.4 + 0.6 * Lk);
+
+		// far away: fade toward the haze, and fade out before the end of the slab so it has no hard edge
+		float hz = 1.0 - exp(-s / max(cu_haze_m, 1.0));
+		sc = mix(sc, horizon_color.rgb, hz * 0.75);
+		a *= 1.0 - smoothstep(0.65 * cu_max_dist, cu_max_dist, s);
+
+		L += T * a * sc;
+		T *= 1.0 - a;
+	}
+	// rays close to the horizon fade out into the plain horizon sky
+	float edge = smoothstep(0.012, 0.035, dir.y);
+	return vec4(L * edge, (1.0 - T) * edge);
+}

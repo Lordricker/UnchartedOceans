@@ -23,7 +23,13 @@ You cannot walk off the pier side until the gangway is out.
 
 ## Casting off
 
-To **cast off**, take hold of the wheel: **E Cast off** then shows at the foot of your sight, and pressing **E** lets the lines go. The lines are let go and the ship drifts off the pier. You cannot cast off while a man is standing on the gangway.
+To **cast off**, once the lines are in and the gangway is out, take hold of the wheel: **E Cast off** then shows at the foot of your sight, and pressing **E** lets the lines go and the ship drifts off the pier. You cannot cast off while a man is standing on the gangway.
+
+## The breeze of the harbour
+
+Near a port the wind keeps a daily rule. Within about **a kilometre and a half** of a port (the same water where a storm sea is not allowed), the wind blows **out of the port in the morning** and **into it in the evening**. It is strongest about **six in the morning** and again about **six in the evening**, and dies away toward noon and midnight.
+
+So **leave on the morning breeze** and **come in on the evening one**. The prevailing wind of the season is still there underneath, and a strong one can win over the harbour breeze, so read the pennant before you trust it.
 
 ## Dangers
 

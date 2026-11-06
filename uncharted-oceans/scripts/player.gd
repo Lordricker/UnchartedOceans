@@ -190,7 +190,7 @@ func _unhandled_input(e: InputEvent) -> void:
 ## One line for the HUD: what the player is doing and which keys apply.
 func state_text() -> String:
 	if ladder:
-		return "on ladder: W up, S down, A/D sideways, Space jump off"
+		return ("on ladder: W up, S down, Space jump off" if ladder.center_on_grab else "on ladder: W up, S down, A/D sideways, Space jump off")
 	return "swimming: Space jump out, Shift+Space dive" if swimming else ("wading" if submersion > 0.15 else "on foot")
 
 func _key(k: Key) -> float:
@@ -407,5 +407,11 @@ func _climb(delta: float, input: Vector2, space_pressed: bool) -> void:
 	var depth_target := 0.0 if ladder.snap_depth else _ladder_entry_z     # rope ladders draw you in to the middle of the box
 	var depth_v := clampf((depth_target - lp.z) * 4.0, -0.6, 0.6)
 	depth_v += ladder.rung_bob * k * cos(lp.y * k) * climb
-	velocity = carry + up * climb + side * input.x * sp * ladder.side_speed + out * depth_v
+	var side_v := input.x * sp * ladder.side_speed
+	if ladder.center_on_grab:
+		# slide onto the middle of the ladder and stay there, so grabbing it at the edge of the box
+		# no longer bounces you in and out of it
+		var mid := global_position + up_direction * player_height * 0.5
+		side_v = clampf((ladder.center_world() - mid).dot(side) * 10.0, -2.0, 2.0)
+	velocity = carry + up * climb + side * side_v + out * depth_v
 	move_and_slide()

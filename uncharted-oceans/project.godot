@@ -11,7 +11,7 @@ config_version=5
 [application]
 
 config/name="Uncharted Oceans"
-run/main_scene="res://scenes/world_test.tscn"
+run/main_scene="res://scenes/world_cutter_test.tscn"
 config/features=PackedStringArray("4.7", "Forward Plus")
 run/max_fps=60
 config/icon="res://icon.svg"
@@ -19,6 +19,12 @@ config/icon="res://icon.svg"
 [autoload]
 
 Ambience="*res://scripts/ambience.gd"
+MusicManager="*res://scripts/music_manager.gd"
+GameSettings="*res://scripts/game_settings.gd"
+PauseMenu="*res://scripts/pause_menu.gd"
+MCPScreenshot="*res://addons/godot_mcp/mcp_screenshot_service.gd"
+MCPInputService="*res://addons/godot_mcp/mcp_input_service.gd"
+MCPGameInspector="*res://addons/godot_mcp/mcp_game_inspector_service.gd"
 
 [display]
 

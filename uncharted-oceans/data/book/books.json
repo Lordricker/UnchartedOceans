@@ -1,57 +1,62 @@
 {
 	"logbook": {
-		"title": "Ship's Log",
 		"color": "#2a2018",
-		"text": "# Ship's Log\n\n*The owners' orders, in the master's hand:*\n\nCarry the ship from the port where she lies to the port marked with a gold diamond on the chart in the cabin. The books on the shelf will tell you how. Begin with the first of them, *Your Orders*."
+		"text": "# Ship's Log\n\n*The owners' orders, in the master's hand:*\n\nCarry the ship from the port where she lies to the port marked with a gold diamond on the chart in the cabin. The books on the shelf will tell you how. Begin with the first of them, *Your Orders*.",
+		"title": "Ship's Log"
 	},
 	"tutorial_01": {
-		"title": "Your Orders",
 		"color": "#8b1a1a",
-		"file": "res://data/book/orders.md"
+		"file": "res://data/book/orders.md",
+		"title": "Your Orders"
 	},
 	"tutorial_02": {
-		"title": "Of Sails and the Wind",
 		"color": "#3e5a3a",
-		"file": "res://data/book/sails_wind.md"
+		"file": "res://data/book/sails_wind.md",
+		"title": "Of Sails and the Wind"
 	},
 	"tutorial_03": {
-		"title": "Of the Wheel and the Course",
 		"color": "#6b1f1f",
-		"file": "res://data/book/wheel_course.md"
+		"file": "res://data/book/wheel_course.md",
+		"title": "Of the Wheel and the Course"
 	},
 	"tutorial_04": {
-		"title": "Of the Log and Line",
 		"color": "#2d3b52",
-		"file": "res://data/book/log_line.md"
+		"file": "res://data/book/log_line.md",
+		"title": "Of the Log and Line"
 	},
 	"tutorial_05": {
-		"title": "Of the Chart and of Sleep",
 		"color": "#7a4a1d",
-		"file": "res://data/book/chart_sleep.md"
+		"file": "res://data/book/chart_sleep.md",
+		"title": "Of the Chart and of Sleep"
 	},
 	"tutorial_06": {
-		"title": "Of Docking and Mooring",
 		"color": "#4a2e4f",
-		"file": "res://data/book/docking.md"
+		"file": "res://data/book/docking.md",
+		"title": "Of Docking and Mooring"
 	},
 	"tutorial_07": {
-		"title": "Of the Compass and the Stars",
 		"color": "#1f4a4a",
-		"file": "res://data/book/compass_stars.md"
+		"file": "res://data/book/compass_stars.md",
+		"title": "Of the Compass and the Stars"
 	},
 	"tutorial_08": {
-		"title": "Of Weight and Sinking",
 		"color": "#5c4a1a",
-		"file": "res://data/book/weight_sinking.md"
+		"file": "res://data/book/weight_sinking.md",
+		"title": "Of Weight and Sinking"
 	},
 	"tutorial_09": {
-		"title": "Of Crew and Hammocks",
 		"color": "#4a1f1f",
-		"file": "res://data/book/crew_hammocks.md"
+		"file": "res://data/book/crew_hammocks.md",
+		"title": "Of Crew and Hammocks"
 	},
 	"tutorial_10": {
-		"title": "Of Trade and Cargo",
 		"color": "#6a5a1e",
-		"file": "res://data/book/trade_cargo.md"
+		"file": "res://data/book/trade_cargo.md",
+		"title": "Of Trade and Cargo"
+	},
+	"tutorial_11": {
+		"color": "#3b4a2a",
+		"file": "res://data/book/ship_terms.md",
+		"title": "Of the Ship and Her Words"
 	}
 }

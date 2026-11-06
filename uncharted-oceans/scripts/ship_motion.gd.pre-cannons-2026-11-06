@@ -1,0 +1,638 @@
+extends Node3D
+## Floats the ship on the Ocean: samples the wave height at points around the hull and
+## eases heave, pitch and roll toward the plane through them (a heavy hull doesn't follow
+## every ripple). The deck collision (ShipBody, an AnimatableBody3D) follows this node,
+## so the player is carried along.
+##
+## Sails drive the ship (ship_sails.gd, sail_model.gd): speed, leeway, heel and weather helm all come
+## from how the sails are set and trimmed against the wind. F is now only a test engine that
+## overrides the sails with a steady ahead_speed.
+## Keys (in game): F = toggle the test engine (about 5 knots), R = toggle wave motion on/off.
+## Also feeds the ocean shader the ship transform so no water is drawn inside the hull.
+## Extra weight (flood water, later cargo) pushes the ship down and over through load_offset.
+
+@export var ocean_path: NodePath = ^"../Ocean"
+@export var ship_path: NodePath = ^"Brig"
+@export var floating := true
+## Ship-local (x, z) points where the hull feels the water. Bow is -Z.
+@export var sample_points := PackedVector2Array([
+	Vector2(0, -8.0), Vector2(0, 7.5),
+	Vector2(-2.6, -4.0), Vector2(2.6, -4.0),
+	Vector2(-3.0, 0.5), Vector2(3.0, 0.5),
+	Vector2(-2.7, 5.0), Vector2(2.7, 5.0),
+])
+## Seconds for the hull to catch up with the water (bigger = heavier, slower ship).
+@export var heave_lag := 0.7
+## Buoyancy in big seas. A heavy hull is slow to follow the water, but on the way UP a swell the sea lifts her: she
+## catches up faster than she settles back (rise_lag, seconds), and she can never sit lower than max_sink metres below
+## where the water and her load put her. (A spring that lags 0.7 s behind a 3 m/s swell face sits about 2 m too low, which
+## is what put the sea over the rails.)
+@export var rise_lag := 0.3
+@export var max_sink := 0.4
+@export var pitch_lag := 0.9
+@export var roll_lag := 1.3
+## Extra roll on top of the wave slope (a narrow hull rolls more than the slope alone).
+@export var roll_gain := 1.25
+@export var draft_offset := 0.0
+@export var ahead_speed := 2.6   ## m/s when F is on (~5 knots)
+@export_range(0.0, 360.0) var heading_deg := 0.0
+
+## Steering: the wheel (ship_wheel.gd) sets rudder, -1 = hard to port .. +1 = hard to starboard.
+## The ship only turns while underway. max_turn_rate_deg is the turn at full rudder; turn_lag is
+## how many seconds the heavy hull takes to build up (and lose) its turn.
+@export var wheel_enabled := true
+## Helm commands while you hold the wheel (ship_helm.gd) and the windsock on the poop deck (ship_windsock.gd).
+@export var helm_enabled := true
+@export var windsock_enabled := true
+## The white puffs thrown up at the bow while she is under way (the wake itself is in the water shader).
+@export var bow_spray := true
+## Spray off the waves: the crests of a storm sea (state 4) throw it, and the hull throws a burst when the sea slams into it
+## (wave_spray.gd).
+@export var wave_spray_enabled := true
+## Water on the deck: the sea comes over the rails, runs about the deck and falls down the stair hatch into the hold
+## (ship_deck_water.gd; needs the ShipFlooding node next to the ship).
+@export var deck_water_enabled := true
+## The log line: shown only from the wheel's stern view, knots run out with the ship's speed (ship_log_line.gd).
+@export var log_line_enabled := true
+## The cabin bookshelf: look at the books, read them (ship_bookshelf.gd, book_reader.gd).
+@export var bookshelf_enabled := true
+## White outline on the compass, cannons and pumps while you look at them (ship_interact.gd).
+@export var interact_enabled := true
+## The bilge pump handle: grab it and the pumps go on (ship_pump.gd).
+@export var pump_enabled := true
+## The anchor: click the capstan to let go or weigh anchor; the ship creeps ahead in a harbour with sails set (ship_anchor.gd).
+@export var anchor_enabled := true
+## Click the captain's bed to open the sleep window (ship_bed.gd; needs the world scene's WorldStreamer).
+@export var bed_enabled := true
+## The chart on the cabin table: click it and it fills the screen (ship_map.gd, chart_canvas.gd; needs the world scene).
+@export var map_enabled := true
+## Clear glass in the stern windows and the skylight (ship_glass.gd).
+@export var glass_enabled := true
+## Climb the shrouds and the mast to the lookout barrel (ship_rigging.gd; the zones and waypoints are markers in the brig).
+@export var rigging_enabled := true
+## Test aid: a big rock in the sea (sea_rock.gd) so you can see the ship turn and move.
+## Placed at this offset from where the ship starts, in the ship's starting orientation
+## (-Z = ahead, -X = to port).
+@export var test_rock := true
+@export var test_rock_offset := Vector3(-45.0, 0.0, -110.0)
+## Test island (island.gd) with a cove and a pier, and the harbour logic (ship_harbor.gd: running aground,
+## the pier, mooring). Placed at this offset from where the ship starts, in the ship's starting orientation.
+@export var test_island := true
+@export var test_island_offset := Vector3(70.0, 0.0, -215.0)
+@export var harbor_enabled := true
+## A rope on the poop deck's port rail you click to cast off while moored (ship_unmoor_rope.gd).
+@export var unmoor_rope_enabled := false
+## Fills small holes in the fore deck's collision (ship_deck_patch.gd), e.g. the gap by the anchor spools.
+@export var deck_patch_enabled := true
+## Size class for docking (ShipClasses.Size): sets the light rectangle at a berth and how gently she must arrive.
+@export_enum("Small", "Medium", "Large", "Schooner") var ship_class := 1
+@export var max_turn_rate_deg := 4.0
+@export var turn_lag := 2.5
+var rudder := 0.0
+## Sailing (see ShipSails). With the sails on, speed / side_speed / sail_roll come from the sail model.
+@export var sails_enabled := true
+var sails: ShipSails
+var speed := 0.0             ## m/s through the water, forward
+var side_speed := 0.0        ## m/s sideways (leeway), + starboard
+var sail_roll := 0.0         ## radians, + raises the starboard side (the sails' heel, negative = leaning starboard)
+## Current turn, degrees per second (+ = to port, the way heading_deg grows).
+var yaw_rate_deg := 0.0
+
+## Build an outside collision skin from the visible hull mesh (see _build_hull_skin).
+@export var hull_skin := true
+@export var hull_mesh_name := "Hull"
+@export_range(1, 32) var hull_skin_layer := 3
+var underway := false
+var _xf_prev := Transform3D()
+var _xf_dt := 0.0
+## Extra (heave, pitch, roll) from weight aboard, set each tick by ship_flooding.gd.
+## Heave is in metres (negative = lower), pitch and roll in radians, same signs as the waves.
+var load_offset := Vector3.ZERO
+var _ocean: Ocean
+var _ship: Node3D
+var _heave := 0.0
+var _pitch := 0.0
+var _roll := 0.0
+var _heave_v := 0.0
+var _pitch_v := 0.0
+var _roll_v := 0.0
+var _amount := 1.0
+## The wake (see the ocean shader's wake_foam) and the bow spray.
+var _wake_speed := 0.0
+var _hull_bow := 10.0
+var _hull_stern := -10.0
+var _spray: GPUParticles3D
+var _spray_pm: ParticleProcessMaterial
+var _spray_mat: StandardMaterial3D
+var _spray_drop_mat: StandardMaterial3D
+var _spray_blobs: GPUParticles3D
+var _spray_t := 0.0
+
+func _ready() -> void:
+	add_to_group("ships")
+	# this size class's own sea-keeping numbers (heave_lag, pitch_lag, ... ), if it has any; the brig's exports above otherwise
+	var cls_motion: Dictionary = ShipClasses.data(ship_class).get("motion", {})
+	for k in cls_motion.keys():
+		set(k, cls_motion[k])
+	_ocean = get_node_or_null(ocean_path) as Ocean
+	_ship = get_node_or_null(ship_path)
+	if _ocean == null:
+		push_warning("ship_motion: no Ocean found at %s" % ocean_path)
+	var mat := _ocean.get_ocean_material() if _ocean else null
+	if mat and _ship:
+		var ex := _find_waterline(_ship)
+		if ex.is_empty():
+			ex = _compute_waterline(_ship)     # a model exported without the table (the schooner): cut it from the hull
+		if ex.is_empty():
+			push_warning("ship_motion: no waterline data on the ship; sea will show inside the hull")
+		else:
+			var hb := PackedFloat32Array(ex["waterline_half_beam"])
+			mat.set_shader_parameter("half_beam", hb)
+			mat.set_shader_parameter("sample_count", hb.size())
+			mat.set_shader_parameter("y_min", float(ex["waterline_y_min"]))
+			mat.set_shader_parameter("y_step", float(ex["waterline_y_step"]))
+			_setup_wake(mat, ex)
+	if _ocean:
+		_heave = _ocean.get_height(global_position.x, global_position.z)
+	if _ship and hull_skin:
+		_build_hull_skin(_ship)
+	_unsync_bodies(self)
+	# the deck's own flood grid (water over the rails runs down the hatch into the hold)
+	if deck_water_enabled and get_node_or_null("ShipDeckWater") == null:
+		var dw = load("res://scripts/ship_deck_water.gd").new()
+		dw.name = "ShipDeckWater"
+		add_child(dw)
+	# spray off the crests and where the sea hits the hull (added to the Ocean, which follows the camera)
+	if wave_spray_enabled and _ocean and _ocean.get_node_or_null("WaveSpray") == null:
+		var ws = load("res://scripts/wave_spray.gd").new()
+		ws.name = "WaveSpray"
+		ws.ocean = _ocean
+		ws.motion = self
+		_ocean.add_child.call_deferred(ws)
+	# the wake that stays behind her on the High water setting (does nothing on Standard)
+	if _ocean and get_node_or_null("WakeTrail") == null:
+		var wt = load("res://scripts/wake_trail.gd").new()
+		wt.name = "WakeTrail"
+		add_child(wt)
+	if test_rock and get_parent() and get_parent().get_node_or_null("SeaRock") == null:
+		var rock := Node3D.new()
+		rock.set_script(load("res://scripts/sea_rock.gd"))
+		rock.name = "SeaRock"
+		var yaw := Basis(Vector3.UP, deg_to_rad(heading_deg))
+		rock.position = Vector3(global_position.x, 0.0, global_position.z) + yaw * test_rock_offset
+		get_parent().add_child.call_deferred(rock)
+	if wheel_enabled and get_node_or_null("ShipWheel") == null:
+		var wheel = load("res://scripts/ship_wheel.gd").new()
+		wheel.name = "ShipWheel"
+		add_child(wheel)
+	if sails_enabled and get_node_or_null("ShipSails") == null:
+		sails = ShipSails.new()
+		sails.name = "ShipSails"
+		add_child(sails)
+	# right after the sails, so it runs after their step each tick: it holds the ship at anchor and keeps her creeping in a harbour
+	if anchor_enabled and sails_enabled and get_node_or_null("ShipAnchor") == null:
+		var anc = load("res://scripts/ship_anchor.gd").new()
+		anc.name = "ShipAnchor"
+		add_child(anc)
+	if wheel_enabled and helm_enabled and get_node_or_null("ShipHelm") == null:
+		var helm = load("res://scripts/ship_helm.gd").new()
+		helm.name = "ShipHelm"
+		add_child(helm)
+	if log_line_enabled and get_node_or_null("ShipLogLine") == null:
+		var ll = load("res://scripts/ship_log_line.gd").new()
+		ll.name = "ShipLogLine"
+		add_child(ll)
+	if interact_enabled and get_node_or_null("ShipInteract") == null:
+		var inter = load("res://scripts/ship_interact.gd").new()
+		inter.name = "ShipInteract"
+		add_child(inter)
+	if rigging_enabled and get_node_or_null("ShipRigging") == null:
+		var rig = load("res://scripts/ship_rigging.gd").new()
+		rig.name = "ShipRigging"
+		add_child(rig)
+	if map_enabled and get_node_or_null("ShipMap") == null:
+		var map = load("res://scripts/ship_map.gd").new()
+		map.name = "ShipMap"
+		add_child(map)
+	if bed_enabled and get_node_or_null("ShipBed") == null:
+		var bed = load("res://scripts/ship_bed.gd").new()
+		bed.name = "ShipBed"
+		add_child(bed)
+	if pump_enabled and get_node_or_null("ShipPump") == null:
+		var pump = load("res://scripts/ship_pump.gd").new()
+		pump.name = "ShipPump"
+		add_child(pump)
+	if bookshelf_enabled and get_node_or_null("ShipBookshelf") == null:
+		var shelf = load("res://scripts/ship_bookshelf.gd").new()
+		shelf.name = "ShipBookshelf"
+		add_child(shelf)
+	if windsock_enabled and get_node_or_null("Windsock") == null:
+		var sock = load("res://scripts/ship_windsock.gd").new()
+		sock.name = "Windsock"
+		add_child(sock)
+	if test_island and get_parent() and get_parent().get_node_or_null("Island") == null:
+		var isl := Island.new()
+		isl.name = "Island"
+		var yaw_i := Basis(Vector3.UP, deg_to_rad(heading_deg))
+		isl.position = Vector3(global_position.x, 0.0, global_position.z) + yaw_i * test_island_offset
+		get_parent().add_child.call_deferred(isl)
+	if glass_enabled and get_node_or_null("ShipGlass") == null:
+		var gl = load("res://scripts/ship_glass.gd").new()
+		gl.name = "ShipGlass"
+		add_child(gl)
+	if deck_patch_enabled and get_node_or_null("ShipDeckPatch") == null:
+		var dp = load("res://scripts/ship_deck_patch.gd").new()
+		dp.name = "ShipDeckPatch"
+		add_child(dp)
+	if unmoor_rope_enabled and get_node_or_null("ShipUnmoorRope") == null:
+		var ur = load("res://scripts/ship_unmoor_rope.gd").new()
+		ur.name = "ShipUnmoorRope"
+		add_child(ur)
+	if harbor_enabled and get_node_or_null("ShipHarbor") == null:
+		var hb := ShipHarbor.new()
+		hb.name = "ShipHarbor"
+		add_child(hb)
+
+## The deck and hull collision live in AnimatableBody3D nodes under the ship. With
+## sync_to_physics on, they only follow their *own* local transform, so when this rig
+## moves them through their parent the collision stays behind. Turned off, every parent
+## move is sent to physics as a kinematic move (with velocity), which carries the player.
+## Outside collision that matches the visible hull, so swimmers bump the planking instead of
+## sinking ~35 cm into it (the deck collision's walls sit inside the hull). Built from the hull
+## mesh at startup, keeping only faces that point out of the ship, one-sided, on its own layer
+## (hull_skin_layer) so the flood grid's scans don't see it. The player collides with it.
+func _build_hull_skin(ship: Node3D) -> void:
+	var mi := ship.find_child(hull_mesh_name, true, false) as MeshInstance3D
+	if mi == null or mi.mesh == null:
+		push_warning("ship_motion: no '%s' mesh found for the hull skin" % hull_mesh_name)
+		return
+	var to_ship := ship.global_transform.affine_inverse() * mi.global_transform
+	var faces := PackedVector3Array()
+	var kept := 0
+	for s in mi.mesh.get_surface_count():
+		var arr := mi.mesh.surface_get_arrays(s)
+		var v: PackedVector3Array = arr[Mesh.ARRAY_VERTEX]
+		var idx: PackedInt32Array = arr[Mesh.ARRAY_INDEX] if arr[Mesh.ARRAY_INDEX] != null else PackedInt32Array()
+		var n := idx.size() if idx.size() > 0 else v.size()
+		for i in range(0, n - 2, 3):
+			var a := to_ship * v[idx[i] if idx.size() > 0 else i]
+			var b := to_ship * v[idx[i + 1] if idx.size() > 0 else i + 1]
+			var c := to_ship * v[idx[i + 2] if idx.size() > 0 else i + 2]
+			var nrm := (b - a).cross(c - a)
+			if nrm.length_squared() < 1e-12:
+				continue
+			nrm = -nrm.normalized()          # Godot front faces are clockwise
+			var m := (a + b + c) / 3.0
+			var outward := (nrm.x * signf(m.x) > 0.3 and absf(m.x) > 0.8) \
+				or (nrm.y < -0.5 and m.y < 0.3) \
+				or (nrm.z * signf(m.z) > 0.5 and absf(m.z) > 6.0)
+			if outward:
+				faces.append_array([a, b, c])
+				kept += 1
+	if kept == 0:
+		return
+	var shape := ConcavePolygonShape3D.new()
+	shape.set_faces(faces)
+	shape.backface_collision = false
+	var body := AnimatableBody3D.new()
+	body.name = "HullSkin"
+	body.sync_to_physics = false
+	body.collision_layer = 1 << (hull_skin_layer - 1)
+	body.collision_mask = 0
+	var cs := CollisionShape3D.new()
+	cs.shape = shape
+	body.add_child(cs)
+	ship.add_child(body)
+
+func _unsync_bodies(n: Node) -> void:
+	if n is AnimatableBody3D:
+		(n as AnimatableBody3D).sync_to_physics = false
+	for c in n.get_children():
+		_unsync_bodies(c)
+
+## The waterline table (half the hull's width at the water, every y_step metres along the model's own -Z) cut from the hull mesh where
+## it crosses the model's y = 0 (the water line), for a model that came without waterline_* extras. Same table the extras hold.
+func _compute_waterline(ship: Node3D) -> Dictionary:
+	var mi := ship.find_child(hull_mesh_name, true, false) as MeshInstance3D
+	if mi == null or mi.mesh == null:
+		return {}
+	var to_model := ship.global_transform.affine_inverse() * mi.global_transform
+	var pts: Array[Vector2] = []      # (t = -z along the model, |x|) where a hull edge crosses y = 0
+	for s in mi.mesh.get_surface_count():
+		var arr := mi.mesh.surface_get_arrays(s)
+		var v: PackedVector3Array = arr[Mesh.ARRAY_VERTEX]
+		var idx: PackedInt32Array = arr[Mesh.ARRAY_INDEX] if arr[Mesh.ARRAY_INDEX] != null else PackedInt32Array()
+		var n := idx.size() if idx.size() > 0 else v.size()
+		for i in range(0, n - 2, 3):
+			var tri: Array[Vector3] = []
+			for k in 3:
+				tri.append(to_model * v[idx[i + k] if idx.size() > 0 else i + k])
+			for k in 3:
+				var a: Vector3 = tri[k]
+				var b: Vector3 = tri[(k + 1) % 3]
+				if (a.y < 0.0) != (b.y < 0.0):
+					var f := a.y / (a.y - b.y)
+					var p := a.lerp(b, f)
+					pts.append(Vector2(-p.z, absf(p.x)))
+	if pts.size() < 8:
+		return {}
+	var lo := 1.0e9
+	var hi := -1.0e9
+	for p in pts:
+		lo = minf(lo, p.x)
+		hi = maxf(hi, p.x)
+	var step := maxf(0.4, (hi - lo) / 40.0)       # the sea shader holds at most 43 samples
+	var count := int(ceil((hi - lo) / step)) + 1
+	var y0 := lo - step * 0.5
+	count = mini(int(ceil((hi - y0) / step)) + 1, 43)
+	var hb := PackedFloat32Array()
+	hb.resize(count)
+	for p in pts:
+		var i := clampi(roundi((p.x - y0) / step), 0, count - 1)
+		hb[i] = maxf(hb[i], p.y)
+	return {"waterline_half_beam": hb, "waterline_y_min": y0, "waterline_y_step": step}
+
+func _find_waterline(n: Node) -> Dictionary:
+	if n.has_meta("extras"):
+		var e = n.get_meta("extras")
+		if e is Dictionary and e.has("waterline_half_beam"):
+			return e
+	for c in n.get_children():
+		var r := _find_waterline(c)
+		if not r.is_empty():
+			return r
+	return {}
+
+func _unhandled_input(e: InputEvent) -> void:
+	if e is InputEventKey and e.pressed and not e.echo:
+		if e.physical_keycode == KEY_R:
+			floating = not floating
+		elif e.physical_keycode == KEY_F:
+			underway = not underway
+
+## Target heave, pitch, roll from the water under the sample points (least-squares plane).
+func water_pose() -> Vector3:
+	var yaw := deg_to_rad(heading_deg)
+	var fwd := Vector2(-sin(yaw), -cos(yaw))    # world xz of ship -Z
+	var right := Vector2(cos(yaw), -sin(yaw))   # world xz of ship +X
+	var hs := PackedFloat32Array()
+	var mean := 0.0
+	for sp in sample_points:
+		var w := Vector2(global_position.x, global_position.z) + right * sp.x - fwd * sp.y
+		var h := _ocean.get_height(w.x, w.y)
+		hs.append(h)
+		mean += h
+	mean /= sample_points.size()
+	var sxh := 0.0; var sxx := 0.0; var szh := 0.0; var szz := 0.0
+	for i in sample_points.size():
+		var sp := sample_points[i]
+		sxh += sp.x * (hs[i] - mean); sxx += sp.x * sp.x
+		szh += sp.y * (hs[i] - mean); szz += sp.y * sp.y
+	var roll := atan(sxh / maxf(sxx, 0.001)) * roll_gain   # +roll raises ship +X
+	var pitch := atan(-szh / maxf(szz, 0.001))             # +pitch raises the bow (-Z)
+	return Vector3(mean, pitch, roll)
+
+func _physics_process(delta: float) -> void:
+	_xf_prev = global_transform
+	_xf_dt = delta
+	_amount = move_toward(_amount, 1.0 if floating else 0.0, delta * 0.3)
+	if sails and sails.is_physics_processing():
+		# the sail model owns speed, leeway, heel and the turn (rudder + weather helm)
+		var m := sails.model
+		yaw_rate_deg = m.yaw_rate
+		speed = m.v_f
+		side_speed = m.v_s
+		sail_roll = -m.heel
+		heading_deg = fposmod(heading_deg + yaw_rate_deg * delta, 360.0)
+		var yaw_s := deg_to_rad(heading_deg)
+		var fwd_s := Vector3(-sin(yaw_s), 0.0, -cos(yaw_s))
+		var right_s := Vector3(cos(yaw_s), 0.0, -sin(yaw_s))
+		global_position += (fwd_s * speed + right_s * side_speed) * delta
+	else:
+		var want_rate := -clampf(rudder, -1.0, 1.0) * max_turn_rate_deg if underway else 0.0
+		yaw_rate_deg = lerpf(yaw_rate_deg, want_rate, 1.0 - exp(-delta / maxf(turn_lag, 0.05)))
+		heading_deg = fposmod(heading_deg + yaw_rate_deg * delta, 360.0)
+		if underway:
+			var yaw := deg_to_rad(heading_deg)
+			global_position += Vector3(-sin(yaw), 0.0, -cos(yaw)) * ahead_speed * delta
+			speed = ahead_speed
+		else:
+			speed = 0.0
+	var target := water_pose() * _amount if _ocean else Vector3.ZERO
+	target += load_offset
+	target.z += sail_roll
+	_heave = _spring(_heave, target.x, rise_lag if target.x > _heave else heave_lag, delta, 0)
+	var lowest := target.x - max_sink
+	if _heave < lowest:
+		_heave = lowest
+		_heave_v = maxf(_heave_v, 0.0)
+	_pitch = _spring(_pitch, target.y, pitch_lag, delta, 1)
+	_roll = _spring(_roll, target.z, roll_lag, delta, 2)
+	position.y = _heave + draft_offset
+	basis = Basis(Vector3.UP, deg_to_rad(heading_deg)) \
+		* Basis(Vector3.RIGHT, _pitch) * Basis(Vector3.BACK, _roll)
+
+## World velocity of a point riding on the ship this physics frame (deck, ladder, hold water).
+## Used to hand the ship's motion to a player who jumps, swims or climbs off it.
+func velocity_at(p: Vector3) -> Vector3:
+	if _xf_dt <= 0.0:
+		return Vector3.ZERO
+	var before := _xf_prev * (global_transform.affine_inverse() * p)
+	return (p - before) / _xf_dt
+
+# Critically damped spring toward target, so motion has some weight and no jitter.
+func _spring(x: float, target: float, lag: float, dt: float, which: int) -> float:
+	var omega := 2.0 / maxf(lag, 0.05)
+	var v: float = [_heave_v, _pitch_v, _roll_v][which]
+	var ex := exp(-omega * dt)
+	var change := x - target
+	var temp := (v + omega * change) * dt
+	v = (v - omega * temp) * ex
+	var out := target + (change + temp) * ex
+	match which:
+		0: _heave_v = v
+		1: _pitch_v = v
+		2: _roll_v = v
+	return out
+
+## The wake: which way the bow points in the hull's own space (the space the hull mask works in), where the waterline
+## begins and ends along that and how wide it is, all read from the hull's waterline data. Then the bow spray.
+func _setup_wake(mat: ShaderMaterial, ex: Dictionary) -> void:
+	var hb := PackedFloat32Array(ex["waterline_half_beam"])
+	var y0 := float(ex["waterline_y_min"])
+	var st := float(ex["waterline_y_step"])
+	var lo := -1
+	var hi := -1
+	var beam := 0.0
+	for i in hb.size():
+		if hb[i] > 0.05:
+			if lo < 0:
+				lo = i
+			hi = i
+			beam = maxf(beam, hb[i])
+	if lo < 0:
+		return
+	# the mask reads the table along -z of the hull's space; the bow is wherever this rig's -Z points to in that space
+	var fwd := (_ship.global_transform.basis.inverse() * (-global_transform.basis.z)).normalized()
+	if absf(fwd.z) < 0.9:
+		push_warning("ship_motion: the hull is not lined up with the rig, so no wake")
+		return
+	var a := -(y0 + float(lo) * st) * fwd.z
+	var b := -(y0 + float(hi) * st) * fwd.z
+	_hull_bow = maxf(a, b)
+	_hull_stern = minf(a, b)
+	mat.set_shader_parameter("wake_fwd", fwd)
+	mat.set_shader_parameter("hull_bow", _hull_bow)
+	mat.set_shader_parameter("hull_stern", minf(a, b))
+	mat.set_shader_parameter("hull_beam", beam)
+	_make_spray(beam)
+
+## Spray thrown up at the bow: a few soft white puffs in world space, so they are left behind as the ship moves on.
+## Fewer in a calm sea and when slow, more in rough water. Costs nothing when the ship is stopped.
+func _make_spray(beam: float) -> void:
+	if not bow_spray or get_node_or_null("BowSpray") != null:
+		return
+	_spray = GPUParticles3D.new()
+	_spray.name = "BowSpray"
+	# just ahead of the stem, outside the hull: puffs start in front of the bow and travel with the ship (see _update_spray)
+	_spray.position = Vector3(0.0, 0.25, -(_hull_bow + 0.6))
+	_spray.amount = 260                  # a fine mist: lots of small drops rather than a few big ones
+	_spray.lifetime = 1.0
+	_spray.local_coords = false
+	_spray.explosiveness = 0.0
+	_spray.randomness = 0.5
+	_spray.fixed_fps = 30
+	_spray.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_spray.visibility_aabb = AABB(Vector3(-24.0, -6.0, -24.0), Vector3(48.0, 20.0, 48.0))
+	_spray.amount_ratio = 0.0
+	_spray.emitting = false
+	_spray_pm = ParticleProcessMaterial.new()
+	_spray_pm.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_BOX
+	_spray_pm.emission_box_extents = Vector3(maxf(beam * 0.3, 0.4), 0.1, 0.25)
+	_spray_pm.direction = Vector3(0.0, 1.0, -0.2)
+	_spray_pm.spread = 28.0
+	_spray_pm.initial_velocity_min = 1.5
+	_spray_pm.initial_velocity_max = 4.5
+	_spray_pm.gravity = Vector3(0.0, -9.8, 0.0)
+	_spray_pm.damping_min = 0.1
+	_spray_pm.damping_max = 0.4
+	_spray_pm.particle_flag_align_y = true     # the drops stretch along their flight
+	_spray_pm.scale_min = 0.6
+	_spray_pm.scale_max = 1.4
+	var ramp := Gradient.new()
+	ramp.offsets = PackedFloat32Array([0.0, 0.04, 0.75, 1.0])
+	ramp.colors = PackedColorArray([Color(1, 1, 1, 0.0), Color(1, 1, 1, 0.8), Color(1, 1, 1, 0.6), Color(1, 1, 1, 0.0)])   # see-through, thinning as it falls
+	var ramp_tex := GradientTexture1D.new()
+	ramp_tex.gradient = ramp
+	_spray_pm.color_ramp = ramp_tex
+	_spray.process_material = _spray_pm
+	# A fine mist, like the wave spray (wave_spray.gd): lots of thin see-through drops stretched along their flight, with
+	# small translucent blobs of whitewater among them (a child system sharing the same process material), softly edged
+	# but not the fluff of a plain gradient puff.
+	_spray_drop_mat = StandardMaterial3D.new()
+	_spray_drop_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	_spray_drop_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	_spray_drop_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	_spray_drop_mat.vertex_color_use_as_albedo = true
+	_spray_drop_mat.albedo_color = Color(1, 1, 1, 0.6)
+	_spray.draw_pass_1 = _bow_drop_mesh()
+	var blob := Gradient.new()
+	blob.offsets = PackedFloat32Array([0.0, 0.5, 1.0])
+	blob.colors = PackedColorArray([Color(1, 1, 1, 0.7), Color(1, 1, 1, 0.5), Color(1, 1, 1, 0)])   # a slightly softened edge, never solid
+	var blob_tex := GradientTexture2D.new()
+	blob_tex.gradient = blob
+	blob_tex.fill = GradientTexture2D.FILL_RADIAL
+	blob_tex.fill_from = Vector2(0.5, 0.5)
+	blob_tex.fill_to = Vector2(1.0, 0.5)
+	blob_tex.width = 64
+	blob_tex.height = 64
+	_spray_mat = StandardMaterial3D.new()
+	_spray_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	_spray_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	_spray_mat.billboard_mode = BaseMaterial3D.BILLBOARD_PARTICLES
+	_spray_mat.billboard_keep_scale = true
+	_spray_mat.vertex_color_use_as_albedo = true
+	_spray_mat.albedo_texture = blob_tex
+	_spray_mat.albedo_color = Color(1, 1, 1, 0.5)
+	var quad := QuadMesh.new()
+	quad.size = Vector2(0.22, 0.22)        # with the particle scale: blobs about 13-30 cm (they were 30-70 cm)
+	quad.material = _spray_mat
+	_spray_blobs = GPUParticles3D.new()
+	_spray_blobs.amount = 70
+	_spray_blobs.lifetime = 0.9
+	_spray_blobs.local_coords = false
+	_spray_blobs.explosiveness = 0.0
+	_spray_blobs.randomness = 0.5
+	_spray_blobs.fixed_fps = 30
+	_spray_blobs.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_spray_blobs.visibility_aabb = _spray.visibility_aabb
+	_spray_blobs.amount_ratio = 0.0
+	_spray_blobs.emitting = false
+	_spray_blobs.process_material = _spray_pm
+	_spray_blobs.draw_pass_1 = quad
+	_spray.add_child(_spray_blobs)
+	add_child(_spray)
+
+## A crossed pair of thin quads, +Y along the flight (the head), the tail end fading: a drop of water in motion.
+func _bow_drop_mesh() -> ArrayMesh:
+	var w := 0.012                          # much thinner and shorter than before (0.03 x 0.5)
+	var h := 0.3
+	var verts := PackedVector3Array([
+		Vector3(-w, 0, 0), Vector3(w, 0, 0), Vector3(w, h, 0), Vector3(-w, h, 0),
+		Vector3(0, 0, -w), Vector3(0, 0, w), Vector3(0, h, w), Vector3(0, h, -w)])
+	var tail := Color(1, 1, 1, 0.1)
+	var head := Color(1, 1, 1, 0.8)
+	var cols := PackedColorArray([tail, tail, head, head, tail, tail, head, head])
+	var idx := PackedInt32Array([0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7])
+	var arr := []
+	arr.resize(Mesh.ARRAY_MAX)
+	arr[Mesh.ARRAY_VERTEX] = verts
+	arr[Mesh.ARRAY_COLOR] = cols
+	arr[Mesh.ARRAY_INDEX] = idx
+	var m := ArrayMesh.new()
+	m.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr)
+	m.surface_set_material(0, _spray_drop_mat)
+	m.custom_aabb = AABB(Vector3(-1, 0, -1), Vector3(2, h, 2))
+	return m
+
+func _update_spray(delta: float) -> void:
+	if _spray == null:
+		return
+	var sea := clampf(_ocean.sea_level / 3.0, 0.0, 1.0) if _ocean else 0.3
+	var r := clampf((_wake_speed - 1.2) / 4.0, 0.0, 1.0) * (0.35 + 0.65 * sea)
+	_spray.amount_ratio = r
+	_spray.emitting = r > 0.02
+	if _spray_blobs:
+		_spray_blobs.amount_ratio = r
+		_spray_blobs.emitting = r > 0.02
+	_spray_t -= delta
+	if _spray_t <= 0.0:
+		_spray_t = 0.5
+		# thrown up and forward at the ship's own speed, so the puffs travel with the bow instead of the hull sailing
+		# over them (they live in world space, so otherwise they end up inside the hold)
+		var fwd_v := maxf(speed, 0.0)
+		var launch := Vector3(0.0, 2.2 + 0.5 * fwd_v, -fwd_v)
+		_spray_pm.direction = launch.normalized()
+		_spray_pm.initial_velocity_min = launch.length() * 0.9
+		_spray_pm.initial_velocity_max = launch.length() * 1.1
+		# unshaded puffs would glow at night, so dim them with the sun
+		var lit := 1.0
+		if _ocean:
+			var sun := _ocean.get_node_or_null(_ocean.sun_path) as DirectionalLight3D
+			if sun:
+				lit = (0.2 + 0.8 * clampf(sun.light_energy, 0.0, 1.0)) if sun.visible else 0.2
+		_spray_mat.albedo_color = Color(lit, lit, lit, 0.5)
+		_spray_drop_mat.albedo_color = Color(lit, lit, lit, 0.6)
+
+func _process(delta: float) -> void:
+	if _ocean and _ship and _ocean.get_ocean_material():
+		var m := _ocean.get_ocean_material()
+		m.set_shader_parameter("ship_inv", Projection(_ship.global_transform.affine_inverse()))
+		# the wake follows the speed through the water, smoothed so it builds up and dies away rather than snapping
+		_wake_speed = lerpf(_wake_speed, absf(speed), 1.0 - exp(-delta / 1.2))
+		m.set_shader_parameter("wake_speed", _wake_speed)
+		# where the ship is and which way her bow points on the water (the wake waves are worked out from this)
+		var yaw := deg_to_rad(heading_deg)
+		m.set_shader_parameter("wake_pos", Vector2(global_position.x, global_position.z))
+		m.set_shader_parameter("wake_dir", Vector2(-sin(yaw), -cos(yaw)))
+	_update_spray(delta)

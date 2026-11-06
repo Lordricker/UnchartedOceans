@@ -200,12 +200,12 @@ func _update_weather(delta: float) -> void:
 	_swell_heading = rad_to_deg(lerp_angle(deg_to_rad(_swell_heading), deg_to_rad(_mean_heading), 1.0 - exp(-delta / maxf(swell_smoothing_s, 0.01))))
 	var tau := sea_rise_s if tgt_level > _sea_level else (port_calm_s if _near_port else sea_fall_s)
 	_sea_level = lerpf(_sea_level, tgt_level, 1.0 - exp(-delta / maxf(tau, 0.01)))
-	_ocean_t -= delta
-	if _ocean_t <= 0.0:
-		_ocean_t = 0.5
-		var turned := absf(angle_difference(deg_to_rad(_swell_heading), deg_to_rad(_ocean.wind_heading_deg)))
-		if turned > deg_to_rad(0.8) or absf(_sea_level - _ocean.sea_level) > 0.015:
-			_ocean.retarget(_swell_heading, _sea_level, _pivot())
+	# The waves follow every frame, in tiny steps. Ocean.retarget keeps them exact only at the ship; this used to wait for
+	# a 0.8 degree turn or a 0.015 change of sea level and then step, which made the water away from the ship visibly
+	# jump every second or two while the sea built up or died down. Tiny steps every frame swing it round smoothly.
+	var turned := absf(angle_difference(deg_to_rad(_swell_heading), deg_to_rad(_ocean.wind_heading_deg)))
+	if turned > 1e-5 or absf(_sea_level - _ocean.sea_level) > 1e-5:
+		_ocean.retarget(_swell_heading, _sea_level, _pivot())
 
 
 ## True while the world's weather owns the 1-4 keys here (the Ocean leaves them alone then).

@@ -66,11 +66,11 @@ class Track extends RefCounted:
 @export var weather_seed := 1031
 @export var coast_breeze := true
 ## Inside this distance of a port (m) its own breeze takes over from the general coastal breeze: full strength in the
-## inner 40% and fading out to nothing at the edge. The breeze blows port_breeze_speed (m/s) along the harbour's axis,
-## onshore by day and offshore at night, and the land shelters the prevailing wind by port_shelter (0 = not at all,
+## inner 70% and fading out to nothing at the edge. The breeze blows port_breeze_speed (m/s) along the harbour's axis,
+## out of the port in the morning (strongest about 06:00) and into it in the evening (about 18:00), and the land shelters the prevailing wind by port_shelter (0 = not at all,
 ## 1 = fully) in the harbour proper.
 @export var port_breeze := true
-@export var port_breeze_m := 4000.0
+@export var port_breeze_m := 1500.0           # the same radius as the no-storm-sea zone (Ocean.port_calm_radius_m)
 @export var port_breeze_speed := 3.5
 @export_range(0.0, 1.0) var port_shelter := 0.5
 ## Rain round the camera when a storm's rain reaches the ship (rain_effect.gd).
@@ -330,12 +330,12 @@ func wind_at(cx: float, cz: float) -> Vector2:
 	var v := field.prevailing(cx, cz, year_phase())
 	if coast_breeze and _streamer and _streamer.chart:
 		# near a port the daily breeze blows along the harbour's own axis (and the land takes the edge off the
-		# prevailing wind), so a ship in the harbour gets an offshore land breeze at night and an onshore sea breeze by day
+		# prevailing wind), so a ship in the harbour gets a breeze out of the port in the morning and into it in the evening
 		var pz := _port_zone(cx, cz) if port_breeze else Vector2.ZERO
 		var hour := hour_of_day()
 		var coast := field.coastal(_streamer.chart, cx, cz, hour)
 		if pz.x > 0.0:
-			var day := cos(TAU * (hour - 14.0) / 24.0)                 # +1 at 14:00 (sea breeze), -1 at 02:00 (land breeze)
+			var day := cos(TAU * (hour - 18.0) / 24.0)                 # +1 at 18:00 (blowing into the port), -1 at 06:00 (blowing out of it)
 			# the sea breeze blows from the harbour mouth toward the land: the way the mouth faces, reversed
 			var breeze := WindFieldS.vec(port_breeze_speed * day, fposmod(pz.y + 180.0, 360.0))
 			v *= 1.0 - port_shelter * pz.x
@@ -353,7 +353,7 @@ func _port_zone(cx: float, cz: float) -> Vector2:
 		var d := WorldChart.distance_m(cx, cz, p["x"], p["z"])
 		if d >= port_breeze_m:
 			continue
-		var w := 1.0 - smoothstep(port_breeze_m * 0.4, port_breeze_m, d)
+		var w := 1.0 - smoothstep(port_breeze_m * 0.7, port_breeze_m, d)
 		if w > best.x:
 			best = Vector2(w, float(_streamer.port_mouth_heading(String(p["id"]))))
 	return best

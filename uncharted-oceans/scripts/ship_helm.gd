@@ -143,7 +143,7 @@ func _physics_process(delta: float) -> void:
 		_integ = clampf(_integ + err * delta, -60.0, 60.0)
 		var to_port := kp * err - kd * rate + ki * _integ
 		target = clampf(-to_port, -1.0, 1.0) * limit               # rudder + = starboard
-	var step := deg_to_rad(wheel_rate_deg) * delta
+	var step := deg_to_rad(wheel_rate_deg) * delta * (limit / deg_to_rad(1080.0))      # same lock-to-lock time for a 32 deg tiller as for the brig's 1080 deg wheel
 	turn = move_toward(turn, target, step)
 	_wheel.set("turn", turn)
 	_expected = turn
@@ -282,6 +282,11 @@ func _update_label(held: bool) -> void:
 		parts.append("[%s] amidships" % OS.get_keycode_string(key_amidships))
 		parts.append("[%s] %s" % [OS.get_keycode_string(key_hold_course), "let go of the course" if hold else "hold course"])
 		parts.append("[%s] %s" % [OS.get_keycode_string(key_compass), "look ahead" if view == 1 else "compass"])
+		var cannons = _ship.get_node_or_null("ShipCannons")
+		if cannons != null and cannons.has_method("hint_text"):
+			var gun_hint: String = cannons.hint_text()
+			if gun_hint != "":
+				parts.append(gun_hint)
 		text += "     ".join(parts)
 	_label.text = text
 	_label.visible = text != ""

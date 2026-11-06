@@ -26,6 +26,13 @@ extends Node
 @export var grip_outer := 1.05
 @export var wheel_name := "Wheel"
 @export var rudder_name := "Rudder"
+## Tiller mode (ShipClasses "helm": {"type": "tiller", ...}): the handle is the node called wheel_name ("Tiller"), a child of
+## the rudder, so it swings with it. Drag the mouse sideways to push the handle; the ship turns the other way, as with a real
+## tiller (handle to starboard = bow to port). turn, rudder and max_turn_deg work as for the wheel, so ShipHelm needs no change.
+@export var grip_radius := 0.14
+## +1 / -1: which way the rudder node turns for a positive (starboard) turn in tiller mode. -1 puts the blade's trailing edge on the
+## side the ship turns to (so the handle, forward of the rudder head, goes the other way, as on a real boat).
+@export var tiller_rudder_sign := -1.0
 
 ## Wheel angle in radians (+ = clockwise seen from behind = turn to starboard).
 var turn := 0.0
@@ -36,6 +43,8 @@ var view_lock := false
 
 var _ship: Node
 var _wheel: Node3D
+var _tiller_mode := false
+var _tiller_tip := Vector3(0.0, 0.0, 1.7)   # the handle's far end, in the tiller's own frame
 var _rudder: Node3D
 var _wheel_basis0 := Basis.IDENTITY
 var _rudder_basis0 := Basis.IDENTITY
@@ -50,6 +59,13 @@ const Outline := preload("res://scripts/interact_outline.gd")
 
 func _ready() -> void:
 	_ship = get_parent()
+	var hd: Dictionary = ShipClasses.data(_ship_class()).get("helm", {})
+	if String(hd.get("type", "wheel")) == "tiller":
+		_tiller_mode = true
+		wheel_name = String(hd.get("node", "Tiller"))
+		max_turn_deg = float(hd.get("max_turn_deg", 32.0))
+		degrees_per_pixel = float(hd.get("degrees_per_pixel", 0.1))
+		rudder_max_deg = float(hd.get("rudder_max_deg", 32.0))
 	_wheel = _ship.find_child(wheel_name, true, false) as Node3D
 	_rudder = _ship.find_child(rudder_name, true, false) as Node3D
 	if _wheel == null:
@@ -58,6 +74,9 @@ func _ready() -> void:
 		set_physics_process(false)
 		set_process_input(false)
 		return
+	if _tiller_mode and _wheel is MeshInstance3D:
+		var bb := (_wheel as MeshInstance3D).get_aabb()
+		_tiller_tip = Vector3(0.0, 0.0, bb.end.z if absf(bb.end.z) >= absf(bb.position.z) else bb.position.z)
 	_wheel_basis0 = _wheel.transform.basis
 	if _rudder:
 		_rudder_basis0 = _rudder.transform.basis
@@ -85,8 +104,33 @@ func _camera() -> Camera3D:
 			_hands = pl.get("hands")
 	return _cam
 
+## Where your crosshair meets the tiller, or null if you aren't looking at it (or it's too far): the closest point of the view
+## ray to the tiller's centre line, on its handle half.
+func _aim_tiller() -> Variant:
+	var cam := _camera()
+	if cam == null:
+		return null
+	var a := _wheel.global_transform * Vector3.ZERO
+	var u := _wheel.global_transform * _tiller_tip - a
+	var o := cam.global_position
+	var d := -cam.global_basis.z
+	var r := o - a
+	var bb := d.dot(u)
+	var cc := u.dot(u)
+	var den := cc - bb * bb
+	if cc < 1e-6 or absf(den) < 1e-6:
+		return null
+	var s := clampf((u.dot(r) - d.dot(r) * bb) / den, 0.3, 1.0)     # the first 30 % is the rudder head, not a handle
+	var p := a + u * s
+	var t := maxf((p - o).dot(d), 0.0)
+	if p.distance_to(o + d * t) > grip_radius or p.distance_to(o) > reach:
+		return null
+	return p
+
 ## Where your crosshair meets the wheel face, or null if you aren't looking at it (or it's too far).
 func _aim_point() -> Variant:
+	if _tiller_mode:
+		return _aim_tiller()
 	var cam := _camera()
 	if cam == null:
 		return null
@@ -154,6 +198,10 @@ func _release() -> void:
 		_hands.set("hold_active", false)
 
 func _drag(rel: Vector2) -> void:
+	if _tiller_mode:
+		# the handle follows the mouse: right pushes it to starboard, which turns the bow to port (turn is + to starboard)
+		turn = clampf(turn - rel.x * deg_to_rad(degrees_per_pixel), -deg_to_rad(max_turn_deg), deg_to_rad(max_turn_deg))
+		return
 	var amount := Vector2(rel.x, -rel.y).dot(_drag_dir)
 	var limit := deg_to_rad(max_turn_deg)
 	turn = clampf(turn + amount * deg_to_rad(degrees_per_pixel), -limit, limit)
@@ -168,10 +216,11 @@ func _physics_process(_delta: float) -> void:
 		_ship.rudder = turn / limit
 
 func _process(_delta: float) -> void:
-	_wheel.transform.basis = _wheel_basis0 * Basis(Vector3(0, 0, 1), turn)
+	if not _tiller_mode:                   # the tiller is a child of the rudder and swings with it
+		_wheel.transform.basis = _wheel_basis0 * Basis(Vector3(0, 0, 1), turn)
 	var rud := turn / deg_to_rad(max_turn_deg) * deg_to_rad(rudder_max_deg)
 	if _rudder:
-		_rudder.transform.basis = _rudder_basis0 * Basis(Vector3.UP, -rud)
+		_rudder.transform.basis = _rudder_basis0 * Basis(Vector3.UP, -rud * (tiller_rudder_sign if _tiller_mode else 1.0))
 	if _camera() and _hands:
 		# the gloves stay on the wheel unless the camera has moved off so far they couldn't reach it
 		_hands.set("hold_active", held and (not view_lock or _camera().global_position.distance_to(_grip_world()) < reach + 0.4))
@@ -205,3 +254,8 @@ func _eye_pos(cam: Camera3D) -> Vector3:
 		if head:
 			return head.global_position
 	return cam.global_position
+
+## The ship's size class (ShipClasses.Size), for the class's own helm.
+func _ship_class() -> int:
+	var c = _ship.get("ship_class")
+	return int(c) if c != null else ShipClasses.Size.MEDIUM

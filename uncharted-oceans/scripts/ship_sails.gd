@@ -65,6 +65,7 @@ class SailRec:
 	var swing_vis := 0.0                     # the spanker's boom angle as drawn, radians (+ = aft end to starboard)
 	var mast := 0
 	var level := 0
+	var boom := ""               # a boom sail: the name of the boom node it hangs from (it swings with that boom)
 	var kind := 0
 	var reefable := false
 	var model: SailModel.Sail
@@ -98,6 +99,26 @@ var held: ShipRope
 var player_busy := false
 
 var _brig: Node3D
+# Rig geometry: the brig's constants above unless the ship's class brings its own ("rig" in ShipClasses.DATA).
+var _rail_z: Array = RAIL_Z
+var _rail_pin_y: float = RAIL_PIN_Y
+var _deck_y: Array = DECK_Y
+var _spanker_pivot_z: float = MAST_Z[1]
+var _pin_x: Dictionary = {}
+var _pin_z: Dictionary = {}	  # per sail: z of its pin when it is not on the rail's own row (a pin on the fore side of the rail)
+var _haul: Dictionary = {}	   # per sail: the route its haul rope takes above the sail (see route_point)
+var _sail_rows: Array = SAILS   # this ship's sail table (the class's own \"sails\" if it has one, else the brig's)
+var _booms: Dictionary = {}     # boom node name -> z of the mast it turns on (ship frame), for the class's boom sails
+var _clew_blocks: Dictionary = {} # sail id -> name of the model node (a block) that sits on that sail's clew
+var _clew_nodes: Dictionary = {}
+var _boom_parts: Dictionary = {} # boom node name -> names of the separate nodes (gaff, topsail) that swing with it (the merged glb has no hierarchy)
+var _boom_nodes: Dictionary = {}# boom node name -> {"n": node, "x": rest transform, "swing": angle drawn (radians)}
+var _line_specs: Array = []	  # passive lines that follow the spars (sheets), see line_points
+var _sliders: Array = []		 # fittings that ride a bar (the mainsheet block on the horse), moved every frame
+var _slider_nodes: Dictionary = {}
+var sheet_lines: Array[ShipRope] = []
+var _spk: SailRec
+var _braces := true
 var _sp_parts: Array = []        # the spanker's boom (and gaff): {"n": node, "x": rest transform}, they swing with the sail
 var _sp_scanned := false
 var _flags: Array[Node3D] = []
@@ -116,11 +137,17 @@ func _ready() -> void:
 		set_physics_process(false)
 		set_process(false)
 		return
-	_brig = ship.get_node_or_null(hull_path) as Node3D
+	# the sails live in the same model node the ship moves (ship_motion's ship_path); hull_path only if that is unset
+	var hp: NodePath = hull_path
+	var sp = ship.get("ship_path")
+	if sp is NodePath and not (sp as NodePath).is_empty():
+		hp = sp
+	_brig = ship.get_node_or_null(hp) as Node3D
 	if _brig == null:
 		push_warning("ShipSails: no Brig under the ship")
 		set_physics_process(false)
 		return
+	_load_rig()
 	_setup_wind()
 	_find_sails()
 	_find_flags()
@@ -131,6 +158,26 @@ func _ready() -> void:
 	_setup_done = true
 	for r in recs:
 		_apply_visual(r, 0.0)
+
+## This ship class's rig geometry (pivot of the boom sail, pin rails, deck heights, which pins its sails use).
+func _load_rig() -> void:
+	var c = ship.get("ship_class")
+	var d := ShipClasses.data(int(c) if c != null else ShipClasses.Size.MEDIUM)
+	var rig: Dictionary = d.get("rig", {})
+	_rail_z = rig.get("rail_z", RAIL_Z)
+	_rail_pin_y = float(rig.get("rail_pin_y", RAIL_PIN_Y))
+	_deck_y = rig.get("deck_y", DECK_Y)
+	_spanker_pivot_z = float(rig.get("spanker_pivot_z", MAST_Z[1]))
+	_pin_x = rig.get("pin_x", {})
+	_pin_z = rig.get("pin_z", {})
+	_haul = rig.get("haul", {})
+	_line_specs = rig.get("rope_lines", [])
+	_sliders = rig.get("sliders", [])
+	_braces = bool(rig.get("braces", true))
+	_sail_rows = rig.get("sails", SAILS)
+	_booms = rig.get("booms", {})
+	_boom_parts = rig.get("boom_parts", {})
+	_clew_blocks = rig.get("clew_blocks", {})
 
 func _setup_wind() -> void:
 	wind = get_tree().get_first_node_in_group("wind") as SeaWind
@@ -143,9 +190,10 @@ func _setup_wind() -> void:
 # ---------------------------------------------------------------- setting up
 
 func _find_sails() -> void:
-	for d in SAILS:
+	for d in _sail_rows:
 		var r := SailRec.new()
 		r.id = d[0]
+		r.boom = String(d[8]) if d.size() > 8 else ""
 		r.label = d[4]
 		r.mast = d[3]
 		r.kind = d[6]
@@ -166,7 +214,7 @@ func _find_sails() -> void:
 		r.model = SailModel.Sail.new()
 		r.model.kind = r.kind
 		r.model.group = r.mast
-		r.model.headsail = r.kind == 1 and r.mast == 0
+		r.model.headsail = r.kind == 1 and r.mast == 0 and r.boom == ""
 		_read_mesh(r)
 		_make_material(r)
 		r.node.extra_cull_margin = 3.0
@@ -261,7 +309,7 @@ func _pick_anchor(r: SailRec, rel: Transform3D) -> void:
 		if r.kind == 0:
 			if absf(q.x) < 0.35:
 				score = q.y
-		elif r.id == "Spanker":
+		elif r.id == "Spanker" or r.boom != "":
 			if q.z > max_aft - 0.6:
 				score = absf(q.y - (lo_y + hi_y) * 0.5)
 		else:
@@ -317,9 +365,17 @@ func _make_ropes() -> void:
 		rope.key = recs.find(r)
 		rope.label = r.label
 		var d: Array = _sail_def(r.id)
-		var rail := _rail_pin(r.mast, float(d[5]))
+		var rail := _rail_pin(r.mast, float(_pin_x.get(r.id, d[5])))
+		if _pin_z.has(r.id):
+			rail.z = float(_pin_z[r.id])
+			rope.tail_dir = -1.0 if rail.z < float(_rail_z[r.mast]) else 1.0
 		rope.pin = rail
-		rope.deck_y = DECK_Y[r.mast]
+		if _haul.has(r.id):
+			rope.route = _haul[r.id]
+			for tok in rope.route:
+				if tok is Vector3:
+					rope.up_point = tok
+		rope.deck_y = _deck_y[r.mast]
 		rope.travel = 2.5
 		add_child(rope)
 		r.rope = rope
@@ -331,7 +387,7 @@ func _make_ropes() -> void:
 		[1, -1, "Main brace (port)", Vector3(-2.74, 2.36, 3.35), Vector3(-3.0, 3.1, 3.85)],
 		[1, 1, "Main brace (starboard)", Vector3(2.74, 2.36, 3.35), Vector3(3.0, 3.1, 3.85)],
 	]
-	for s in specs:
+	for s in (specs if _braces else []):
 		var rope := ShipRope.new()
 		rope.name = "Brace_%s_%s" % ["Fore" if s[0] == 0 else "Main", "P" if s[1] < 0 else "S"]
 		rope.sails = self
@@ -341,20 +397,29 @@ func _make_ropes() -> void:
 		rope.label = s[2]
 		rope.pin = s[3]
 		rope.block = s[4]
-		rope.deck_y = DECK_Y[s[0]]
+		rope.deck_y = _deck_y[s[0]]
 		rope.travel = 2.2
 		add_child(rope)
 		brace_ropes.append(rope)
 		ropes.append(rope)
 
+	for spec in _line_specs:
+		var line := ShipRope.new()
+		line.name = "Line_%d" % sheet_lines.size()
+		line.sails = self
+		line.kind = ShipRope.LINE
+		line.spec = spec
+		add_child(line)
+		sheet_lines.append(line)
+
 func _sail_def(id: String) -> Array:
-	for d in SAILS:
+	for d in _sail_rows:
 		if d[0] == id:
 			return d
 	return []
 
 func _rail_pin(mast: int, x: float) -> Vector3:
-	return Vector3(x, RAIL_PIN_Y, RAIL_Z[mast])
+	return Vector3(x, _rail_pin_y, _rail_z[mast])
 
 ## Position (ship frame) of the vertex a sail's rope ties to, following the furl / reef shape keys.
 func anchor_ship(r: SailRec) -> Vector3:
@@ -387,6 +452,97 @@ func head_ship(r: SailRec) -> Vector3:
 			by = v.y
 			best = v
 	return _to_ship(r.node.global_transform * best)
+
+## One point of a rope route or a sheet given by the ship class (ship frame). "head" = the sail's own head; a Vector3 = a fixed point (a block);
+## ["spar", v] = a point on the boom / gaff, given at rest and swung with them; ["clew", id] / ["head", id] = that sail's clew / head;
+## ["slide", rest, track, half, arc2r, drop] = a block riding the horse: it follows the boom-end point `track` across the bar, within +-half
+## (the bar is an arc in plan, 2 x radius = arc2r, and arches over the cockpit: it is `drop` m lower per m-squared off the middle).
+func route_point(r: SailRec, tok) -> Vector3:
+	if tok is Vector3:
+		return tok
+	if tok is String:
+		return head_ship(r)
+	var a: Array = tok
+	match String(a[0]):
+		"spar":
+			return spar_point(a[1], String(a[2]) if a.size() > 2 else "")
+		"clew":
+			return anchor_ship(rec(a[1]))
+		"head":
+			return head_ship(rec(a[1]))
+		"slide":
+			return slide_point(a[1], a[2], float(a[3]), float(a[4]), float(a[5]), String(a[6]) if a.size() > 6 else "")
+	return Vector3.ZERO
+
+## A point fixed to the swinging spars: `p` is where it sits with the boom amidships, this is where it is now. `boom` = the name of the boom
+## node (a two-boom ship); empty = the spanker.
+func spar_point(p: Vector3, boom := "") -> Vector3:
+	var s := 0.0
+	var pz := _spanker_pivot_z
+	if boom != "":
+		var bd: Dictionary = _boom_nodes.get(boom, {})
+		s = float(bd.get("swing", 0.0))
+		pz = float(_booms.get(boom, 0.0))
+	else:
+		if _spk == null:
+			_spk = rec("Spanker")
+		s = _spk.swing_vis if _spk != null else 0.0
+	return Basis(Vector3.UP, s) * Vector3(p.x, p.y, p.z - pz) + Vector3(0.0, 0.0, pz)
+
+## A block on the horse: it slides to where the boom-end block `track` is, as far as the bar goes; the bar is an arc (2 x radius = arc2r).
+func slide_point(rest: Vector3, track: Vector3, half: float, arc2r: float, drop: float, boom := "") -> Vector3:
+	var x := clampf(spar_point(track, boom).x, -half, half)
+	return Vector3(x + rest.x, rest.y - drop * x * x, rest.z - x * x / arc2r)
+
+## The points of one passive line (ship frame). A sheet that belongs to a headsail ("sail", "side" = the side its cleat is on) goes slack
+## and sags once the sail has swung out to the other side.
+func line_points(spec: Dictionary) -> PackedVector3Array:
+	var pts := PackedVector3Array()
+	for tok in spec["pts"]:
+		pts.append(route_point(null, tok))
+	if String(spec.get("sail", "")) != "" and pts.size() > 1 and pts[0].x * float(spec.get("side", 0)) < -0.35:
+		pts = _slack(pts)
+	return pts
+
+func _slack(pts: PackedVector3Array) -> PackedVector3Array:
+	var out := PackedVector3Array()
+	out.append(pts[0])
+	for i in pts.size() - 1:
+		var a := pts[i]
+		var b := pts[i + 1]
+		var sag := 0.2 * a.distance_to(b)
+		for k in range(1, 7):
+			var t := float(k) / 6.0
+			var q := a.lerp(b, t)
+			q.y = maxf(q.y - sag * 4.0 * t * (1.0 - t), 0.95)
+			out.append(q)
+	return out
+
+## Fittings that ride along a bar (the mainsheet block on the horse): the node follows the boom-end block across the bar.
+func _move_sliders() -> void:
+	for s in _sliders:
+		var nm := String(s["node"])
+		var n = _slider_nodes.get(nm)
+		if n == null or not is_instance_valid(n):
+			n = _brig.find_child(nm, true, false)
+			if n == null:
+				continue
+			_slider_nodes[nm] = n
+		(n as Node3D).global_position = ship.global_transform * slide_point(s["rest"], s["track"], float(s["half"]), float(s["arc"]), float(s["drop"]), String(s.get("boom", "")))
+
+## The blocks on the headsails' clews follow the sails (swing, billow of the furl shape key): the sheet and the haul rope end in them.
+func _move_clew_blocks() -> void:
+	for id in _clew_blocks:
+		var r := rec(String(id))
+		if r == null:
+			continue
+		var n = _clew_nodes.get(id)
+		if n == null or not is_instance_valid(n):
+			n = _brig.find_child(String(_clew_blocks[id]), true, false)
+			if n == null:
+				continue
+			_clew_nodes[id] = n
+		(n as Node3D).global_position = ship.global_transform * (anchor_ship(r) + Vector3(0.0, -0.06, 0.0))
 
 ## A point on a yard given in the yard's own frame (x along the yard, y up, +z toward the bow), ship frame.
 func yard_point(r: SailRec, local: Vector3) -> Vector3:
@@ -539,8 +695,12 @@ func _process(delta: float) -> void:
 	for r in recs:
 		_apply_visual(r, delta)
 	_update_flags()
+	_move_sliders()
+	_move_clew_blocks()
 	for rope in ropes:
 		rope.refresh()
+	for line in sheet_lines:
+		line.refresh()
 	_update_prompt()
 
 func _unhandled_input(e: InputEvent) -> void:
@@ -575,6 +735,8 @@ func _apply_visual(r: SailRec, _delta: float) -> void:
 		r.yard.transform.basis = Basis(Vector3.UP, b) * r.yard_basis
 	elif r.id == "Spanker":
 		_swing_spanker(r, _delta)
+	elif r.boom != "":
+		_swing_boom(r, _delta)
 	else:
 		# headsails swing out on their stay to the lee side
 		var swing := deg_to_rad(clampf(rad_to_deg(r.model.theta) * 1.5, 0.0, 70.0)) * r.model.lee
@@ -620,7 +782,7 @@ func _scan_spanker_parts(sail: Node3D) -> void:
 	if _sp_parts.is_empty():
 		push_warning("ShipSails: no boom or gaff found by name next to the spanker, so only the sail swings")
 
-## The spanker is a boom sail: the whole sail swings about the mainmast, its after end going out to the lee side as the
+## The spanker is a boom sail: the whole sail swings about the mast (_spanker_pivot_z: the brig's mainmast, the cutter's gooseneck), its after end going out to the lee side as the
 ## wind pushes it (the headsails swing on their stays, the square sails on their yards). It follows the model's trim
 ## angle, eases across when the wind changes sides, and lies along the centreline when it is furled.
 func _swing_spanker(r: SailRec, delta: float) -> void:
@@ -632,7 +794,7 @@ func _swing_spanker(r: SailRec, delta: float) -> void:
 	r.swing_vis = lerpf(r.swing_vis, target, 1.0 - exp(-delta * spanker_swing_rate))
 	# turn about the mainmast, in the ship's own frame (+ angle = the after end goes to starboard)
 	var st := ship.global_transform
-	var pivot := st * Vector3(0.0, 0.0, MAST_Z[1])
+	var pivot := st * Vector3(0.0, 0.0, _spanker_pivot_z)
 	var rot := Basis(st.basis.y.normalized(), r.swing_vis)
 	var swing := Transform3D(rot, pivot - rot * pivot)
 	var swung := swing * (_brig.global_transform * r.node_xform)
@@ -641,6 +803,56 @@ func _swing_spanker(r: SailRec, delta: float) -> void:
 		var n: Node3D = p["n"]
 		if is_instance_valid(n):
 			n.global_transform = swing * (n.get_parent_node_3d().global_transform * (p["x"] as Transform3D))
+
+## A boom sail (the schooner's): the boom node, which carries the gaff, the sail and the topsail with it, turns about its mast with the
+## first sail listed for that boom, the way the spanker does. The other sails on the same boom just follow.
+func _swing_boom(r: SailRec, delta: float) -> void:
+	var lead: SailRec = null
+	for o in recs:
+		if o.boom == r.boom:
+			lead = o
+			break
+	if lead != r:
+		return
+	var b: Dictionary = _boom_nodes.get(r.boom, {})
+	if b.is_empty():
+		var n := _brig.find_child(r.boom, true, false) as Node3D
+		if n == null:
+			_boom_nodes[r.boom] = {"n": null, "x": Transform3D.IDENTITY, "swing": 0.0, "parts": []}
+			push_warning("ShipSails: no boom node %s" % r.boom)
+			return
+		var parts: Array = []
+		for pn in _boom_parts.get(r.boom, []):
+			var pnode := _brig.find_child(String(pn), true, false) as Node3D
+			if pnode != null and pnode != n:
+				parts.append({"n": pnode, "x": pnode.transform})
+			else:
+				push_warning("ShipSails: no boom part %s" % String(pn))
+		b = {"n": n, "x": n.transform, "swing": 0.0, "parts": parts}
+		_boom_nodes[r.boom] = b
+	var n3 = b["n"]
+	if n3 == null or not is_instance_valid(n3):
+		return
+	var frac := _area_fraction(r, r.progress)
+	var target := deg_to_rad(clampf(rad_to_deg(r.model.theta), 0.0, spanker_swing_max_deg)) * r.model.lee
+	target *= clampf(frac * 4.0, 0.0, 1.0)
+	b["swing"] = lerpf(float(b["swing"]), target, 1.0 - exp(-delta * spanker_swing_rate))
+	var st := ship.global_transform
+	var pivot := st * Vector3(0.0, 0.0, float(_booms.get(r.boom, 0.0)))
+	var rot := Basis(st.basis.y.normalized(), float(b["swing"]))
+	var swing := Transform3D(rot, pivot - rot * pivot)
+	(n3 as Node3D).global_transform = swing * ((n3 as Node3D).get_parent_node_3d().global_transform * (b["x"] as Transform3D))
+	# the gaff and the topsail are their own nodes next to the boom: they turn with it (a topsail is taken in with its sail)
+	for pp in b["parts"]:
+		var pn3 = pp["n"]
+		if is_instance_valid(pn3) and not (n3 as Node3D).is_ancestor_of(pn3):
+			(pn3 as Node3D).global_transform = swing * ((pn3 as Node3D).get_parent_node_3d().global_transform * (pp["x"] as Transform3D))
+			if String((pn3 as Node3D).name).ends_with("Topsail"):
+				(pn3 as Node3D).visible = frac > 0.1
+	# and so does every sail on this boom (the lead sail's own transform was left alone above)
+	for o in recs:
+		if o.boom == r.boom and not (n3 as Node3D).is_ancestor_of(o.node):
+			o.node.transform = _brig.global_transform.affine_inverse() * (swing * (_brig.global_transform * o.node_xform))
 
 func _update_flags() -> void:
 	if wind == null:
@@ -668,7 +880,7 @@ func _probe_deck() -> void:
 		return
 	var space := get_world_3d().direct_space_state
 	for rope in ropes:
-		var from := ship.global_transform * (rope.pin + Vector3(0, 0.6, 0.0) + Vector3(0, 0, 0.5 if rope.kind == ShipRope.HAUL else 0.0))
+		var from := ship.global_transform * (rope.pin + Vector3(0, 0.6, 0.0) + Vector3(0, 0, 0.5 * rope.tail_dir if rope.kind == ShipRope.HAUL else 0.0))
 		var to := from - ship.global_transform.basis.y * 2.5
 		var q := PhysicsRayQueryParameters3D.create(from, to, 1)
 		var hit := space.intersect_ray(q)

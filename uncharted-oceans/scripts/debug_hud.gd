@@ -64,6 +64,9 @@ func _process(_delta: float) -> void:
 	var amb := get_tree().get_first_node_in_group("ambience")
 	if amb and amb.has_method("status_text"):
 		text += "\n" + amb.status_text()
+	var mus := get_tree().get_first_node_in_group("music")
+	if mus and mus.has_method("status_text"):
+		text += "\n" + mus.status_text()
 	var pl := get_tree().get_first_node_in_group("player")
 	if pl and pl.has_method("state_text"):
 		text += "\nplayer: " + pl.state_text()

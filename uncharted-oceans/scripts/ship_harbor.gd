@@ -45,6 +45,10 @@ const LINES := [
 	[Vector3(-3.05, 2.5, 6.8), 3],     # stern line
 ]
 
+## The brig's gangway (ship-local x across to port, y up): quay, over the rail, down to the deck. Other classes bring
+## their own in ShipClasses.DATA ("gangway", "gangway_z", "gangway_width", "gangway_min_y").
+const GANGWAY := [Vector2(-4.8, 1.9), Vector2(-3.35, 2.82), Vector2(-2.35, 2.82), Vector2(-1.2, 1.86)]
+
 var ship: Node3D
 var island: Island
 var berth: DockBerth            ## the nearest berth (kept while moored)
@@ -62,6 +66,11 @@ var _gang: Node3D
 var _gang_body: AnimatableBody3D
 var _gang_shapes: Array[CollisionShape3D] = []
 var _gang_out := false
+var _gang_z := -1.3             ## this ship class's gangway lane, width and the height above which someone counts as on it
+var _gang_w := 0.9
+var _gang_min_y := 1.6
+var _foot_cache: Array[Vector3] = []
+var _lines_cache: Array = []
 var _hit_cool := 0.0
 var _last_slope := 0.1
 var _snap_t := 1.0
@@ -111,6 +120,23 @@ func _set_velocity(v: Vector2) -> void:
 func _say(text: String, seconds := 3.0) -> void:
 	message = text
 	_msg_time = seconds
+
+## Keel footprint and mooring cleats for this ship's class (the brig's constants above unless the class has its own).
+func _foot() -> Array[Vector3]:
+	if _foot_cache.is_empty():
+		var f = ShipClasses.data(_ship_class()).get("foot")
+		if f == null:
+			_foot_cache = FOOT
+		else:
+			for v in f:
+				_foot_cache.append(v)
+	return _foot_cache
+
+func _lines() -> Array:
+	if _lines_cache.is_empty():
+		var l = ShipClasses.data(_ship_class()).get("lines")
+		_lines_cache = LINES if l == null else l
+	return _lines_cache
 
 func _ship_class() -> int:
 	var c = ship.get("ship_class")
@@ -175,7 +201,7 @@ func _keel_clearance() -> float:
 	var base := Vector2(ship.global_position.x, ship.global_position.z)
 	var y := ship.global_position.y
 	var clear := 99.0
-	for f in FOOT:
+	for f: Vector3 in _foot():
 		var w: Vector2 = base + (b[1] as Vector2) * f.x - (b[0] as Vector2) * f.y
 		clear = minf(clear, (y - f.z) - island.height_at(w.x, w.y))
 	return clear
@@ -190,7 +216,7 @@ func _ground(delta: float) -> void:
 	var worst := 0.0
 	var push := Vector2.ZERO
 	var clear := 99.0
-	for f in FOOT:
+	for f: Vector3 in _foot():
 		var w := base + right * f.x - fwd * f.y
 		var g := island.height_at(w.x, w.y)
 		var keel_y := y - f.z
@@ -369,7 +395,7 @@ func berth_state() -> Dictionary:
 func can_moor() -> bool:
 	if berth == null:
 		return false
-	if _ship_class() > berth.max_ship_class:
+	if ShipClasses.berth_class(_ship_class()) > berth.max_ship_class:
 		return false
 	return bool(berth_state().ok)
 
@@ -390,7 +416,7 @@ func toggle_moor() -> void:
 		_snap_h0 = float(ship.get("heading_deg"))
 		_snap_dh = fposmod(berth.berth_heading - _snap_h0 + 180.0, 360.0) - 180.0
 		_say("Lines ashore")
-	elif _ship_class() > berth.max_ship_class:
+	elif ShipClasses.berth_class(_ship_class()) > berth.max_ship_class:
 		_say("This berth is too small for her")
 	else:
 		var s := berth_state()
@@ -501,6 +527,11 @@ func teleport_to_approach() -> void:
 # ------------------------------------------------------------------ gangway
 
 func _make_gangway() -> void:
+	var cd := ShipClasses.data(_ship_class())
+	var pts: Array = cd.get("gangway", GANGWAY)
+	_gang_z = float(cd.get("gangway_z", gangway_z))
+	_gang_w = float(cd.get("gangway_width", gangway_width))
+	_gang_min_y = float(cd.get("gangway_min_y", 1.6))
 	_gang = Node3D.new()
 	_gang.name = "Gangway"
 	_gang.visible = false
@@ -514,8 +545,7 @@ func _make_gangway() -> void:
 	var wood := StandardMaterial3D.new()
 	wood.albedo_color = Color(0.5, 0.38, 0.24)
 	wood.roughness = 0.9
-	var pts := [Vector2(-4.8, 1.9), Vector2(-3.35, 2.82), Vector2(-2.35, 2.82), Vector2(-1.2, 1.86)]
-	for i in 3:
+	for i in pts.size() - 1:
 		var a: Vector2 = pts[i]
 		var bpt: Vector2 = pts[i + 1]
 		var d := bpt - a
@@ -523,8 +553,8 @@ func _make_gangway() -> void:
 		var mid := (a + bpt) * 0.5
 		var nrm := Vector2(-sin(ang), cos(ang))
 		var basis := Basis(Vector3.BACK, ang)
-		var width := gangway_width
-		var xf := Transform3D(basis, Vector3(mid.x - nrm.x * 0.05, mid.y - nrm.y * 0.05, gangway_z))
+		var width := _gang_w
+		var xf := Transform3D(basis, Vector3(mid.x - nrm.x * 0.05, mid.y - nrm.y * 0.05, _gang_z))
 		var mi := MeshInstance3D.new()
 		var bm := BoxMesh.new()
 		bm.size = Vector3(d.length(), 0.1, width)
@@ -546,7 +576,7 @@ func _make_gangway() -> void:
 			sm.size = Vector3(d.length(), 0.2, 0.05)
 			side.mesh = sm
 			side.material_override = wood
-			side.transform = Transform3D(basis, Vector3(mid.x + nrm.x * 0.1, mid.y + nrm.y * 0.1, gangway_z + sz * (width * 0.5 - 0.02)))
+			side.transform = Transform3D(basis, Vector3(mid.x + nrm.x * 0.1, mid.y + nrm.y * 0.1, _gang_z + sz * (width * 0.5 - 0.02)))
 			_gang.add_child(side)
 		# cleats across the ramp so there is something to grip
 		var steps := int(d.length() / 0.4)
@@ -558,7 +588,7 @@ func _make_gangway() -> void:
 			cm.size = Vector3(0.04, 0.03, width - 0.1)
 			cleat.mesh = cm
 			cleat.material_override = wood
-			cleat.transform = Transform3D(basis, Vector3(cp.x + nrm.x * 0.03, cp.y + nrm.y * 0.03, gangway_z))
+			cleat.transform = Transform3D(basis, Vector3(cp.x + nrm.x * 0.03, cp.y + nrm.y * 0.03, _gang_z))
 			_gang.add_child(cleat)
 
 func _update_gangway() -> void:
@@ -577,7 +607,7 @@ func _player_on_gangway() -> bool:
 	if pl == null:
 		return false
 	var l := ship.global_transform.affine_inverse() * pl.global_position
-	return l.x < -1.0 and absf(l.z - gangway_z) < gangway_width * 0.5 + 0.5 and l.y > 1.6
+	return l.x < -1.0 and absf(l.z - _gang_z) < _gang_w * 0.5 + 0.5 and l.y > _gang_min_y
 
 # ------------------------------------------------------------------ ropes
 
@@ -603,7 +633,7 @@ func _update_ropes() -> void:
 		return
 	var bol := berth.bollards_world()
 	_rope_mesh.surface_begin(Mesh.PRIMITIVE_TRIANGLES)
-	for ln in LINES:
+	for ln in _lines():
 		var a: Vector3 = ship.global_transform * (ln[0] as Vector3)
 		var b: Vector3 = bol[ln[1]]
 		var slack := clampf(1.0 - settle / 0.8, 0.0, 1.0)
@@ -706,7 +736,7 @@ func status_text() -> String:
 		if moored:
 			lines.append("MOORED - E to cast off" if settle > 0.8 else "Hauling in the lines...")
 		elif dist < 90.0:
-			if cls > berth.max_ship_class:
+			if ShipClasses.berth_class(cls) > berth.max_ship_class:
 				lines.append("Berth too small for this ship")
 			elif can_moor():
 				lines.append("E: put the lines ashore")

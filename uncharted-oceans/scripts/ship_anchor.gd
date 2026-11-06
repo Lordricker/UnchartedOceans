@@ -76,6 +76,9 @@ var _prompt := ""
 func _ready() -> void:
 	add_to_group("ship_anchor")
 	_ship = get_parent() as Node3D
+	var ad: Dictionary = ShipClasses.data(_ship_class()).get("anchor", {})
+	for k in ad.keys():
+		set(k, ad[k])
 	_make_label()
 	_build()
 
@@ -647,3 +650,8 @@ func status_text() -> String:
 		if creeping:
 			s += ", creeping at %.1f kn" % creep_knots
 	return s
+
+## The ship's size class (ShipClasses.Size), for the class's own numbers.
+func _ship_class() -> int:
+	var c = _ship.get("ship_class")
+	return int(c) if c != null else ShipClasses.Size.MEDIUM

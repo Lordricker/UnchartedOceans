@@ -17,6 +17,8 @@
 
 uniform bool vol_enabled = false;
 uniform bool vol_quarter = false;
+// The Low quality tier: no fine noise and one sun-shadow sample instead of two (about half the texture reads).
+uniform bool vol_lite = false;
 // Keep drawing the painted storm wall in the main view too, with the raymarched cloud laid over it.
 uniform bool vol_paint_behind = true;
 uniform int vol_steps : hint_range(8, 48, 1) = 22;
@@ -68,7 +70,7 @@ float vol_dens(vec3 lp, vec4 A, vec4 B, vec4 C, bool detail, out float hv, out f
 	}
 
 	float n = nc;
-	if (detail) {
+	if (detail && !vol_lite) {
 		// finer, flatter lumps: wider than tall, so the cloud reads as layered bands
 		float nf = vol_tex(lp * vec3(1.0 / 4200.0, 1.0 / 1500.0, 1.0 / 4200.0) + seed_off * 2.3 + vol_drift * 2.0);
 		n = nc * 0.8 + nf * 0.2;
@@ -82,6 +84,9 @@ float vol_light(vec3 lp, vec3 ld, vec4 A, vec4 B, vec4 C) {
 	float h;
 	float n;
 	float d1 = vol_dens(lp + ld * 450.0, A, B, C, false, h, n);
+	if (vol_lite) {
+		return exp(-d1 * 1500.0 * vol_sigma * 1.1);
+	}
 	float d2 = vol_dens(lp + ld * 1500.0, A, B, C, false, h, n);
 	return exp(-(d1 * 450.0 + d2 * 1050.0) * vol_sigma * 1.1);
 }

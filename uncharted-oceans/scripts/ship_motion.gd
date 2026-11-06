@@ -43,6 +43,8 @@ extends Node3D
 @export var wheel_enabled := true
 ## Helm commands while you hold the wheel (ship_helm.gd) and the windsock on the poop deck (ship_windsock.gd).
 @export var helm_enabled := true
+## Broadside guns fired from the wheel with the Left / Right arrow keys, ammunition from the hold's shot crates (ship_cannons.gd).
+@export var cannons_enabled := true
 @export var windsock_enabled := true
 ## The white puffs thrown up at the bow while she is under way (the wake itself is in the water shader).
 @export var bow_spray := true
@@ -80,8 +82,12 @@ extends Node3D
 @export var test_island := true
 @export var test_island_offset := Vector3(70.0, 0.0, -215.0)
 @export var harbor_enabled := true
+## A rope on the poop deck's port rail you click to cast off while moored (ship_unmoor_rope.gd).
+@export var unmoor_rope_enabled := false
+## Fills small holes in the fore deck's collision (ship_deck_patch.gd), e.g. the gap by the anchor spools.
+@export var deck_patch_enabled := true
 ## Size class for docking (ShipClasses.Size): sets the light rectangle at a berth and how gently she must arrive.
-@export_enum("Small", "Medium", "Large") var ship_class := 1
+@export_enum("Small", "Medium", "Large", "Schooner") var ship_class := 1
 @export var max_turn_rate_deg := 4.0
 @export var turn_lag := 2.5
 var rudder := 0.0
@@ -126,6 +132,10 @@ var _spray_t := 0.0
 
 func _ready() -> void:
 	add_to_group("ships")
+	# this size class's own sea-keeping numbers (heave_lag, pitch_lag, ... ), if it has any; the brig's exports above otherwise
+	var cls_motion: Dictionary = ShipClasses.data(ship_class).get("motion", {})
+	for k in cls_motion.keys():
+		set(k, cls_motion[k])
 	_ocean = get_node_or_null(ocean_path) as Ocean
 	_ship = get_node_or_null(ship_path)
 	if _ocean == null:
@@ -133,6 +143,8 @@ func _ready() -> void:
 	var mat := _ocean.get_ocean_material() if _ocean else null
 	if mat and _ship:
 		var ex := _find_waterline(_ship)
+		if ex.is_empty():
+			ex = _compute_waterline(_ship)     # a model exported without the table (the schooner): cut it from the hull
 		if ex.is_empty():
 			push_warning("ship_motion: no waterline data on the ship; sea will show inside the hull")
 		else:
@@ -188,6 +200,10 @@ func _ready() -> void:
 		var helm = load("res://scripts/ship_helm.gd").new()
 		helm.name = "ShipHelm"
 		add_child(helm)
+	if wheel_enabled and cannons_enabled and get_node_or_null("ShipCannons") == null:
+		var cannons = load("res://scripts/ship_cannons.gd").new()
+		cannons.name = "ShipCannons"
+		add_child(cannons)
 	if log_line_enabled and get_node_or_null("ShipLogLine") == null:
 		var ll = load("res://scripts/ship_log_line.gd").new()
 		ll.name = "ShipLogLine"
@@ -230,6 +246,14 @@ func _ready() -> void:
 		var gl = load("res://scripts/ship_glass.gd").new()
 		gl.name = "ShipGlass"
 		add_child(gl)
+	if deck_patch_enabled and get_node_or_null("ShipDeckPatch") == null:
+		var dp = load("res://scripts/ship_deck_patch.gd").new()
+		dp.name = "ShipDeckPatch"
+		add_child(dp)
+	if unmoor_rope_enabled and get_node_or_null("ShipUnmoorRope") == null:
+		var ur = load("res://scripts/ship_unmoor_rope.gd").new()
+		ur.name = "ShipUnmoorRope"
+		add_child(ur)
 	if harbor_enabled and get_node_or_null("ShipHarbor") == null:
 		var hb := ShipHarbor.new()
 		hb.name = "ShipHarbor"
@@ -291,6 +315,48 @@ func _unsync_bodies(n: Node) -> void:
 		(n as AnimatableBody3D).sync_to_physics = false
 	for c in n.get_children():
 		_unsync_bodies(c)
+
+## The waterline table (half the hull's width at the water, every y_step metres along the model's own -Z) cut from the hull mesh where
+## it crosses the model's y = 0 (the water line), for a model that came without waterline_* extras. Same table the extras hold.
+func _compute_waterline(ship: Node3D) -> Dictionary:
+	var mi := ship.find_child(hull_mesh_name, true, false) as MeshInstance3D
+	if mi == null or mi.mesh == null:
+		return {}
+	var to_model := ship.global_transform.affine_inverse() * mi.global_transform
+	var pts: Array[Vector2] = []      # (t = -z along the model, |x|) where a hull edge crosses y = 0
+	for s in mi.mesh.get_surface_count():
+		var arr := mi.mesh.surface_get_arrays(s)
+		var v: PackedVector3Array = arr[Mesh.ARRAY_VERTEX]
+		var idx: PackedInt32Array = arr[Mesh.ARRAY_INDEX] if arr[Mesh.ARRAY_INDEX] != null else PackedInt32Array()
+		var n := idx.size() if idx.size() > 0 else v.size()
+		for i in range(0, n - 2, 3):
+			var tri: Array[Vector3] = []
+			for k in 3:
+				tri.append(to_model * v[idx[i + k] if idx.size() > 0 else i + k])
+			for k in 3:
+				var a: Vector3 = tri[k]
+				var b: Vector3 = tri[(k + 1) % 3]
+				if (a.y < 0.0) != (b.y < 0.0):
+					var f := a.y / (a.y - b.y)
+					var p := a.lerp(b, f)
+					pts.append(Vector2(-p.z, absf(p.x)))
+	if pts.size() < 8:
+		return {}
+	var lo := 1.0e9
+	var hi := -1.0e9
+	for p in pts:
+		lo = minf(lo, p.x)
+		hi = maxf(hi, p.x)
+	var step := maxf(0.4, (hi - lo) / 40.0)       # the sea shader holds at most 43 samples
+	var count := int(ceil((hi - lo) / step)) + 1
+	var y0 := lo - step * 0.5
+	count = mini(int(ceil((hi - y0) / step)) + 1, 43)
+	var hb := PackedFloat32Array()
+	hb.resize(count)
+	for p in pts:
+		var i := clampi(roundi((p.x - y0) / step), 0, count - 1)
+		hb[i] = maxf(hb[i], p.y)
+	return {"waterline_half_beam": hb, "waterline_y_min": y0, "waterline_y_step": step}
 
 func _find_waterline(n: Node) -> Dictionary:
 	if n.has_meta("extras"):
@@ -436,7 +502,7 @@ func _make_spray(beam: float) -> void:
 	_spray.name = "BowSpray"
 	# just ahead of the stem, outside the hull: puffs start in front of the bow and travel with the ship (see _update_spray)
 	_spray.position = Vector3(0.0, 0.25, -(_hull_bow + 0.6))
-	_spray.amount = 80
+	_spray.amount = 260                  # a fine mist: lots of small drops rather than a few big ones
 	_spray.lifetime = 1.0
 	_spray.local_coords = false
 	_spray.explosiveness = 0.0
@@ -461,24 +527,24 @@ func _make_spray(beam: float) -> void:
 	_spray_pm.scale_max = 1.4
 	var ramp := Gradient.new()
 	ramp.offsets = PackedFloat32Array([0.0, 0.04, 0.75, 1.0])
-	ramp.colors = PackedColorArray([Color(1, 1, 1, 0.0), Color(1, 1, 1, 1.0), Color(1, 1, 1, 0.85), Color(1, 1, 1, 0.0)])
+	ramp.colors = PackedColorArray([Color(1, 1, 1, 0.0), Color(1, 1, 1, 0.8), Color(1, 1, 1, 0.6), Color(1, 1, 1, 0.0)])   # see-through, thinning as it falls
 	var ramp_tex := GradientTexture1D.new()
 	ramp_tex.gradient = ramp
 	_spray_pm.color_ramp = ramp_tex
 	_spray.process_material = _spray_pm
-	# Solid water, like the wave spray (wave_spray.gd): thin white drops stretched along their flight, with a few hard-edged
-	# blobs of whitewater among them (a child system sharing the same process material). Soft gradient puffs looked like
-	# white dandelion fluff.
+	# A fine mist, like the wave spray (wave_spray.gd): lots of thin see-through drops stretched along their flight, with
+	# small translucent blobs of whitewater among them (a child system sharing the same process material), softly edged
+	# but not the fluff of a plain gradient puff.
 	_spray_drop_mat = StandardMaterial3D.new()
 	_spray_drop_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	_spray_drop_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 	_spray_drop_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
 	_spray_drop_mat.vertex_color_use_as_albedo = true
-	_spray_drop_mat.albedo_color = Color(1, 1, 1, 0.95)
+	_spray_drop_mat.albedo_color = Color(1, 1, 1, 0.6)
 	_spray.draw_pass_1 = _bow_drop_mesh()
 	var blob := Gradient.new()
-	blob.offsets = PackedFloat32Array([0.0, 0.8, 1.0])
-	blob.colors = PackedColorArray([Color(1, 1, 1, 1), Color(1, 1, 1, 1), Color(1, 1, 1, 0)])
+	blob.offsets = PackedFloat32Array([0.0, 0.5, 1.0])
+	blob.colors = PackedColorArray([Color(1, 1, 1, 0.7), Color(1, 1, 1, 0.5), Color(1, 1, 1, 0)])   # a slightly softened edge, never solid
 	var blob_tex := GradientTexture2D.new()
 	blob_tex.gradient = blob
 	blob_tex.fill = GradientTexture2D.FILL_RADIAL
@@ -493,12 +559,12 @@ func _make_spray(beam: float) -> void:
 	_spray_mat.billboard_keep_scale = true
 	_spray_mat.vertex_color_use_as_albedo = true
 	_spray_mat.albedo_texture = blob_tex
-	_spray_mat.albedo_color = Color(1, 1, 1, 0.9)
+	_spray_mat.albedo_color = Color(1, 1, 1, 0.5)
 	var quad := QuadMesh.new()
-	quad.size = Vector2(0.5, 0.5)
+	quad.size = Vector2(0.22, 0.22)        # with the particle scale: blobs about 13-30 cm (they were 30-70 cm)
 	quad.material = _spray_mat
 	_spray_blobs = GPUParticles3D.new()
-	_spray_blobs.amount = 24
+	_spray_blobs.amount = 70
 	_spray_blobs.lifetime = 0.9
 	_spray_blobs.local_coords = false
 	_spray_blobs.explosiveness = 0.0
@@ -515,13 +581,13 @@ func _make_spray(beam: float) -> void:
 
 ## A crossed pair of thin quads, +Y along the flight (the head), the tail end fading: a drop of water in motion.
 func _bow_drop_mesh() -> ArrayMesh:
-	var w := 0.03
-	var h := 0.5
+	var w := 0.012                          # much thinner and shorter than before (0.03 x 0.5)
+	var h := 0.3
 	var verts := PackedVector3Array([
 		Vector3(-w, 0, 0), Vector3(w, 0, 0), Vector3(w, h, 0), Vector3(-w, h, 0),
 		Vector3(0, 0, -w), Vector3(0, 0, w), Vector3(0, h, w), Vector3(0, h, -w)])
-	var tail := Color(1, 1, 1, 0.2)
-	var head := Color(1, 1, 1, 1.0)
+	var tail := Color(1, 1, 1, 0.1)
+	var head := Color(1, 1, 1, 0.8)
 	var cols := PackedColorArray([tail, tail, head, head, tail, tail, head, head])
 	var idx := PackedInt32Array([0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7])
 	var arr := []
@@ -561,8 +627,8 @@ func _update_spray(delta: float) -> void:
 			var sun := _ocean.get_node_or_null(_ocean.sun_path) as DirectionalLight3D
 			if sun:
 				lit = (0.2 + 0.8 * clampf(sun.light_energy, 0.0, 1.0)) if sun.visible else 0.2
-		_spray_mat.albedo_color = Color(lit, lit, lit, 0.9)
-		_spray_drop_mat.albedo_color = Color(lit, lit, lit, 0.95)
+		_spray_mat.albedo_color = Color(lit, lit, lit, 0.5)
+		_spray_drop_mat.albedo_color = Color(lit, lit, lit, 0.6)
 
 func _process(delta: float) -> void:
 	if _ocean and _ship and _ocean.get_ocean_material():

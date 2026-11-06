@@ -84,6 +84,10 @@ const SWELL_HEIGHTS := [9.0, 6.0, 4.0]
 const SWELL_SPREAD := 0.45   ## swell directions are this much tighter around the wind than the chop's
 const WAVELENGTH_FALLOFF := 1.18   ## each octave's wavelength = previous / this
 const HIGH_EXTRA_OCTAVES := 6      ## more small waves per pixel on the High water setting (down to about 2.6 m)
+## How fast foam rides downwind on the surface (m/s) at calm / moderate / rough / storm: about 3.5% of the wind
+## (SeaWind.speeds 3 / 8.5 / 14 / 22 m/s). The foam patterns drift at this speed, and on High the foam left behind a
+## breaking crest travels with it as it thins out.
+const FOAM_DRIFT := [0.12, 0.3, 0.5, 0.77]
 
 var time := 0.0
 var octaves := 16
@@ -107,6 +111,15 @@ var _p_base := PackedFloat32Array()   # the seeded phases, before the world-orig
 var _mat: ShaderMaterial
 var _sun: DirectionalLight3D
 var _island: Island
+## The foam and ripple patterns' frame (see _update_flow): which way they lie, their origin, and how far the foam has
+## drifted. Added up here frame by frame (64-bit), so a change in the wind changes only how fast they move, never where
+## they are.
+var _flow_dir := Vector2.ZERO
+var _flow_ox := 0.0
+var _flow_oz := 0.0
+var _scroll_x := 0.0
+var _scroll_z := 0.0
+var _foam_run := 0.0
 ## World mode: the chart and where the Godot origin sits on it (chart metres, 64-bit floats).
 var chart: WorldChart
 var _ox := 0.0
@@ -171,6 +184,21 @@ func register_island(isl: Island) -> void:
 ## macro shoaling from the chart's shelf. Call again after every rebase.
 func set_world(c: WorldChart, ox: float, oz: float) -> void:
 	var first := chart == null
+	if not first:
+		# a rebase moves everything in the scene by the change of origin: move the patterns' frame with it, so the foam
+		# and ripples stay on the same water (unless the totals have grown so big that float precision would suffer: then
+		# they start again from zero, a single jump)
+		var mx := ox - _ox
+		var mz := oz - _oz
+		_flow_ox -= mx
+		_flow_oz -= mz
+		_scroll_x -= mx
+		_scroll_z -= mz
+		if absf(_scroll_x) > 50000.0 or absf(_scroll_z) > 50000.0 or absf(_flow_ox) > 50000.0 or absf(_flow_oz) > 50000.0:
+			_scroll_x = 0.0
+			_scroll_z = 0.0
+			_flow_ox = 0.0
+			_flow_oz = 0.0
 	chart = c
 	_ox = ox
 	_oz = oz
@@ -184,6 +212,13 @@ func set_world(c: WorldChart, ox: float, oz: float) -> void:
 	if first:
 		_mat.set_shader_parameter("chart_land", c.texture_of("land"))
 		_mat.set_shader_parameter("chart_shore", c.texture_of("shore"))
+		# the surf along the coasts asks the same ground height the terrain draws, which needs the 16-bit heightmap
+		_mat.set_shader_parameter("chart_px", Vector2(c.px_w, c.px_h))
+		var h16 := c.texture_of("height16")
+		if h16:
+			_mat.set_shader_parameter("chart_height16", h16)
+		else:
+			_mat.set_shader_parameter("coast_surf", 0.0)
 	_mat.set_shader_parameter("w_p", _p)
 	# the foam textures repeat every 1/scale metres, so shifting them by the fractional part keeps them put
 	var f1 := Vector2(fposmod(ox * 0.071, 1.0), fposmod(oz * 0.071, 1.0))
@@ -236,9 +271,12 @@ func _process(delta: float) -> void:
 		if _note_t <= 0.0:
 			storm_note = ""
 	var cam := get_viewport().get_camera_3d()
+	var view := Vector2.ZERO
 	if cam:
 		var c := cam.global_position
 		global_position = Vector3(c.x, 0.0, c.z)
+		view = Vector2(c.x, c.z)
+	_update_flow(delta, view)
 	if _mat:
 		_mat.set_shader_parameter("ocean_time", time)
 		if _sun:
@@ -367,9 +405,42 @@ func _apply_sea_state() -> void:
 		_mat.set_shader_parameter("sea_amplitude", sea_amplitude)
 		_mat.set_shader_parameter("foam_amount", foam)
 		_mat.set_shader_parameter("foam_z", foam_z)
+		_mat.set_shader_parameter("foam_drift", _foam_drift_at(sea_level))
 		_mat.set_shader_parameter("jac_v", _fold_variance(peak))
 		_mat.set_shader_parameter("ripple_strength", ripple)
 		_mat.set_shader_parameter("wind_dir", Vector2(sin(wind), -cos(wind)))
+
+## Moves the foam and ripple patterns on by one frame. The foam drifts downwind at FOAM_DRIFT; when the wind turns, the
+## patterns' frame turns with it about `pivot` (the camera), so the water in view keeps its pattern and only the far water
+## swings round, smoothly. (The shader used to work all of this out as speed * ocean_time along the wind, which made
+## the patterns jump every time the weather nudged the wind.)
+func _update_flow(delta: float, pivot: Vector2) -> void:
+	var w := deg_to_rad(wind_heading_deg)
+	var dir := Vector2(sin(w), -cos(w))
+	if _flow_dir == Vector2.ZERO:
+		_flow_dir = dir
+	else:
+		var ang := _flow_dir.angle_to(dir)
+		if absf(ang) > 1e-6:
+			var v := (pivot - Vector2(_flow_ox, _flow_oz)).rotated(ang)
+			_flow_ox = pivot.x - v.x
+			_flow_oz = pivot.y - v.y
+			_flow_dir = dir
+	var drift := _foam_drift_at(sea_level)
+	_scroll_x += dir.x * drift * delta
+	_scroll_z += dir.y * drift * delta
+	_foam_run += drift * delta
+	if _mat:
+		_mat.set_shader_parameter("flow_dir", _flow_dir)
+		_mat.set_shader_parameter("flow_o", Vector2(_flow_ox, _flow_oz))
+		_mat.set_shader_parameter("foam_scroll", Vector2(_scroll_x, _scroll_z))
+		_mat.set_shader_parameter("foam_run", _foam_run)
+
+## FOAM_DRIFT for a continuous sea level (0 = calm .. 3 = storm).
+static func _foam_drift_at(level: float) -> float:
+	var l := clampf(level, 0.0, 3.0)
+	var i := mini(int(floor(l)), 2)
+	return lerpf(float(FOAM_DRIFT[i]), float(FOAM_DRIFT[i + 1]), l - float(i))
 
 ## Mean of exp(k*(sin x - 1)) over a cycle = e^-k * I0(k).
 static func _exp_sine_mean(k: float) -> float:
@@ -457,7 +528,8 @@ func _preset_at(level: float) -> Array:
 ## Turn the swell to a new direction and/or sea level without a visible jump. The wave table is rebuilt for the new
 ## values, then every wave's phase is corrected so that, at `pivot` (x, z in the Godot scene: the ship), each wave has
 ## exactly the phase it had a moment ago. Around that point the sea carries on as it was; further off it swings round
-## gradually. Call it every half second or so, not every frame.
+## gradually. Call it every frame while the weather is changing (SeaWind does): the phases only match exactly at the
+## pivot, so a big step makes the water further off visibly jump, while many tiny steps make it swing round smoothly.
 func retarget(heading_deg: float, level: float, pivot: Vector2) -> void:
 	var have_table := _k.size() == MAX_WAVES and _p_base.size() == MAX_WAVES
 	var before := PackedFloat64Array()

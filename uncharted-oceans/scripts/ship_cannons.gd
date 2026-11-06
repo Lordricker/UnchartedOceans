@@ -1,0 +1,521 @@
+class_name ShipCannons
+extends Node
+## Broadside guns, fired from the wheel. Created by ship_motion.gd (cannons_enabled).
+##
+## Hold the wheel and the keys at the foot of the screen (ship_helm.gd) gain two more:
+##   Left   fire the port guns
+##   Right  fire the starboard guns
+## Every gun that is loaded on that side goes off, one after another from the bow aft with a little random
+## jitter, so a broadside ripples instead of banging once. A gun then needs reload_s seconds before it can fire
+## again: there is no loading by hand, the crew does it.
+##
+## Ammunition comes straight out of the hold: one crate of "cannon_shot" (goods.json) holds shots_per_crate shots,
+## and a new crate is taken out of the hold (CargoSystem.remove_from_hold) whenever the open one runs dry, so the
+## ship gets lighter as she fires. With no shot crates left the guns stay quiet. (If the scene has no CargoSystem,
+## the guns fire for free so test scenes still work.)
+##
+## The guns are the brig's nodes with game_role "gun" (group "guns", see brig_import.gd). The side comes from which
+## side of the ship the gun stands on; the muzzle is the outer end of the gun's bounding box and the shot leaves
+## straight out to the side, a few degrees up. A gun on the centre line (a swivel gun) is left out for now.
+##
+## Each shot: a flash of light, a burst of fire, a cloud of smoke that drifts with the wind (they live in world
+## space, so they stay behind as the ship sails on), a short recoil of the gun, and a sound if there is one in
+## sound_dir (any .ogg / .wav / .mp3 there; none is shipped yet). The shot itself is a real round shot in flight
+## (cannonball.gd): it arcs under gravity, splashes in the sea, and a hit on a hull punches a hole and floods her.
+## `fired` is emitted for every shot as well.
+
+signal fired(gun: Node3D, from: Vector3, dir: Vector3)
+
+@export var key_port := KEY_LEFT
+@export var key_starboard := KEY_RIGHT
+@export var group_name := "guns"
+
+@export_group("Reload and ammo")
+## Seconds before a gun that has fired can fire again.
+@export var reload_s := 6.0
+## A broadside fires bow to stern: this long between neighbouring guns, plus up to ripple_jitter_s of chance.
+@export var ripple_step_s := 0.12
+@export var ripple_jitter_s := 0.18
+@export var use_ammo := true
+@export var ammo_good := "cannon_shot"
+@export var shots_per_crate := 10
+
+@export_group("Shot")
+## The shot leaves this many degrees above level.
+@export var elevation_deg := 3.0
+## How far the gun kicks back (m), how fast, and how slowly it runs out again.
+@export var recoil_m := 0.25
+@export var recoil_out_s := 0.05
+@export var recoil_back_s := 1.4
+
+@export_group("Round shot")
+## Fire a real ball (cannonball.gd) with each shot. Off: flash and smoke only.
+@export var fire_balls := true
+## Muzzle speed (m/s). Slower than a real gun so the ball can be seen: at 3 degrees it carries about 200 m in
+## 1.5 s. Raise it for a flatter, faster shot.
+@export var muzzle_speed := 140.0
+## Random scatter (degrees) around the aim.
+@export var spread_deg := 0.5
+## A faint smoke trail so the ball can be followed.
+@export var ball_trail := true
+
+@export_group("Flash and smoke")
+@export var smoke_amount := 26
+@export var smoke_lifetime := 3.6
+## Overall size of the smoke puffs.
+@export var smoke_size := 1.0
+@export var flash_light_energy := 5.0
+@export var sound_dir := "res://assets/audio/cannon"
+@export var sound_volume_db := 0.0
+
+class Gun:
+	var node: Node3D
+	var side := 0                      # -1 port, +1 starboard
+	var muzzle := Vector3.ZERO         # ship (rig) frame
+	var base_pos := Vector3.ZERO       # the gun node's own resting position
+	var ready_at := 0.0
+	var fire_at := -1.0
+	var tween: Tween
+
+var _rig: Node3D
+var _wheel: Node
+var _guns: Array[Gun] = []
+var _time := 0.0
+var _open_shots := 0
+var _dry_t := 0.0
+var _count_t := 0.0
+var _shots_cache := -1
+var _cargo: Node
+var _ocean: Node
+var _own_rids: Array[RID] = []
+var _sounds: Array[AudioStream] = []
+var _puff_tex: ImageTexture
+var _smoke_mat: StandardMaterial3D
+var _smoke_ramp: GradientTexture1D
+var _smoke_scale: CurveTexture
+var _flash_mat: StandardMaterial3D
+var _flash_ramp: GradientTexture1D
+var _flash_scale: CurveTexture
+var _smoke_quad: QuadMesh
+var _flash_quad: QuadMesh
+
+
+func _ready() -> void:
+	_rig = get_parent() as Node3D
+	_wheel = _rig.get_node_or_null("ShipWheel") if _rig != null else null
+	if _wheel == null:
+		set_process(false)
+		set_process_unhandled_input(false)
+		return
+	_make_fx_resources()
+	_load_sounds()
+	_ocean = _rig.get_node_or_null(^"../Ocean")
+	# the ship's own nodes exist by now, but look them up after everything has settled
+	call_deferred("_collect")
+
+
+# ---------------------------------------------------------------- the guns
+
+func _collect() -> void:
+	var nodes: Array[Node3D] = []
+	for n in get_tree().get_nodes_in_group(group_name):
+		if n is Node3D and _rig.is_ancestor_of(n):
+			nodes.append(n as Node3D)
+	# the ship's own colliders: a ball leaving the muzzle must not hit its own hull
+	for c in _rig.find_children("*", "CollisionObject3D", true, false):
+		_own_rids.append((c as CollisionObject3D).get_rid())
+	var inv := _rig.global_transform.affine_inverse()
+	for n in nodes:
+		# one gun is one node: a barrel or carriage inside a gun node that is itself tagged is not another gun
+		var inside := false
+		var p := n.get_parent()
+		while p != null and p != _rig:
+			if nodes.has(p):
+				inside = true
+				break
+			p = p.get_parent()
+		if inside:
+			continue
+		var box := _box_in_rig(n, inv)
+		var c := box.get_center()
+		if absf(c.x) < 0.35:
+			continue          # on the centre line: a swivel gun, not part of a broadside
+		var g := Gun.new()
+		g.node = n
+		g.side = -1 if c.x < 0.0 else 1
+		g.muzzle = Vector3(box.position.x if g.side < 0 else box.end.x, c.y + box.size.y * 0.15, c.z)
+		g.base_pos = n.position
+		_guns.append(g)
+	_guns.sort_custom(func(a: Gun, b: Gun) -> bool: return a.muzzle.z < b.muzzle.z)     # bow first
+	if _guns.is_empty():
+		set_process(false)
+		set_process_unhandled_input(false)
+
+
+## A node's bounding box (all its meshes) in the ship's frame.
+func _box_in_rig(n: Node3D, inv: Transform3D) -> AABB:
+	var meshes: Array = n.find_children("*", "MeshInstance3D", true, false)
+	if n is MeshInstance3D:
+		meshes.append(n)
+	var have := false
+	var out := AABB()
+	for m in meshes:
+		var mi := m as MeshInstance3D
+		if mi.mesh == null:
+			continue
+		var bb: AABB = (inv * mi.global_transform) * mi.get_aabb()
+		if have:
+			out = out.merge(bb)
+		else:
+			out = bb
+			have = true
+	if not have:
+		var c := inv * n.global_position
+		out = AABB(c - Vector3(0.3, 0.3, 0.3), Vector3(0.6, 0.6, 0.6))
+	return out
+
+
+# ---------------------------------------------------------------- keys and reload
+
+func _held() -> bool:
+	return _wheel != null and bool(_wheel.get("held"))
+
+
+func _unhandled_input(e: InputEvent) -> void:
+	if not (e is InputEventKey and e.pressed and not e.echo):
+		return
+	if not _held():
+		return
+	var k: int = e.physical_keycode
+	if k == key_port:
+		_volley(-1)
+	elif k == key_starboard:
+		_volley(1)
+
+
+## Tell every loaded gun on a side to fire, bow to stern.
+func _volley(side: int) -> void:
+	var order := 0
+	for g in _guns:
+		if g.side != side or g.fire_at >= 0.0 or _time < g.ready_at:
+			continue
+		if not _take_shot():
+			_dry_t = 1.5
+			break
+		g.fire_at = _time + float(order) * ripple_step_s + randf() * ripple_jitter_s
+		g.ready_at = g.fire_at + reload_s
+		order += 1
+
+
+func _process(delta: float) -> void:
+	_time += delta
+	_dry_t = maxf(_dry_t - delta, 0.0)
+	_count_t -= delta
+	for g in _guns:
+		if g.fire_at >= 0.0 and _time >= g.fire_at:
+			g.fire_at = -1.0
+			_fire(g)
+
+
+# ---------------------------------------------------------------- ammunition
+
+func _cargo_system() -> Node:
+	if _cargo == null or not is_instance_valid(_cargo):
+		_cargo = get_tree().get_first_node_in_group("cargo_system")
+	return _cargo
+
+
+## One shot out of the open crate; a new crate comes out of the hold when it is empty. False if there is none.
+func _take_shot() -> bool:
+	if not use_ammo:
+		return true
+	var cargo = _cargo_system()
+	if cargo == null:
+		return true
+	if _open_shots <= 0:
+		if int(cargo.remove_from_hold(ammo_good, 1)) < 1:
+			return false
+		_open_shots = shots_per_crate
+	_open_shots -= 1
+	_count_t = 0.0
+	return true
+
+
+## Shots left (the open crate and the crates in the hold), or -1 when ammunition isn't counted.
+func shots_left() -> int:
+	if not use_ammo:
+		return -1
+	if _count_t > 0.0 and _shots_cache >= 0:
+		return _shots_cache
+	var cargo = _cargo_system()
+	if cargo == null:
+		return -1
+	_count_t = 0.25
+	_shots_cache = int(cargo.hold_counts().get(ammo_good, 0)) * shots_per_crate + _open_shots
+	return _shots_cache
+
+
+## The line ShipHelm adds to the keys at the foot of the screen.
+func hint_text() -> String:
+	if _guns.is_empty():
+		return ""
+	var count := [0, 0, 0, 0]      # port guns, port ready, starboard guns, starboard ready
+	for g in _guns:
+		var i := 0 if g.side < 0 else 2
+		count[i] += 1
+		if g.fire_at < 0.0 and _time >= g.ready_at:
+			count[i + 1] += 1
+	var t := "[%s] port guns %d/%d     [%s] starboard guns %d/%d" % [
+		OS.get_keycode_string(key_port), count[1], count[0],
+		OS.get_keycode_string(key_starboard), count[3], count[2]]
+	if _dry_t > 0.0 or shots_left() == 0:
+		t += "     (no shot in the hold)"
+	return t
+
+
+# ---------------------------------------------------------------- one shot
+
+func _fire(g: Gun) -> void:
+	if not is_instance_valid(g.node):
+		return
+	var xf := _rig.global_transform
+	var out_local := Vector3(float(g.side), 0.0, 0.0)
+	var dir_local := (out_local + Vector3(0.0, tan(deg_to_rad(elevation_deg)), 0.0)).normalized()
+	var pos := xf * g.muzzle
+	var dir := (xf.basis * dir_local).normalized()
+	_spawn_fx(pos, dir)
+	_launch_ball(pos, dir)
+	_recoil(g, (xf.basis * -out_local).normalized())
+	fired.emit(g.node, pos, dir)
+
+
+func _world() -> Node:
+	var p: Node = get_tree().current_scene
+	if p == null:
+		p = _rig.get_parent()
+	return p
+
+
+## The ball leaves at muzzle_speed along the aim (a little scattered) and carries the ship's own motion with it.
+func _launch_ball(pos: Vector3, dir: Vector3) -> void:
+	if not fire_balls:
+		return
+	var scatter := tan(deg_to_rad(spread_deg))
+	var d := (dir + Vector3(randf_range(-1.0, 1.0), randf_range(-0.5, 0.5), randf_range(-1.0, 1.0)) * scatter).normalized()
+	var v := d * muzzle_speed
+	if _rig.has_method("velocity_at"):
+		var carry: Vector3 = _rig.call("velocity_at", pos)
+		v += carry
+	Cannonball.launch(_world(), pos, v, _ocean, _own_rids, _rig, ball_trail)
+
+
+func _recoil(g: Gun, back_world: Vector3) -> void:
+	var parent := g.node.get_parent() as Node3D
+	if parent == null:
+		return
+	var off := parent.global_transform.basis.inverse() * (back_world * recoil_m)
+	if g.tween != null and g.tween.is_valid():
+		g.tween.kill()
+	g.node.position = g.base_pos
+	g.tween = create_tween()
+	g.tween.tween_property(g.node, "position", g.base_pos + off, recoil_out_s).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+	g.tween.tween_property(g.node, "position", g.base_pos, recoil_back_s).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+
+
+func _wind() -> Vector3:
+	var w := get_tree().get_first_node_in_group("wind")
+	if w != null and w.has_method("velocity"):
+		var v: Vector3 = w.velocity()
+		return Vector3(v.x, 0.0, v.z)
+	return Vector3.ZERO
+
+
+## Everything for one shot hangs on one node in the world (not on the ship), so the smoke stays where it was
+## fired as the ship sails on. The node's -Z is the way the shot goes.
+func _spawn_fx(pos: Vector3, dir: Vector3) -> void:
+	var parent := _world()
+	var root := Node3D.new()
+	root.name = "CannonShot"
+	parent.add_child(root)
+	root.global_transform = Transform3D(Basis.looking_at(dir, Vector3.UP), pos)
+	# unlit smoke, dimmed with the sun like the bow spray so it doesn't glow at night (set before the puffs are made)
+	var tint := Cannonball.sun_tint(_ocean)
+	_smoke_mat.albedo_color = Color(tint, tint, tint, 1.0)
+	# a one-shot burst is started only once it is in the scene: switched on before that it can be missed, which is
+	# why the first version's smoke came and went
+	var smoke := _make_smoke(_wind())
+	root.add_child(smoke)
+	smoke.emitting = true
+	var flash := _make_flash()
+	root.add_child(flash)
+	flash.emitting = true
+	var l := OmniLight3D.new()
+	l.light_color = Color(1.0, 0.68, 0.32)
+	l.light_energy = flash_light_energy
+	l.omni_range = 16.0
+	l.shadow_enabled = false
+	root.add_child(l)
+	l.position = Vector3(0.0, 0.0, -0.5)
+	var tw := l.create_tween()
+	tw.tween_property(l, "light_energy", 0.0, 0.16)
+	if not _sounds.is_empty():
+		var a := AudioStreamPlayer3D.new()
+		a.stream = _sounds[randi() % _sounds.size()]
+		a.volume_db = sound_volume_db
+		a.pitch_scale = randf_range(0.92, 1.08)
+		a.unit_size = 25.0
+		a.max_distance = 700.0
+		root.add_child(a)
+		a.play()
+	get_tree().create_timer(smoke_lifetime + 1.5).timeout.connect(root.queue_free)
+
+
+func _make_smoke(wind: Vector3) -> GPUParticles3D:
+	var p := GPUParticles3D.new()
+	p.name = "Smoke"
+	p.amount = smoke_amount
+	p.lifetime = smoke_lifetime
+	p.one_shot = true
+	p.explosiveness = 0.92
+	p.randomness = 0.6
+	p.local_coords = false
+	p.fixed_fps = 30
+	p.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	p.visibility_aabb = AABB(Vector3(-30.0, -10.0, -30.0), Vector3(60.0, 30.0, 60.0))
+	var pm := ParticleProcessMaterial.new()
+	pm.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_SPHERE
+	pm.emission_sphere_radius = 0.25
+	pm.direction = Vector3(0.0, 0.0, -1.0)
+	pm.spread = 32.0
+	pm.initial_velocity_min = 1.2
+	pm.initial_velocity_max = 3.4
+	pm.gravity = Vector3(0.0, 0.22, 0.0) + wind * 0.05        # smoke rises a little and leans downwind
+	pm.angle_min = -180.0
+	pm.angle_max = 180.0
+	pm.scale_min = 0.6 * smoke_size
+	pm.scale_max = 1.0 * smoke_size
+	pm.scale_curve = _smoke_scale
+	pm.color_ramp = _smoke_ramp
+	p.process_material = pm
+	p.draw_pass_1 = _smoke_quad
+	return p
+
+
+func _make_flash() -> GPUParticles3D:
+	var p := GPUParticles3D.new()
+	p.name = "Flash"
+	p.amount = 7
+	p.lifetime = 0.16
+	p.one_shot = true
+	p.explosiveness = 1.0
+	p.randomness = 0.4
+	p.local_coords = false
+	p.fixed_fps = 60
+	p.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	p.visibility_aabb = AABB(Vector3(-20.0, -10.0, -20.0), Vector3(40.0, 20.0, 40.0))
+	var pm := ParticleProcessMaterial.new()
+	pm.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_SPHERE
+	pm.emission_sphere_radius = 0.1
+	pm.direction = Vector3(0.0, 0.0, -1.0)
+	pm.spread = 22.0
+	pm.initial_velocity_min = 5.0
+	pm.initial_velocity_max = 11.0
+	pm.gravity = Vector3.ZERO
+	pm.angle_min = -180.0
+	pm.angle_max = 180.0
+	pm.scale_min = 0.6
+	pm.scale_max = 1.1
+	pm.scale_curve = _flash_scale
+	pm.color_ramp = _flash_ramp
+	p.process_material = pm
+	p.draw_pass_1 = _flash_quad
+	return p
+
+
+# ---------------------------------------------------------------- shared resources
+
+func _make_fx_resources() -> void:
+	_puff_tex = _make_puff_texture()
+	# smoke: soft grey puffs that swell as they drift and thin out (unlit, tinted by the sun each shot)
+	_smoke_mat = StandardMaterial3D.new()
+	_smoke_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	_smoke_mat.billboard_mode = BaseMaterial3D.BILLBOARD_PARTICLES
+	_smoke_mat.billboard_keep_scale = true
+	_smoke_mat.vertex_color_use_as_albedo = true
+	_smoke_mat.albedo_texture = _puff_tex
+	_smoke_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	_smoke_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	_smoke_quad = QuadMesh.new()
+	_smoke_quad.size = Vector2(2.0, 2.0)
+	_smoke_quad.material = _smoke_mat
+	var sg := Gradient.new()
+	sg.offsets = PackedFloat32Array([0.0, 0.06, 0.5, 1.0])
+	sg.colors = PackedColorArray([
+		Color(0.95, 0.93, 0.88, 0.0), Color(0.95, 0.93, 0.88, 0.85),
+		Color(0.78, 0.78, 0.78, 0.55), Color(0.62, 0.62, 0.62, 0.0)])
+	_smoke_ramp = GradientTexture1D.new()
+	_smoke_ramp.gradient = sg
+	var sc := Curve.new()
+	sc.add_point(Vector2(0.0, 0.35))
+	sc.add_point(Vector2(0.3, 0.9))
+	sc.add_point(Vector2(1.0, 1.6))
+	_smoke_scale = CurveTexture.new()
+	_smoke_scale.curve = sc
+	# flash: a few fast additive licks of fire
+	_flash_mat = StandardMaterial3D.new()
+	_flash_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	_flash_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	_flash_mat.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
+	_flash_mat.billboard_mode = BaseMaterial3D.BILLBOARD_PARTICLES
+	_flash_mat.billboard_keep_scale = true
+	_flash_mat.vertex_color_use_as_albedo = true
+	_flash_mat.albedo_texture = _puff_tex
+	_flash_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	_flash_quad = QuadMesh.new()
+	_flash_quad.size = Vector2(0.9, 0.9)
+	_flash_quad.material = _flash_mat
+	var fg := Gradient.new()
+	fg.offsets = PackedFloat32Array([0.0, 0.4, 1.0])
+	fg.colors = PackedColorArray([
+		Color(1.0, 0.95, 0.7, 1.0), Color(1.0, 0.55, 0.15, 0.9), Color(0.6, 0.2, 0.05, 0.0)])
+	_flash_ramp = GradientTexture1D.new()
+	_flash_ramp.gradient = fg
+	var fc := Curve.new()
+	fc.add_point(Vector2(0.0, 0.6))
+	fc.add_point(Vector2(0.4, 1.0))
+	fc.add_point(Vector2(1.0, 0.4))
+	_flash_scale = CurveTexture.new()
+	_flash_scale.curve = fc
+
+
+## A soft round puff with a little noise in it, so the smoke is not a row of perfect circles.
+func _make_puff_texture() -> ImageTexture:
+	var n := 64
+	var img := Image.create(n, n, false, Image.FORMAT_RGBA8)
+	var noise := FastNoiseLite.new()
+	noise.seed = 7
+	noise.frequency = 0.045
+	for y in n:
+		for x in n:
+			var dx := (float(x) + 0.5) / float(n) * 2.0 - 1.0
+			var dy := (float(y) + 0.5) / float(n) * 2.0 - 1.0
+			var r := sqrt(dx * dx + dy * dy)
+			var nv := noise.get_noise_2d(float(x), float(y)) * 0.5 + 0.5
+			var a := smoothstep(0.0, 0.7, clampf(1.0 - r, 0.0, 1.0)) * (0.65 + 0.5 * nv)
+			img.set_pixel(x, y, Color(1.0, 1.0, 1.0, clampf(a, 0.0, 1.0)))
+	return ImageTexture.create_from_image(img)
+
+
+func _load_sounds() -> void:
+	var d := DirAccess.open(sound_dir)
+	if d == null:
+		return
+	var seen := {}
+	for f in d.get_files():
+		var n := f.trim_suffix(".import").trim_suffix(".remap")
+		if seen.has(n) or not (n.ends_with(".ogg") or n.ends_with(".wav") or n.ends_with(".mp3")):
+			continue
+		seen[n] = true
+		var s := load(sound_dir + "/" + n) as AudioStream
+		if s != null:
+			_sounds.append(s)

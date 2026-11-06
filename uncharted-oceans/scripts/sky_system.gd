@@ -16,6 +16,11 @@ extends Node
 ## smeared glow (veiled); thin high cloud near it can draw the 22 degree ring. The cloud cover at the moon is read back
 ## from the same noise the shader draws the clouds with, so what is lit and what you see agree.
 ##
+## Quality: volumetric_quality is the graphics tier (GameSettings sets it from the pause menu): 0 Low, 1 Medium, 2 High.
+## The fair-weather clouds are a flat layer drawn in the sky shader; on High (volumetric_cumulus) they become real
+## raymarched cumulus, and the storms march with more steps (Low marches them with fewer and no fine detail). On every
+## tier the clouds tint the light under them a little (cloud_underlight).
+##
 ## Debugging: F1 swaps between the shader sky and a plain built-in sky fed the same colours, and the text at the
 ## bottom left shows what the system is feeding the renderer. Turn debug_overlay off when it is no longer needed.
 
@@ -23,6 +28,9 @@ const Palette := preload("res://scripts/sky_palette.gd")
 const MAX_STORMS := 3
 ## The tilt of the earth's axis (23.44 degrees), radians.
 const OBLIQUITY := 0.409105
+## One unit of the cloud noise per this many metres at cloud_scale 1: the same number as cu_xz_scale in
+## cumulus_volume.gdshaderinc (1 / (1.4 * 36000)), so the CPU reads the clouds where the shader draws them.
+const CUMULUS_XZ := 1.0 / 50400.0
 const MOON_NAMES: Array[String] = ["new moon", "waxing crescent", "first quarter", "waxing gibbous", "full moon", "waning gibbous", "last quarter", "waning crescent"]
 
 ## Fired when a storm throws lightning. Thunder reaches the observer thunder_delay_s later (distance / 343 m/s).
@@ -60,6 +68,9 @@ signal lightning(cell: StormCell, distance_m: float, thunder_delay_s: float)
 @export_range(0.0, 360.0) var wind_dir_deg := 70.0
 @export var cloud_speed := 0.004
 @export var cloud_scale := 1.4
+## Under cloud the ambient light and the fog take on a little of the soft cloud colour instead of the clear-sky blue
+## (sunlight that has come through or round the cloud lights the air beneath it). 0 = off. Works on every quality tier.
+@export_range(0.0, 1.0) var cloud_underlight := 0.4
 
 @export_group("Moon")
 ## Shows the moon: sky disc, moonlight, moonlit clouds. Off = no moon at all.
@@ -87,11 +98,25 @@ signal lightning(cell: StormCell, distance_m: float, thunder_delay_s: float)
 @export_group("Volumetric storms")
 ## Draw storm clouds as real raymarched volumes (costs GPU time). Off = the painted storm wall. F2 flips it in game.
 @export var volumetric_storms := true
-## How many steps each ray is marched: 0 = low (12), 1 = medium (18), 2 = high (26). Only pixels looking at a storm cost anything.
+## The graphics tier. How many steps each storm ray is marched: 0 = low (12, and no fine detail), 1 = medium (18),
+## 2 = high (26, and the fair-weather clouds are raymarched too: see Volumetric cumulus). Only pixels looking at a
+## storm cost anything for the storms.
 @export_enum("Low:0", "Medium:1", "High:2") var volumetric_quality := 1
 ## Keep the painted storm wall behind the raymarched cloud (off = the volumetric cloud alone). The painted wall is part of
 ## the sky, so any land at all hides it, even land farther away than the storm; off by default for that reason.
 @export var volumetric_paint_behind := false
+
+@export_group("Volumetric cumulus")
+## Fair-weather clouds as real raymarched volumes. Only on the High tier (volumetric_quality = 2); off = the flat layer.
+## Every pixel of sky marches the layer, so this is the costly part of High.
+@export var volumetric_cumulus := true
+## Altitude of the cloud bottoms and tops, metres.
+@export var cumulus_base_m := 1500.0
+@export var cumulus_top_m := 2900.0
+## How thick the cloud is: more = darker, more solid cores.
+@export_range(0.0005, 0.01, 0.0001) var cumulus_density := 0.0028
+## Steps each ray is marched through the layer. More = smoother and slower.
+@export_range(8, 40, 1) var cumulus_steps := 28
 
 @export_group("Rendering")
 ## The custom sky shader. Off = the built-in sky with the same colours (no clouds, no stars, no storms).
@@ -385,6 +410,10 @@ func _tick_vol_ready(delta: float) -> void:
 	if _vol_wait > 4.0:
 		_vol_ready = true
 
+## True when the raymarched cumulus are what the shader is drawing: the High tier, and the 3D noise is ready.
+func cumulus_active() -> bool:
+	return volumetric_cumulus and use_shader_sky and _vol_ready and volumetric_quality >= 2
+
 # ---------------------------------------------------------------- per frame
 
 func _process(delta: float) -> void:
@@ -533,10 +562,19 @@ func _noise_at(uv: Vector2) -> float:
 	var b := lerpf(_noise_img.get_pixel(x0, y1).r, _noise_img.get_pixel(x1, y1).r, tx)
 	return lerpf(a, b, ty)
 
-## Density of the low cloud layer in a sky direction: the same sums as the shader's low clouds.
+## Density of the low cloud layer in a sky direction: the same sums as the shader's low clouds (the flat layer, or on
+## the High tier the raymarched cumulus judged at the middle of their height).
 func _cloud_low(dir: Vector3) -> float:
 	if dir.y <= 0.0:
 		return 0.0
+	if cumulus_active():
+		var mid_m := 0.5 * (cumulus_base_m + cumulus_top_m) - 12.0
+		var uvm := Vector2(dir.x, dir.z) * (mid_m / maxf(dir.y, 0.03)) * (cloud_scale * CUMULUS_XZ) + _wind_off
+		var nm := _noise_at(uvm) * 0.8 + _noise_at(uvm * 3.1 + Vector2(0.37, 0.11)) * 0.2
+		var thm := lerpf(0.66, 0.36, coverage)
+		var dm := smoothstep(thm, thm + 0.30, nm)
+		dm = lerpf(dm, 0.85 + 0.15 * nm, overcast)
+		return dm * smoothstep(0.02, 0.08, dir.y)
 	var uv := Vector2(dir.x, dir.z) / (dir.y + 0.10) * 0.10 * cloud_scale + _wind_off
 	var n := _noise_at(uv) * 0.8 + _noise_at(uv * 3.1 + Vector2(0.37, 0.11)) * 0.2
 	var thr := lerpf(0.66, 0.36, coverage)
@@ -618,6 +656,9 @@ func _apply() -> void:
 	_mat.set_shader_parameter("cloud_lit_color", _tone(p["cloud_lit"], o * 0.5, s * 0.55))
 	_mat.set_shader_parameter("cloud_shade_color", _tone(mid.darkened(0.35), o * 0.4 + s * 0.3, s * 0.4))
 	_mat.set_shader_parameter("cirrus_color", p["cirrus"])
+	_mat.set_shader_parameter("cloud_accent_color", _tone(p["cloud_accent"], o * 0.5, s * 0.55))
+	_mat.set_shader_parameter("cloud_dark_color", _tone(p["cloud_dark"], o * 0.4 + s * 0.3, s * 0.4))
+	_mat.set_shader_parameter("sunset_k", float(p["sunset_k"]) * (1.0 - o * 0.4))
 	_mat.set_shader_parameter("sun_color", Vector3(core_lin.r, core_lin.g, core_lin.b) * 3.0)
 
 	_mat.set_shader_parameter("glow_strength", float(p["glow_strength"]) * (1.0 - o * 0.75))
@@ -640,12 +681,22 @@ func _apply() -> void:
 	var vol_q := clampi(volumetric_quality, 0, 2)
 	_mat.set_shader_parameter("vol_enabled", vol_on)
 	_mat.set_shader_parameter("vol_quarter", vol_q == 0)
+	_mat.set_shader_parameter("vol_lite", vol_q == 0)
 	_mat.set_shader_parameter("vol_paint_behind", volumetric_paint_behind)
 	_mat.set_shader_parameter("vol_steps", [12, 18, 26][vol_q])
 	_mat.set_shader_parameter("vol_max_dist", storm_view_range_m * 1.2)
 	_mat.set_shader_parameter("vol_haze_m", storm_view_range_m * 0.65)
 	var vw := deg_to_rad(wind_dir_deg)
 	_mat.set_shader_parameter("vol_drift", Vector3(sin(vw), 0.0, -cos(vw)) * _vol_time * 0.0004)
+
+	# ---- raymarched cumulus (the High tier; the shader keeps the flat layer when this is off) ----
+	_mat.set_shader_parameter("cu_enabled", cumulus_active())
+	_mat.set_shader_parameter("cu_steps", cumulus_steps)
+	_mat.set_shader_parameter("cu_base_m", cumulus_base_m)
+	_mat.set_shader_parameter("cu_top_m", maxf(cumulus_top_m, cumulus_base_m + 100.0))
+	_mat.set_shader_parameter("cu_sigma", cumulus_density)
+	_mat.set_shader_parameter("cu_max_dist", minf(storm_view_range_m * 1.3, 60000.0))
+	_mat.set_shader_parameter("cu_haze_m", storm_view_range_m * 0.45)
 
 	_mat.set_shader_parameter("moon_dir", md)
 	_mat.set_shader_parameter("moon_right", axes[0])
@@ -691,14 +742,21 @@ func _apply() -> void:
 		var lc: Color = core.lerp(Color.WHITE, 0.3)
 		sun.light_color = _tone(lc, gray_amt * 0.8, 0.0).lerp(moon_light_color, w_m)
 
+	# light under the clouds: sky light that has come through or round the cloud is the soft cloud colour, not the
+	# clear-sky blue (daytime only; it is every tier's cheap version of the airy look)
+	var under_k := clampf(coverage * 0.55 + overcast, 0.0, 1.0) * cloud_underlight * smoothstep(-3.0, 10.0, e)
+	var under_c := _tone(p["cloud_lit"], 0.5, 0.25)
+
 	var moon_amb_k := m_str * night_k
 	var amb := 0.3 + 0.6 * clampf(float(p["light_energy"]), 0.0, 1.0) + flash_light * 0.9 + moon_ambient * moon_amb_k
 	if _env:
 		if not ambient_from_sky:
 			var ac := mid.lerp(hor, 0.5).lerp(Color(0.7, 0.8, 1.0), clampf(flash_light, 0.0, 1.0) * 0.6)
+			ac = ac.lerp(under_c, under_k * 0.5)
 			_env.ambient_light_color = ac.lerp(moon_ambient_color, clampf(moon_amb_k * 0.85, 0.0, 1.0))
 			_env.ambient_light_energy = amb
 		var fog_c := hor.lerp(mid, 0.15)
+		fog_c = fog_c.lerp(under_c, under_k * 0.4)
 		_env.fog_light_color = fog_c.lerp(moon_ambient_color.lightened(0.1), clampf(moon_amb_k * 0.6, 0.0, 1.0))
 		_env.fog_density = lerpf(0.00018, 0.0011, clampf(s * 0.8 + o * 0.25, 0.0, 1.0))
 
@@ -766,8 +824,11 @@ func _update_debug() -> void:
 	if moon_enabled:
 		moon_line = "moon: %s (day %.1f)   %+.0f deg   moonlight %.2f   cloud over moon %.2f   ring %.2f" % [
 			phase_name(moon_phase), moon_age_days(), moon_elevation_deg(), _last_moon_str, _moon_cloud, _moon_ring]
-	_dbg.text = "SKY DEBUG   F1 = swap sky renderer   F2 = volumetric storms on/off\nrenderer: %s   ambient: %s\nsun %+.1f deg   light %.2f   ambient %.2f\nzenith #%s   horizon #%s\n%s\n%s" % [
+	var tier_name: String = ["Low", "Medium", "High"][clampi(volumetric_quality, 0, 2)]
+	var cloud_line := "raymarched cumulus" if cumulus_active() else "flat layer"
+	_dbg.text = "SKY DEBUG   F1 = swap sky renderer   F2 = volumetric storms on/off\nrenderer: %s   ambient: %s   quality: %s   clouds: %s\nsun %+.1f deg   light %.2f   ambient %.2f\nzenith #%s   horizon #%s\n%s\n%s" % [
 		"custom shader" if use_shader_sky else "built-in (same colours)",
 		"sky cubemap" if ambient_from_sky else "single colour",
+		tier_name, cloud_line,
 		sun_elevation_deg(), _last_energy, _last_ambient,
 		_last_zen.to_html(false), _last_hor.to_html(false), moon_line, storm_line]

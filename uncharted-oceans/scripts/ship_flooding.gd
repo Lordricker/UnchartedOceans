@@ -154,6 +154,14 @@ var _hb := {}                       # waterline outline (Brig extras), cached
 func _ready() -> void:
 	_rig = get_parent() as Node3D
 	_motion = _rig
+	# this ship's model node (ship_motion's ship_path) and class numbers; the brig's defaults above otherwise
+	var sp = _rig.get("ship_path")
+	if sp is NodePath and not (sp as NodePath).is_empty():
+		ship_path = NodePath("../" + String(sp))
+	var fc = _rig.get("ship_class")
+	var fd: Dictionary = ShipClasses.data(int(fc) if fc != null else ShipClasses.Size.MEDIUM).get("flooding", {})
+	for k in fd.keys():
+		set(k, fd[k])
 	_ocean = get_node_or_null(ocean_path) as Ocean
 	if _ocean == null:
 		push_warning("ship_flooding: no Ocean at %s; holes won't take water" % ocean_path)

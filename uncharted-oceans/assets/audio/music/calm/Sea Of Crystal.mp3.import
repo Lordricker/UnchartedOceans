@@ -1,0 +1,19 @@
+[remap]
+
+importer="mp3"
+type="AudioStreamMP3"
+uid="uid://dcl701xmyn5dx"
+path="res://.godot/imported/Sea Of Crystal.mp3-62267aa581bbeaf03bd7fe55d7cb9192.mp3str"
+
+[deps]
+
+source_file="res://assets/audio/music/calm/Sea Of Crystal.mp3"
+dest_files=["res://.godot/imported/Sea Of Crystal.mp3-62267aa581bbeaf03bd7fe55d7cb9192.mp3str"]
+
+[params]
+
+loop=false
+loop_offset=0
+bpm=0
+beat_count=0
+bar_beats=4

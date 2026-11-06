@@ -99,6 +99,9 @@ var _aim := 0                     # 0 nothing, 1 the coil, 2 the glass
 
 func _ready() -> void:
 	_ship = get_parent() as Node3D
+	var ld: Dictionary = ShipClasses.data(_ship_class()).get("log_line", {})
+	for k in ld.keys():
+		set(k, ld[k])
 	_k = block_spacing / knot_spacing_m
 	_anchor = _ship.find_child(anchor_name, true, false) as Node3D
 	_coil = _ship.find_child(coil_name, true, false) as MeshInstance3D
@@ -450,3 +453,8 @@ func _process(delta: float) -> void:
 	Outline.set_on(_coil, a == 1)
 	for m in _glass_parts:
 		m.material_overlay = Outline.material() if a == 2 else null
+
+## The ship's size class (ShipClasses.Size), for the class's own numbers.
+func _ship_class() -> int:
+	var c = _ship.get("ship_class")
+	return int(c) if c != null else ShipClasses.Size.MEDIUM

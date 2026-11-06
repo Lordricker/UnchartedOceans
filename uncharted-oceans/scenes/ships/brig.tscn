@@ -1,0 +1,33 @@
+[gd_scene format=3]
+
+[ext_resource type="PackedScene" uid="uid://d2usvdb32io83" path="res://assets/ships/brig/Brig.glb" id="1_brig"]
+[ext_resource type="Script" uid="uid://333hynt1dnxh" path="res://scripts/ship_ladder.gd" id="2_ladder"]
+
+[sub_resource type="BoxShape3D" id="LadderBoxPort"]
+size = Vector3(0.8, 2.4159026, 0.57373047)
+
+[sub_resource type="BoxShape3D" id="LadderBoxStbd"]
+size = Vector3(0.8, 2.4159026, 0.57373047)
+
+[node name="BrigShip" type="Node3D"]
+
+[node name="Brig" parent="." instance=ExtResource("1_brig")]
+transform = Transform3D(-1, 0, 2.5351817e-06, 0, 1, 0, -2.5351817e-06, 0, -1, 0, 0, 0)
+
+[node name="Climbing" type="Node3D" parent="Brig"]
+
+[node name="LadderPort" type="Area3D" parent="Brig/Climbing"]
+transform = Transform3D(0, 0, -1, 0, 1, 0, 1, 0, 0, 3.15, 0.2, 1.3)
+script = ExtResource("2_ladder")
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="Brig/Climbing/LadderPort"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1.1920929e-07, 1.1828597, -0.41577148)
+shape = SubResource("LadderBoxPort")
+
+[node name="LadderStbd" type="Area3D" parent="Brig/Climbing"]
+transform = Transform3D(0, 0, 1, 0, 1, 0, -1, 0, 0, -3.15, 0.2, 1.3)
+script = ExtResource("2_ladder")
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="Brig/Climbing/LadderStbd"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -2.026558e-06, 0.8, -0.26374102)
+shape = SubResource("LadderBoxStbd")

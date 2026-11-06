@@ -48,6 +48,11 @@ func _ready() -> void:
 		set_process(false)
 		set_physics_process(false)
 		return
+	var wd: Dictionary = ShipClasses.data(_ship_class()).get("windsock", {})
+	pole_height = float(wd.get("pole_height", pole_height))
+	flag_length = float(wd.get("flag_length", flag_length))
+	hoist_height = float(wd.get("hoist_height", hoist_height))
+	tail_height = float(wd.get("tail_height", tail_height))
 	position = _mount_point()
 	_build()
 
@@ -225,3 +230,8 @@ func _process(delta: float) -> void:
 		var pitch := -(droop / float(n)) + sin(_t * 5.5 - i * 0.8) * (0.6 + 1.6 * _ext)
 		var yaw := sin(_t * 8.0 - i * 1.0) * ripple * k * 0.55
 		_segs[i].rotation = Vector3(deg_to_rad(pitch), deg_to_rad(yaw), 0.0)
+
+## The ship's size class (ShipClasses.Size), for the class's own vane size.
+func _ship_class() -> int:
+	var c = _ship.get("ship_class")
+	return int(c) if c != null else ShipClasses.Size.MEDIUM

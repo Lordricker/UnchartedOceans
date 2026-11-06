@@ -44,7 +44,13 @@ const SURF_FILES := ["surf_01.ogg", "surf_02.ogg", "surf_03.ogg", "surf_04.ogg"]
 const OPEN_HZ := 20500.0
 
 @export var enabled := true
-## Level of the whole ambience bus, dB.
+## The player's ambient sound slider, 0..1 (GameSettings sets it from the pause menu). It turns ambience_db down from there.
+@export_range(0.0, 1.0, 0.01) var ambience_volume := 1.0:
+	set(v):
+		ambience_volume = clampf(v, 0.0, 1.0)
+		_apply_bus_volume()
+
+## Level of the whole ambience bus at full slider, dB.
 @export var ambience_db := -3.0:
 	set(v):
 		ambience_db = v
@@ -181,7 +187,7 @@ func _ensure_buses() -> void:
 func _apply_bus_volume() -> void:
 	var i := AudioServer.get_bus_index(BUS_AMBIENCE)
 	if i >= 0:
-		AudioServer.set_bus_volume_db(i, ambience_db)
+		AudioServer.set_bus_volume_db(i, ambience_db + (linear_to_db(ambience_volume) if ambience_volume > 0.001 else -80.0))
 
 
 func _load_stream(file: String) -> AudioStream:

@@ -11,9 +11,148 @@ const NAMES := ["small", "medium", "large"]
 ## length / beam in metres (hull, bow to stern and side to side); max_speed in m/s through the water
 ## (the brig's hull speed is about 5.3 m/s); max_heading in degrees off the berth's heading.
 const DATA := [
-	{"length": 13.0, "beam": 4.4, "max_speed": 1.5, "max_heading": 28.0},   # small: sloop / cutter
+	{   # small: the cutter (hull only, bowsprit and boom not counted)
+		"length": 11.0, "beam": 3.1, "max_speed": 1.5, "max_heading": 28.0,
+		# Lies on the outer edge of the berth's light (metres further from the pier than the usual fender gap),
+		# so the gangway to the 1.85 m quay is long and gentle for a low deck.
+		"slot_offset": 1.55,
+		# ship_motion.gd: how the hull follows the sea. An 11 m, ~11 tonne boat drops into a trough and heels to the wave slope almost
+		# as fast as the water moves; the brig's heavy-ship springs (heave 0.7 s, pitch 0.9 s, roll 1.3 s) left her hanging above falling
+		# waves (keel clear of the water 19% of the time in a storm sea, deck under at a sample point 9%). Measured with tests/cutter_wave_probe.gd.
+		"motion": {"heave_lag": 0.25, "rise_lag": 0.12, "max_sink": 0.3, "pitch_lag": 0.35, "roll_lag": 0.45},
+		# ship_anchor.gd: a small capstan on the starboard waist (no coil of cable)
+		"anchor": {"capstan_pos": Vector3(1.05, 0.85, -1.6), "capstan_radius": 0.26, "coil_pos": Vector3(0.0, -9.0, 0.0), "bar_reach": 0.5, "bar_below_top": 0.1},
+		# ship_log_line.gd: the sand glass stands on the transom rim, from the LogLine marker (the marker's own frame)
+		"log_line": {"glass_offset": Vector3(-0.45, 0.09, -0.065), "glass_scale": 1.2},
+		# ship_flooding.gd: the hold grid is the open well and the cabin; the water physics are an 11 tonne boat's
+		"flooding": {"grid_bottom": -1.3, "grid_top": 0.8, "grid_half_width": 1.7, "grid_z_min": -6.0, "grid_z_max": 6.2,
+			"waterplane_area": 18.0, "displacement": 11.0, "pump_rate": 0.15, "cargo_swamp_sink": 0.75, "max_sink": 1.0,
+			"gm_transverse": 0.6, "gm_longitudinal": 10.0},
+		# The wind-vane (ship_windsock.gd) stands on the "Windsock" marker: a lower staff and a smaller pennant, clear of the boom.
+		"windsock": {"pole_height": 0.65, "flag_length": 0.8, "hoist_height": 0.18, "tail_height": 0.05},
+		# Steering: a tiller (ship_wheel.gd tiller mode). The node is a child of the rudder; the tiller swings +-max_turn_deg, 1:1 with the rudder.
+		"helm": {"type": "tiller", "node": "Tiller", "max_turn_deg": 32.0, "degrees_per_pixel": 0.1, "rudder_max_deg": 32.0},
+		# Rig numbers for ship_sails.gd (ship frame, bow is -z, z = Blender y). One mast with a boom sail (the "spanker"), a jib and a
+		# staysail. The boom and gaff hinge on the gooseneck, 0.15 m abaft the mast; its pin rail is the one round the mast.
+		"rig": {
+			"spanker_pivot_z": -1.55,
+			"rail_z": [-1.4, -1.4], "rail_pin_y": 1.42, "deck_y": [0.85, 0.85],
+			"pin_x": {"Jib": -0.3, "Staysail": 0.0, "Spanker": 0.3},
+			"braces": false,
+			# The haul ropes are belayed on the fore row of the pin rail (z -2.0) and run straight up the fore face of the mast.
+			"pin_z": {"Jib": -2.0, "Staysail": -2.0, "Spanker": -2.0},
+			# Each haul rope: from the sail's clew or leech through these points (ship frame), then down to its pin. "head" is the sail's head,
+			# a Vector3 is a fixed block, ["spar", v] a point on the gaff that swings with the boom. The blocks are on the hounds
+			# (jib, staysail) and at the topmast head (the peak halyard, which ends at the peak of the gaff).
+			"haul": {
+				"Jib": ["head", Vector3(-0.055, 7.88, -1.8)],
+				"Staysail": ["head", Vector3(0.055, 7.88, -1.8)],
+				"Spanker": [["spar", Vector3(0.0, 8.69, 2.88)], Vector3(0.28, 10.0, -1.84)],
+			},
+			# Passive lines that follow the spars and sails instead of being part of the model (so they are never left hanging when the
+			# boom or a headsail swings): the mainsheet (two falls from the boom-end block to the block on the horse, and the tail to the
+			# cleat) and the headsail sheets, which go slack on the windward side. See ShipSails.route_point.
+			"rope_lines": [
+				{"pts": [["spar", Vector3(-0.03, 2.52, 5.0)], ["slide", Vector3(-0.03, 1.55, 5.2), Vector3(0.0, 2.52, 5.0), 0.9, 13.5, 0.25]]},
+				{"pts": [["spar", Vector3(0.03, 2.52, 5.0)], ["slide", Vector3(0.03, 1.55, 5.2), Vector3(0.0, 2.52, 5.0), 0.9, 13.5, 0.25]]},
+				{"pts": [["slide", Vector3(0.0, 1.55, 5.2), Vector3(0.0, 2.52, 5.0), 0.9, 13.5, 0.25], Vector3(0.94, 0.95, 4.0)]},
+				{"sail": "Jib", "side": -1, "pts": [["clew", "Jib"], Vector3(-1.11, 0.95, -0.9)]},
+				{"sail": "Jib", "side": 1, "pts": [["clew", "Jib"], Vector3(1.11, 0.95, -0.9)]},
+				{"sail": "Staysail", "side": -1, "pts": [["clew", "Staysail"], Vector3(-0.62, 0.97, -2.35), Vector3(-0.7, 0.95, -1.5)]},
+				{"sail": "Staysail", "side": 1, "pts": [["clew", "Staysail"], Vector3(0.62, 0.97, -2.35), Vector3(0.7, 0.95, -1.5)]},
+			],
+			# Fittings that ride the horse (a node of the model, moved every frame): the mainsheet block follows the boom-end block across the bar.
+			"sliders": [{"node": "Sheet_Block", "rest": Vector3(0.0, 1.55, 5.2), "track": Vector3(0.0, 2.52, 5.0), "half": 0.9, "arc": 13.5, "drop": 0.25}],
+		},
+		# Gangway, ship-local (x across to port, y up): flat on the quay, down to the rail, over the rail, down onto the deck.
+		# It comes aboard between the two forward main shrouds (z = Blender y).
+		"gangway": [Vector2(-4.15, 1.92), Vector2(-3.3, 1.92), Vector2(-1.55, 1.45), Vector2(-1.3, 1.45), Vector2(-0.75, 0.92)],
+		"gangway_z": -2.07, "gangway_width": 0.6, "gangway_min_y": 1.15,
+		# Mooring cleats on the port rail (ship-local x, height, z) and the bollard each line goes to.
+		"lines": [[Vector3(-0.8, 1.5, -4.4), 0], [Vector3(-1.28, 1.38, -3.0), 2], [Vector3(-1.43, 1.27, 2.0), 1], [Vector3(-1.15, 1.31, 5.1), 3]],
+		# Keel footprint (ship-local x, z, depth below the waterline): the cutter draws about 1.3 m.
+		"foot": [Vector3(0, -5.4, 0.4), Vector3(0, -4.2, 1.0), Vector3(0, -3.2, 1.2), Vector3(0, -2.0, 1.3), Vector3(0, 0, 1.3),
+			Vector3(0, 2.5, 1.3), Vector3(0, 4.0, 1.25), Vector3(0, 5.3, 1.15),
+			Vector3(-0.9, -3.0, 0.35), Vector3(0.9, -3.0, 0.35), Vector3(-1.1, 0.0, 0.4), Vector3(1.1, 0.0, 0.4),
+			Vector3(-0.9, 4.0, 0.45), Vector3(0.9, 4.0, 0.45)],
+	},
 	{"length": 19.0, "beam": 7.0, "max_speed": 1.3, "max_heading": 25.0},   # medium: the merchant brig
 	{"length": 32.0, "beam": 9.5, "max_speed": 1.2, "max_heading": 20.0},   # large: frigate / big merchantman
+	{   # 3 = the two-masted gaff schooner (SchoonerShip.blend). A 15.4 m hull, so she berths as a MEDIUM ship ("size_class") but has her own rig.
+		# Measured in the model's Blender frame, then (x, y, z) = (Blender x, Blender z, Blender y) here: bow is -z, port is -x, deck 1.15 m up.
+		"length": 15.6, "beam": 4.5, "max_speed": 1.5, "max_heading": 26.0, "size_class": 1,
+		"slot_offset": 0.8,
+		"motion": {"heave_lag": 0.4, "rise_lag": 0.18, "max_sink": 0.35, "pitch_lag": 0.55, "roll_lag": 0.8},
+		# no clickable capstan yet: the schooner has a horizontal windlass in the bows, not the brig's carved-out capstan
+		"anchor": {"fittings_name": "NoCapstanMesh"},
+		"log_line": {"glass_offset": Vector3(-0.45, 0.09, -0.065), "glass_scale": 1.2},
+		# The wind-vane (ship_windsock.gd) stands on the "Windsock" marker at the aft starboard corner of the skylight: a short staff and a small pennant, clear of the booms.
+		"windsock": {"pole_height": 0.7, "flag_length": 0.9, "hoist_height": 0.2, "tail_height": 0.05},
+		"flooding": {"grid_bottom": -1.3, "grid_top": 1.1, "grid_half_width": 2.0, "grid_z_min": -7.0, "grid_z_max": 7.3,
+			"waterplane_area": 36.0, "displacement": 55.0, "pump_rate": 0.3, "cargo_swamp_sink": 0.9, "max_sink": 1.6,
+			"gm_transverse": 0.8, "gm_longitudinal": 14.0},
+		# Rig numbers for ship_sails.gd. Two gaff-rigged masts (each with a boom, a gaff and a gaff topsail that swing together), a staysail,
+		# a jib and a flying jib. The node names are the ones in Schooner.glb (tools/schooner_merge/02_build.py KEEP): Sail_Fore, Fore_Boom ...
+		# The glb is flat (no parent / child), so "boom_parts" lists what swings with each boom. The topsails are plain meshes: they swing with
+		# the boom and are hidden when their sail is furled. The pins are on the pin rails round each mast (x +-0.64, at the mast).
+		# Ship frame: (x, y, z) = (Blender x, Blender z, Blender y), bow is -z.
+		"rig": {
+			"rail_z": [-3.6, 1.8], "rail_pin_y": 2.1, "deck_y": [1.15, 1.15], "braces": false,
+			"pin_x": {"FlyingJib": -0.64, "Jib": -0.64, "Staysail": 0.64, "ForeSail": 0.64, "MainSail": -0.64},
+			"pin_z": {"FlyingJib": -3.85, "Jib": -3.5, "Staysail": -3.85, "ForeSail": -3.5, "MainSail": 1.7},
+			# [id, node, yard, mast, label, pin x, kind (1 = fore-and-aft), reefable, boom]. A sail with a boom swings with it; the first sail
+			# listed for a boom steers its swing.
+			"sails": [
+				["FlyingJib", "Sail_FlyingJib", "", 0, "Flying jib", -0.64, 1, false, ""],
+				["Jib", "Sail_Jib", "", 0, "Jib", -0.64, 1, false, ""],
+				["Staysail", "Sail_ForeStaysail", "", 0, "Fore staysail", 0.64, 1, false, ""],
+				["ForeSail", "Sail_Fore", "", 0, "Foresail", 0.64, 1, false, "Fore_Boom"],
+				["MainSail", "Sail_Main", "", 1, "Mainsail", -0.64, 1, false, "Main_Boom"],
+			],
+			# where each boom turns: on the mast (ship frame z), and the separate nodes that swing with it
+			"booms": {"Fore_Boom": -3.45, "Main_Boom": 2.05},
+			# the block at each headsail's clew is a node of the model that the game keeps on the clew, so the sheet always ends in it
+			"clew_blocks": {"Jib": "Clew_Block_Jib", "Staysail": "Clew_Block_Staysail", "FlyingJib": "Clew_Block_FlyingJib"},
+			"boom_parts": {"Fore_Boom": ["Fore_Gaff", "Fore_Topsail"], "Main_Boom": ["Main_Gaff", "Main_Topsail"]},
+			# Haul ropes: from the sail ("head" = its highest point: the peak of a gaff sail) up to a block at the masthead, then down to the pin.
+			"haul": {
+				"FlyingJib": ["head", Vector3(-0.06, 14.42, -2.84)],
+				"Jib": ["head", Vector3(-0.1, 11.3, -3.05)],
+				"Staysail": ["head", Vector3(0.1, 9.5, -3.33)],
+				"ForeSail": ["head", Vector3(0.14, 10.95, -2.6)],
+				"MainSail": ["head", Vector3(-0.14, 11.85, 2.97)],
+			},
+			# Passive lines: the sheets of the two booms (two falls from the boom-end block to the block on the horse; ["spar", p, boom] swings
+			# with that boom) and the headsail sheets, which go slack on the windward side.
+			"rope_lines": [
+				{"pts": [["spar", Vector3(-0.04, 3.4, 7.3), "Main_Boom"], ["slide", Vector3(-0.04, 1.43, 7.2), Vector3(0.0, 3.4, 7.3), 0.8, 1000.0, 0.0, "Main_Boom"]]},
+				{"pts": [["spar", Vector3(0.04, 3.4, 7.3), "Main_Boom"], ["slide", Vector3(0.04, 1.43, 7.2), Vector3(0.0, 3.4, 7.3), 0.8, 1000.0, 0.0, "Main_Boom"]]},
+				{"pts": [["spar", Vector3(-0.04, 3.36, 0.8), "Fore_Boom"], ["slide", Vector3(-0.04, 1.43, 0.6), Vector3(0.0, 3.36, 0.8), 0.8, 1000.0, 0.0, "Fore_Boom"]]},
+				{"pts": [["spar", Vector3(0.04, 3.36, 0.8), "Fore_Boom"], ["slide", Vector3(0.04, 1.43, 0.6), Vector3(0.0, 3.36, 0.8), 0.8, 1000.0, 0.0, "Fore_Boom"]]},
+				{"sail": "Jib", "side": -1, "pts": [["clew", "Jib"], Vector3(-1.05, 1.3, -4.0)]},
+				{"sail": "Jib", "side": 1, "pts": [["clew", "Jib"], Vector3(1.05, 1.3, -4.0)]},
+				{"sail": "Staysail", "side": -1, "pts": [["clew", "Staysail"], Vector3(-1.2, 1.3, -3.0)]},
+				{"sail": "Staysail", "side": 1, "pts": [["clew", "Staysail"], Vector3(1.2, 1.3, -3.0)]},
+				{"sail": "FlyingJib", "side": -1, "pts": [["clew", "FlyingJib"], Vector3(-1.0, 1.3, -5.3)]},
+				{"sail": "FlyingJib", "side": 1, "pts": [["clew", "FlyingJib"], Vector3(1.0, 1.3, -5.3)]},
+			],
+			# The sheet blocks ride the horses (nodes of the model, moved every frame) and follow the boom-end block across the bar.
+			"sliders": [
+				{"node": "Sheet_Block_Main", "rest": Vector3(0.0, 1.43, 7.2), "track": Vector3(0.0, 3.4, 7.3), "half": 0.8, "arc": 1000.0, "drop": 0.0, "boom": "Main_Boom"},
+				{"node": "Sheet_Block_Fore", "rest": Vector3(0.0, 1.43, 0.6), "track": Vector3(0.0, 3.36, 0.8), "half": 0.8, "arc": 1000.0, "drop": 0.0, "boom": "Fore_Boom"},
+			],
+		},
+		# Gangway, ship-local (x across to port, y up): flat on the quay, up to the entry port by the boarding steps, down onto the deck.
+		"gangway": [Vector2(-4.2, 1.92), Vector2(-3.3, 1.92), Vector2(-2.45, 1.7), Vector2(-2.0, 1.3), Vector2(-1.2, 1.2)],
+		"gangway_z": -0.7, "gangway_width": 0.6, "gangway_min_y": 1.45,
+		# Mooring cleats on the port side (ship-local x, height, z) and the bollard each line goes to.
+		"lines": [[Vector3(-1.95, 1.6, -4.4), 0], [Vector3(-2.05, 1.6, -1.5), 2], [Vector3(-2.05, 1.6, 2.8), 1], [Vector3(-1.7, 1.6, 6.1), 3]],
+		# Keel footprint (ship-local x, z, depth below the waterline): she draws about 1.9 m.
+		"foot": [Vector3(0, -6.5, 0.6), Vector3(0, -5.0, 1.4), Vector3(0, -3.5, 1.7), Vector3(0, -2.0, 1.85), Vector3(0, 0, 1.9),
+			Vector3(0, 2.5, 1.85), Vector3(0, 4.5, 1.6), Vector3(0, 6.2, 1.0),
+			Vector3(-1.1, -3.0, 0.5), Vector3(1.1, -3.0, 0.5), Vector3(-1.5, 0.0, 0.5), Vector3(1.5, 0.0, 0.5),
+			Vector3(-1.2, 4.5, 0.5), Vector3(1.2, 4.5, 0.5)],
+	},
 ]
 
 ## The light rectangle is the ship's size times these.
@@ -22,6 +161,10 @@ const ZONE_WIDTH_SCALE := 2.0
 
 static func data(size: int) -> Dictionary:
 	return DATA[clampi(size, 0, DATA.size() - 1)]
+
+## The berth size (Size) a ship of this class needs: a type with its own numbers (the schooner) berths as the size it names.
+static func berth_class(cls: int) -> int:
+	return int(data(cls).get("size_class", cls))
 
 ## Rectangle (width across the berth, length along it) in metres.
 static func zone_size(size: int) -> Vector2:

@@ -121,6 +121,9 @@ func _refresh() -> void:
 	for c in _list.get_children():
 		_list.remove_child(c)
 		c.queue_free()
+	if String(_stall.kind) == "dock_office":
+		_refresh_harbor_master()
+		return
 	var goods: Array = _stall.goods()
 	var sells: Array = _stall.sellable(get_tree(), _from)
 	if goods.is_empty() and sells.is_empty():
@@ -140,6 +143,69 @@ func _refresh() -> void:
 		_list.add_child(none)
 	for s in sells:
 		_list.add_child(_sell_row(s["good"], int(s["n"])))
+
+
+## The harbour master: the ships lying in this harbour. Pick one to make it "the" ship (ship_fleet.gd).
+func _refresh_harbor_master() -> void:
+	var fleet := get_tree().get_first_node_in_group("ship_fleet") as ShipFleet
+	if fleet == null:
+		var l := Label.new()
+		l.text = "The harbour master has no ledger of ships here."
+		_list.add_child(l)
+		return
+	_list.add_child(_heading("Ships in this harbour   (%d)" % fleet.ship_count()))
+	var can := fleet.can_switch()
+	if not can:
+		var warn := Label.new()
+		warn.text = "Moor your ship at a berth before changing ships."
+		warn.modulate = Color(1, 1, 1, 0.6)
+		_list.add_child(warn)
+	var shown := 0
+	var scroll := ScrollContainer.new()
+	scroll.custom_minimum_size = Vector2(0.0, 320.0)
+	var box := VBoxContainer.new()
+	box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	scroll.add_child(box)
+	_list.add_child(scroll)
+	for r in fleet.roster():
+		var row := HBoxContainer.new()
+		row.add_theme_constant_override("separation", 10)
+		var n := Label.new()
+		n.text = "%s" % r["name"]
+		n.custom_minimum_size = Vector2(220.0, 0.0)
+		row.add_child(n)
+		var where := Label.new()
+		where.text = "at %s" % r["berth_name"]
+		where.modulate = Color(1, 1, 1, 0.6)
+		where.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		row.add_child(where)
+		var b := Button.new()
+		if bool(r["sailable"]):
+			b.text = "Take command"
+			b.disabled = not can
+			b.pressed.connect(_take_command.bind(int(r["id"])))
+		else:
+			b.text = "Not yet sailable"
+			b.disabled = true
+		row.add_child(b)
+		box.add_child(row)
+		shown += 1
+	if shown == 0:
+		var none := Label.new()
+		none.text = "No other ships lying here."
+		box.add_child(none)
+
+
+func _take_command(id: int) -> void:
+	var fleet := get_tree().get_first_node_in_group("ship_fleet") as ShipFleet
+	if fleet == null:
+		return
+	var err := fleet.activate(id)
+	if err != "":
+		_msg.text = err
+		_refresh()
+		return
+	close()
 
 
 func _heading(t: String) -> Label:

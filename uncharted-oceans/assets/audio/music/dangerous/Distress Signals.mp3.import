@@ -1,0 +1,19 @@
+[remap]
+
+importer="mp3"
+type="AudioStreamMP3"
+uid="uid://dv6uc7qw2j6xi"
+path="res://.godot/imported/Distress Signals.mp3-253f6fafbc00f11877ce224380a93fba.mp3str"
+
+[deps]
+
+source_file="res://assets/audio/music/dangerous/Distress Signals.mp3"
+dest_files=["res://.godot/imported/Distress Signals.mp3-253f6fafbc00f11877ce224380a93fba.mp3str"]
+
+[params]
+
+loop=false
+loop_offset=0
+bpm=0
+beat_count=0
+bar_beats=4

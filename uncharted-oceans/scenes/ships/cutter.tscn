@@ -1,0 +1,89 @@
+[gd_scene format=3 uid="uid://byn1jshjuedy1"]
+
+[ext_resource type="PackedScene" uid="uid://blyksvm2min4a" path="res://assets/ships/cutter/Cutter.glb" id="1_22pv0"]
+[ext_resource type="Script" uid="uid://333hynt1dnxh" path="res://scripts/ship_ladder.gd" id="2_jtue4"]
+[ext_resource type="Script" uid="uid://bempejdnt7ram" path="res://scripts/ship_climb_point.gd" id="3_js5y6"]
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_grxlb"]
+size = Vector3(0.7, 1.1995395, 0.12705079)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_jsb8j"]
+size = Vector3(0.7, 1.2082714, 0.12705079)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_4bryl"]
+size = Vector3(1.0018799, 5.4, 0.175)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_m8gk1"]
+size = Vector3(1.0090821, 5.4, 0.174)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_x7nx6"]
+size = Vector3(0.5, 2, 0.100097656)
+
+[node name="CutterShip" type="Node3D" unique_id=1479552804]
+
+[node name="Cutter" parent="." unique_id=563275356 instance=ExtResource("1_22pv0")]
+transform = Transform3D(-1, 0, -8.742278e-08, 0, 1, 0, 8.742278e-08, 0, -1, 0, 0, 0)
+
+[node name="Climbing" type="Node3D" parent="." unique_id=771739602]
+
+[node name="HullLadder_Port" type="Area3D" parent="Climbing" unique_id=1010698662]
+transform = Transform3D(0, 0, -1, 0, 1, 0, 1, 0, 0, -1.52, 0.65, 0.2)
+script = ExtResource("2_jtue4")
+
+[node name="Box" type="CollisionShape3D" parent="Climbing/HullLadder_Port" unique_id=1203714535]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.12790358, 0.14765704)
+shape = SubResource("BoxShape3D_grxlb")
+
+[node name="HullLadder_Stbd" type="Area3D" parent="Climbing" unique_id=2000812910]
+transform = Transform3D(0, 0, 1, 0, 1, 0, -1, 0, 0, 1.52, 0.65, 0.2)
+script = ExtResource("2_jtue4")
+
+[node name="Box" type="CollisionShape3D" parent="Climbing/HullLadder_Stbd" unique_id=644768279]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.13229531, 0.16310251)
+shape = SubResource("BoxShape3D_jsb8j")
+
+[node name="Shroud_Port" type="Area3D" parent="Climbing" unique_id=1759908461]
+transform = Transform3D(0, 0.2374489, -0.9714, 0, 0.9714, 0.2374489, 1, 0, 0, -0.83, 4.85, -1.7)
+script = ExtResource("2_jtue4")
+grab_slack = 0.5
+snap_depth = true
+center_on_grab = false
+rigging_id = "shroud_a"
+
+[node name="Box" type="CollisionShape3D" parent="Climbing/Shroud_Port" unique_id=1560898674]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.12609768, 0.2923832, -3.5762787e-07)
+shape = SubResource("BoxShape3D_4bryl")
+
+[node name="Shroud_Stbd" type="Area3D" parent="Climbing" unique_id=69966714]
+transform = Transform3D(0, -0.2374489, 0.9714, 0, 0.9714, 0.2374489, -1, 0, 0, 0.83, 4.85, -1.3748424)
+script = ExtResource("2_jtue4")
+grab_slack = 0.5
+snap_depth = true
+center_on_grab = false
+rigging_id = "shroud_b"
+
+[node name="Box" type="CollisionShape3D" parent="Climbing/Shroud_Stbd" unique_id=405680336]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.19545889, 0.25209904, 0.014587045)
+shape = SubResource("BoxShape3D_m8gk1")
+
+[node name="HoldLadder" type="Area3D" parent="Climbing" unique_id=2016685298]
+transform = Transform3D(-1, 0, 0, 0, 1, 0, 0, 0, -1, 0, 0.05, -2.56)
+script = ExtResource("2_jtue4")
+
+[node name="Box" type="CollisionShape3D" parent="Climbing/HoldLadder" unique_id=2071640542]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0.064697266)
+shape = SubResource("BoxShape3D_x7nx6")
+
+[node name="Perch" type="Marker3D" parent="Climbing" unique_id=1900064963]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 8.1, -1.05)
+script = ExtResource("3_js5y6")
+
+[node name="ShroudTop_Port" type="Marker3D" parent="Climbing" unique_id=1102713111]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.4, 7.2, -1.7)
+script = ExtResource("3_js5y6")
+point_id = "shroud_top_a"
+
+[node name="ShroudTop_Stbd" type="Marker3D" parent="Climbing" unique_id=1119002729]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.4, 7.2, -1.7)
+script = ExtResource("3_js5y6")
+point_id = "shroud_top_b"

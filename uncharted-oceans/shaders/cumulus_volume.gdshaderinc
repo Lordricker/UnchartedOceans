@@ -1,0 +1,156 @@
+// Raymarched fair-weather cumulus for sky.gdshader (included right after storm_volume.gdshaderinc, which
+// provides vol_tex() and the 3D noise). Only used on the High quality tier (SkySystem.volumetric_quality = 2); the
+// other tiers keep the flat cloud layer. The reflection cubemap always uses the flat layer too.
+//
+// The clouds fill a slab of sky between cu_base_m and cu_top_m, camera relative (they do not parallax, like the flat
+// layer). Where they stand comes from the same 2D noise and coverage / overcast sliders as the flat layer. That noise
+// is read as how THICK the cloud is there: zero at the edge, rising smoothly to the core, so every cloud is a dome with
+// a flat base and a soft rounded top instead of a column with walls. The billows come from the 3D noise, eroding the
+// top more than the base (cauliflower tops, solid bottoms). Every ray is marched through the slab, with two density
+// samples toward the sun for self-shadowing. Cloud bottoms pick up a little of the sky colour, and the sun's silver
+// lining shows on thin edges.
+//
+// SkySystem sets cu_* (SkySystem.cumulus_base_m / cumulus_top_m / cumulus_density / cumulus_steps are the knobs).
+// cu_xz_scale is 1 / (1.4 * 36000): at the default cloud_scale one 2D noise tile is 36 km across, a cloud cell ~6 km.
+
+uniform bool cu_enabled = false;
+uniform int cu_steps : hint_range(6, 40, 1) = 28;
+uniform float cu_base_m = 1500.0;
+uniform float cu_top_m = 2900.0;
+uniform float cu_max_dist = 60000.0;
+uniform float cu_haze_m = 31500.0;
+uniform float cu_sigma = 0.0028;
+uniform float cu_xz_scale = 0.0000198413;
+
+// How far the wind has carried the clouds, in the units of a 3D noise lookup that is scale_m metres per unit.
+vec3 cu_drift(float scale_m) {
+	return vec3(wind_offset.x, 0.0, wind_offset.y) / (cloud_scale * cu_xz_scale * scale_m);
+}
+
+// Cloud density 0-1 at a point (metres, camera at the origin, y = altitude). hv = 0 at the cloud base .. 1 at the top.
+float cu_dens(vec3 p, bool detail, out float hv) {
+	float H = max(cu_top_m - cu_base_m, 1.0);
+	hv = (p.y - cu_base_m) / H;
+	if (hv < 0.0 || hv > 1.0) {
+		return 0.0;
+	}
+	// footprint: where the clouds stand (the flat layer's noise and thresholds)
+	vec2 uv = p.xz * (cloud_scale * cu_xz_scale) + wind_offset;
+	float n = textureLod(cloud_noise, uv, 0.0).r * 0.8 + textureLod(cloud_noise, uv * 3.1 + vec2(0.37, 0.11), 0.0).r * 0.2;
+	float thr = mix(0.66, 0.36, coverage);
+	// how thick the cloud is here, as a fraction of the slab: 0 at its edge, rising smoothly toward the core
+	float thick = smoothstep(thr, thr + 0.30, n);
+	thick = mix(thick, 0.85 + 0.15 * n, overcast);
+	if (thick < 0.03) {
+		return 0.0;
+	}
+	// a dome: solid from a flat base up to about half its height, then a soft rounded top
+	float top = pow(thick, 0.7);
+	float dome = 1.0 - smoothstep(top * 0.5, top, hv);
+	float bottom = smoothstep(0.0, 0.10, hv);
+	float base = dome * bottom * smoothstep(0.03, 0.2, thick);
+	if (base < 0.01) {
+		return 0.0;
+	}
+	// billows: big lumps, plus finer ones near the camera when this sample is for what we see (not for the sun shadow)
+	vec3 q = vec3(p.x / 3400.0, p.y / 2200.0, p.z / 3400.0) + cu_drift(3400.0);
+	float e = vol_tex(q);
+	if (detail && length(p.xz) < 30000.0) {
+		float e2 = vol_tex(vec3(p.x / 1100.0, p.y / 800.0, p.z / 1100.0) + cu_drift(1100.0) + vec3(0.41, 0.77, 0.13));
+		e = e * 0.72 + e2 * 0.28;
+	}
+	// the top is eroded more than the base, so the tops are cauliflower and the bottoms are flat and solid
+	float er = mix(0.35, 0.75, hv);
+	// a gentle ramp (not a hard cut) so a cloud's surface has no sharp density step for the marcher to slice
+	return smoothstep(0.0, 1.0, clamp((base - (1.0 - e) * er) * 1.4, 0.0, 1.0));
+}
+
+// How much sunlight reaches a point inside the cloud (0 = in its own shadow .. 1 = lit).
+float cu_light(vec3 p, vec3 ld) {
+	float h;
+	float d1 = cu_dens(p + ld * 300.0, false, h);
+	float d2 = cu_dens(p + ld * 1100.0, false, h);
+	return exp(-(d1 * 300.0 + d2 * 800.0) * cu_sigma);
+}
+
+// Marches the cumulus slab along one sky direction. Returns premultiplied light in rgb and coverage in a, ready to
+// be laid over the sky: sky * (1 - a) + rgb.
+// frag = the pixel's screen position (FRAGCOORD.xy), used for the per-pixel dither that breaks up stepping bands.
+vec4 cumulus_volume(vec3 dir, vec2 frag) {
+	float cam_h = 12.0;
+	// below this the slab starts beyond cu_max_dist: plain horizon sky
+	float y_min = (cu_base_m - cam_h) / max(cu_max_dist, 1000.0);
+	if (dir.y < y_min * 0.9) {
+		return vec4(0.0);
+	}
+	float inv_y = 1.0 / dir.y;
+	float t0 = (cu_base_m - cam_h) * inv_y;
+	float tmax = min((cu_top_m - cam_h) * inv_y, cu_max_dist);
+	if (tmax <= t0) {
+		return vec4(0.0);
+	}
+	float len = tmax - t0;
+	// long, shallow rays toward the horizon get more steps (up to double), so a step stays short next to a cloud's height
+	int n = clamp(int(float(cu_steps) * clamp(len / 2500.0, 1.0, 2.0)), 4, 56);
+	// Every ray's samples would otherwise sit at the same fractions of the slab, i.e. on the same altitude slices in
+	// neighbouring pixels, which draws contour-line bands across each cloud. Each pixel shifts its samples by a
+	// different amount (interleaved gradient noise: a fine, even screen-space dither that reads as smooth, unlike a
+	// random hash which reads as grain), so the slices no longer line up and the bands dissolve.
+	float jit = fract(52.9829189 * fract(dot(frag, vec2(0.06711056, 0.00583715))));
+
+	float cs = dot(dir, sun_dir);
+	float g = 0.5;
+	float hg = (1.0 - g * g) / pow(max(1.0 + g * g - 2.0 * g * cs, 0.05), 1.5);
+	float phase = 0.62 + 0.2 * min(hg, 3.0);
+	float mdc = max(dot(dir, moon_dir), 0.0);
+	vec3 sky_under = mix(horizon_color.rgb, mid_color.rgb, 0.5);
+	// sunset: clouds facing away from the sun go rose / magenta, shaded sides and undersides go purple
+	float away = smoothstep(0.85, -0.35, cs);
+	vec3 lit_c = mix(cloud_lit_color.rgb, cloud_accent_color.rgb, sunset_k * (0.3 + 0.7 * away));
+	vec3 shade_c = mix(cloud_shade_color.rgb, cloud_dark_color.rgb, sunset_k * 0.75);
+
+	float T = 1.0;
+	vec3 L = vec3(0.0);
+	for (int k = 0; k < 56; k++) {
+		if (k >= n || T < 0.03) {
+			break;
+		}
+		// steps get a little longer with distance; the sample sits at a jittered spot inside its step
+		float a0 = pow(float(k) / float(n), 1.15);
+		float a1 = pow(float(k + 1) / float(n), 1.15);
+		float ds = len * (a1 - a0);
+		float s = t0 + len * (a0 + (a1 - a0) * jit);
+		vec3 p = vec3(0.0, cam_h, 0.0) + dir * s;
+
+		float hv;
+		float d = cu_dens(p, true, hv);
+		if (d < 0.004) {
+			continue;
+		}
+		float a = 1.0 - exp(-d * cu_sigma * ds);
+
+		float lt = cu_light(p, sun_dir);
+		float Lk = clamp(lt * phase, 0.0, 1.0);
+		float hvc = clamp(hv, 0.0, 1.0);
+		// shade colour darker underneath and brighter on top, mixed up to the lit colour where the sun reaches
+		vec3 amb = shade_c * mix(0.78, 1.08, smoothstep(0.0, 0.9, hvc));
+		vec3 sc = mix(amb, lit_c, Lk);
+		// the bottoms pick up some of the sky: light that has come through the cloud and out under it
+		sc = mix(sc, sky_under * 0.9, (1.0 - smoothstep(0.0, 0.35, hvc)) * 0.2);
+		// silver lining on thin edges facing the sun
+		sc += glow_core_color.rgb * pow(max(cs, 0.0), 5.0) * 0.45 * clamp(lt * 1.6 - 0.5, 0.0, 1.0) * (1.0 - overcast);
+		// moonlight, like the flat layer
+		sc += moon_cloud_light * (0.12 + 0.88 * pow(mdc, 3.0)) * (0.4 + 0.6 * Lk);
+
+		// far away: fade toward the haze, and fade out before the end of the slab so it has no hard edge
+		float hz = 1.0 - exp(-s / max(cu_haze_m, 1.0));
+		sc = mix(sc, horizon_color.rgb, hz * 0.75);
+		a *= 1.0 - smoothstep(0.65 * cu_max_dist, cu_max_dist, s);
+
+		L += T * a * sc;
+		T *= 1.0 - a;
+	}
+	// rays near the edge of the slab's reach fade out into the plain horizon sky
+	float edge = smoothstep(y_min * 0.9, y_min * 2.2, dir.y);
+	return vec4(L * edge, (1.0 - T) * edge);
+}

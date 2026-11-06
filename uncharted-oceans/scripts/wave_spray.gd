@@ -5,10 +5,13 @@ extends Node3D
 ##    shader paints as whitecaps (Ocean.get_fold_z), and throw soft white puffs up and downwind. Each one follows its crest
 ##    along the wind for a second or two and stops when the crest stops breaking, then a new one is picked near the
 ##    camera. Nothing happens below sea state 3.5 or so, and it fades in from there.
+##    The wind blows it (the SeaWind's air, gusts and all): in a moderate wind it goes up and falls back, but as the wind
+##    rises to a gale it is torn off the crest and flung away low and fast downwind, the drops streaking, and a sheet of
+##    spume (soft spray haze) streams off each breaking crest along the water.
 ## 2. Hull slams (any rough water): where the sea comes up fast against the hull (the water rising at the side, bow or
 ##    stern points faster than the hull itself is rising) a burst of droplets goes up and outward from the hull.
 ##
-## Cost: CREST_N * 20 + BURST_N * 24 puffs at most, in two small particle systems that sit idle in calm water. Unshaded
+## Cost: CREST_N * 96 + BURST_N * 128 particles at most (about 1.8k), in two small particle systems that sit idle in calm water. Unshaded
 ## soft puffs, no shadows, so about the cost of the bow spray.
 
 const CREST_N := 8
@@ -36,6 +39,7 @@ var _bursts: Array[GPUParticles3D] = []
 var _burst_next := 0
 var _mat_blob: StandardMaterial3D
 var _mat_drop: StandardMaterial3D
+var _mat_mist: StandardMaterial3D
 var _lit := 1.0
 var _lit_t := 0.0
 var _spawn_t := 0.0
@@ -43,6 +47,7 @@ var _slam_gap := 0.0
 var _pt_prev := PackedFloat32Array()
 var _pt_cool := PackedFloat32Array()
 var _rng := RandomNumberGenerator.new()
+var _wind_node: Node
 
 
 func _ready() -> void:
@@ -57,13 +62,14 @@ func _ready() -> void:
 		_bursts.append(_make_system(true))
 
 
-## Two kinds of water in every spray: drops (thin streaks stretched along their flight, solid white) and a few hard-edged
-## blobs of whitewater among them. Soft round gradient puffs looked like white dandelion fluff.
+## Two kinds of water in every spray: drops (thin, see-through streaks stretched along their flight) and small translucent
+## blobs of whitewater among them, with a slightly softened edge. It was hard-edged and opaque (too solid), and plain
+## gradient puffs before that looked like white dandelion fluff; this is a fine mist between the two.
 func _make_materials() -> void:
 	# a round blob with only a narrow soft rim, so it reads as a lump of white water rather than a fuzzy ball
 	var blob := Gradient.new()
-	blob.offsets = PackedFloat32Array([0.0, 0.8, 1.0])
-	blob.colors = PackedColorArray([Color(1, 1, 1, 1), Color(1, 1, 1, 1), Color(1, 1, 1, 0)])
+	blob.offsets = PackedFloat32Array([0.0, 0.5, 1.0])
+	blob.colors = PackedColorArray([Color(1, 1, 1, 0.7), Color(1, 1, 1, 0.5), Color(1, 1, 1, 0)])   # a slightly softened edge, never solid
 	var tex := GradientTexture2D.new()
 	tex.gradient = blob
 	tex.fill = GradientTexture2D.FILL_RADIAL
@@ -78,26 +84,45 @@ func _make_materials() -> void:
 	_mat_blob.billboard_keep_scale = true
 	_mat_blob.vertex_color_use_as_albedo = true
 	_mat_blob.albedo_texture = tex
-	_mat_blob.albedo_color = Color(1, 1, 1, 0.9)
+	_mat_blob.albedo_color = Color(1, 1, 1, 0.5)
 	_mat_blob.render_priority = 63     # the sea is see-through too: draw the spray after it so far waves do not paint over it
 	_mat_drop = StandardMaterial3D.new()
 	_mat_drop.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	_mat_drop.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 	_mat_drop.cull_mode = BaseMaterial3D.CULL_DISABLED
 	_mat_drop.vertex_color_use_as_albedo = true
-	_mat_drop.albedo_color = Color(1, 1, 1, 0.95)
+	_mat_drop.albedo_color = Color(1, 1, 1, 0.6)
 	_mat_drop.render_priority = 63
+	# the mist of a hull slam: huge, very soft, faint puffs (the particle system swells them and fades them out)
+	var mist := Gradient.new()
+	mist.offsets = PackedFloat32Array([0.0, 0.3, 0.65, 1.0])
+	mist.colors = PackedColorArray([Color(1, 1, 1, 0.5), Color(1, 1, 1, 0.32), Color(1, 1, 1, 0.1), Color(1, 1, 1, 0.0)])
+	var mist_tex := GradientTexture2D.new()
+	mist_tex.gradient = mist
+	mist_tex.fill = GradientTexture2D.FILL_RADIAL
+	mist_tex.fill_from = Vector2(0.5, 0.5)
+	mist_tex.fill_to = Vector2(1.0, 0.5)
+	mist_tex.width = 64
+	mist_tex.height = 64
+	_mat_mist = StandardMaterial3D.new()
+	_mat_mist.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	_mat_mist.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	_mat_mist.billboard_mode = BaseMaterial3D.BILLBOARD_PARTICLES
+	_mat_mist.billboard_keep_scale = true
+	_mat_mist.vertex_color_use_as_albedo = true
+	_mat_mist.albedo_texture = mist_tex
+	_mat_mist.albedo_color = Color(1, 1, 1, 0.55)
+	_mat_mist.render_priority = 62     # behind the drops and blobs, over the sea
 
 
 ## A crossed pair of thin quads, +Y along the flight (the head), the tail end fading: a drop of water in motion.
-func _drop_mesh() -> ArrayMesh:
-	var w := 0.03
-	var h := 0.5
+func _drop_mesh(h: float = 0.3) -> ArrayMesh:
+	var w := 0.012                          # much thinner and shorter than before (0.03 x 0.5)
 	var verts := PackedVector3Array([
 		Vector3(-w, 0, 0), Vector3(w, 0, 0), Vector3(w, h, 0), Vector3(-w, h, 0),
 		Vector3(0, 0, -w), Vector3(0, 0, w), Vector3(0, h, w), Vector3(0, h, -w)])
-	var tail := Color(1, 1, 1, 0.2)
-	var head := Color(1, 1, 1, 1.0)
+	var tail := Color(1, 1, 1, 0.1)
+	var head := Color(1, 1, 1, 0.8)
 	var cols := PackedColorArray([tail, tail, head, head, tail, tail, head, head])
 	var idx := PackedInt32Array([0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7])
 	var arr := []
@@ -130,21 +155,119 @@ func _make_system(burst: bool) -> GPUParticles3D:
 	pm.scale_max = 1.4
 	var ramp := Gradient.new()
 	ramp.offsets = PackedFloat32Array([0.0, 0.04, 0.75, 1.0])
-	ramp.colors = PackedColorArray([Color(1, 1, 1, 0.0), Color(1, 1, 1, 1.0), Color(1, 1, 1, 0.85), Color(1, 1, 1, 0.0)])
+	ramp.colors = PackedColorArray([Color(1, 1, 1, 0.0), Color(1, 1, 1, 0.8), Color(1, 1, 1, 0.6), Color(1, 1, 1, 0.0)])   # see-through, thinning as it falls
 	var ramp_tex := GradientTexture1D.new()
 	ramp_tex.gradient = ramp
 	pm.color_ramp = ramp_tex
-	var drops := _make_particles(burst, 40 if burst else 28, 0.9 if burst else 1.1, pm)
-	drops.draw_pass_1 = _drop_mesh()
-	var blobs := _make_particles(burst, 9 if burst else 8, 0.8 if burst else 1.0, pm)
+	var drops := _make_particles(burst, 90 if burst else 60, 0.9 if burst else 1.1, pm)      # a fine mist: lots of small drops
+	drops.draw_pass_1 = _drop_mesh(0.3 if burst else 0.55)   # crest spray flies fast in a gale: longer streaks
+	var blobs := _make_particles(burst, 26 if burst else 22, 0.8 if burst else 1.0, pm)
 	var quad := QuadMesh.new()
-	quad.size = Vector2(0.5, 0.5)
+	quad.size = Vector2(0.22, 0.22)        # with the particle scale: blobs about 13-30 cm (they were 30-70 cm)
 	quad.material = _mat_blob
 	blobs.draw_pass_1 = quad
 	drops.add_child(blobs)
 	drops.set_meta("blobs", blobs)
+	if burst:
+		# a hull slam also throws up a bank of mist: big soft puffs that swell, drift off downwind and thin out over a few
+		# seconds (a third child system, with a process material of its own so it can be aimed and blown separately)
+		var mist := _make_particles(true, 12, 3.4, _make_mist_pm())
+		var mquad := QuadMesh.new()
+		mquad.size = Vector2(1.0, 1.0)
+		mquad.material = _mat_mist
+		mist.draw_pass_1 = mquad
+		drops.add_child(mist)
+		drops.set_meta("mist", mist)
+	else:
+		# spume: in a gale the wind tears a sheet of soft spray off a breaking crest and streams it away low along the
+		# water (a third child system with its own process material, aimed with the wind by _blow; idle in lighter wind)
+		var drift := _make_particles(false, 14, 2.2, _make_drift_pm())
+		var dquad := QuadMesh.new()
+		dquad.size = Vector2(1.0, 1.0)
+		dquad.material = _mat_mist
+		drift.draw_pass_1 = dquad
+		drops.add_child(drift)
+		drops.set_meta("drift", drift)
+		# blown spray ends up a long way downwind of its crest: a bigger box so it is not culled while still in view
+		var far := AABB(Vector3(-45.0, -4.0, -45.0), Vector3(90.0, 24.0, 90.0))
+		drops.visibility_aabb = far
+		blobs.visibility_aabb = far
+		drift.visibility_aabb = far
 	add_child(drops)
 	return drops
+
+
+## The mist's process material: slow, heavily damped (it stops and hangs), growing from a small puff to a big one, faint
+## at its thickest and gone by the end of its life, stirred by a little turbulence so it billows instead of fading flat.
+func _make_mist_pm() -> ParticleProcessMaterial:
+	var pm := ParticleProcessMaterial.new()
+	pm.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_BOX
+	pm.emission_box_extents = Vector3(0.9, 0.3, 0.9)
+	pm.direction = Vector3(0.0, 1.0, 0.0)
+	pm.spread = 55.0
+	pm.initial_velocity_min = 0.8
+	pm.initial_velocity_max = 2.6
+	pm.gravity = Vector3(0.0, 0.1, 0.0)        # set toward the wind for each burst
+	pm.damping_min = 1.0
+	pm.damping_max = 2.2
+	pm.angle_min = 0.0
+	pm.angle_max = 360.0
+	pm.scale_min = 1.0
+	pm.scale_max = 2.2
+	var curve := Curve.new()
+	curve.add_point(Vector2(0.0, 0.35))
+	curve.add_point(Vector2(0.5, 0.9))
+	curve.add_point(Vector2(1.0, 1.4))
+	var curve_tex := CurveTexture.new()
+	curve_tex.curve = curve
+	pm.scale_curve = curve_tex
+	var ramp := Gradient.new()
+	ramp.offsets = PackedFloat32Array([0.0, 0.1, 0.45, 1.0])
+	ramp.colors = PackedColorArray([Color(1, 1, 1, 0.0), Color(1, 1, 1, 0.9), Color(1, 1, 1, 0.5), Color(1, 1, 1, 0.0)])
+	var ramp_tex := GradientTexture1D.new()
+	ramp_tex.gradient = ramp
+	pm.color_ramp = ramp_tex
+	pm.turbulence_enabled = true
+	pm.turbulence_noise_strength = 0.5
+	pm.turbulence_noise_scale = 1.6
+	return pm
+
+
+## The spume's process material: soft puffs leaving the crest low and fast along the wind (aimed and sped up by _blow),
+## swelling and thinning out as they stream away, stirred by turbulence so they tear and billow.
+func _make_drift_pm() -> ParticleProcessMaterial:
+	var pm := ParticleProcessMaterial.new()
+	pm.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_BOX
+	pm.emission_box_extents = Vector3(1.4, 0.15, 1.4)
+	pm.direction = Vector3(1.0, 0.22, 0.0)
+	pm.spread = 22.0
+	pm.initial_velocity_min = 6.0
+	pm.initial_velocity_max = 11.0
+	pm.gravity = Vector3(0.0, 0.3, 0.0)
+	pm.damping_min = 0.2
+	pm.damping_max = 0.8
+	pm.angle_min = 0.0
+	pm.angle_max = 360.0
+	pm.scale_min = 0.8
+	pm.scale_max = 1.8
+	var curve := Curve.new()
+	curve.max_value = 2.0                      # (a Curve stops at 1.0 unless told otherwise)
+	curve.add_point(Vector2(0.0, 0.4))
+	curve.add_point(Vector2(0.4, 1.0))
+	curve.add_point(Vector2(1.0, 1.8))
+	var curve_tex := CurveTexture.new()
+	curve_tex.curve = curve
+	pm.scale_curve = curve_tex
+	var ramp := Gradient.new()
+	ramp.offsets = PackedFloat32Array([0.0, 0.12, 0.5, 1.0])
+	ramp.colors = PackedColorArray([Color(1, 1, 1, 0.0), Color(1, 1, 1, 0.55), Color(1, 1, 1, 0.3), Color(1, 1, 1, 0.0)])
+	var ramp_tex := GradientTexture1D.new()
+	ramp_tex.gradient = ramp
+	pm.color_ramp = ramp_tex
+	pm.turbulence_enabled = true
+	pm.turbulence_noise_strength = 0.6
+	pm.turbulence_noise_scale = 2.5
+	return pm
 
 
 func _make_particles(burst: bool, count: int, life: float, pm: ParticleProcessMaterial) -> GPUParticles3D:
@@ -191,14 +314,20 @@ func _update_light() -> void:
 	if sun:
 		lit = (0.2 + 0.8 * clampf(sun.light_energy, 0.0, 1.0)) if sun.visible else 0.2
 	_lit = lit
-	_mat_blob.albedo_color = Color(lit * 0.97, lit * 0.99, lit, 0.9)
-	_mat_drop.albedo_color = Color(lit * 0.97, lit * 0.99, lit, 0.95)
+	_mat_blob.albedo_color = Color(lit * 0.97, lit * 0.99, lit, 0.5)
+	_mat_drop.albedo_color = Color(lit * 0.97, lit * 0.99, lit, 0.6)
+	_mat_mist.albedo_color = Color(lit * 0.97, lit * 0.99, lit, 0.55)
 
 
 func _update_crests(delta: float, k: float) -> void:
 	var wind := deg_to_rad(ocean.wind_heading_deg)
 	var wdir := Vector2(sin(wind), -cos(wind))
 	var zmin := ocean.foam_z_now
+	# the air, gusts and all: how hard it blows decides whether spray falls back or is flung away downwind
+	var air := _air_now()
+	var aspd := Vector2(air.x, air.z).length()
+	var ad := Vector3(air.x, 0.0, air.z) / maxf(aspd, 0.01)
+	var blow := smoothstep(11.0, 20.0, aspd)
 	# pick a new crest every so often: the most breaking of a few random spots round the camera
 	_spawn_t -= delta
 	var cam := get_viewport().get_camera_3d()
@@ -234,7 +363,6 @@ func _update_crests(delta: float, k: float) -> void:
 				spare.low_t = 0.0
 				spare.fold_t = 0.0
 				spare.life = _rng.randf_range(1.5, 3.5)
-				spare.pm.direction = Vector3(wdir.x * 0.8, 1.0, wdir.y * 0.8).normalized()
 	for c in _crests:
 		if not c.on:
 			continue
@@ -250,11 +378,48 @@ func _update_crests(delta: float, k: float) -> void:
 		var fade_out := clampf((c.life - c.age) / 0.5, 0.0, 1.0)
 		var w := want * fade_in * fade_out
 		c.node.global_position = Vector3(c.x, ocean.get_height(c.x, c.z) + 0.2, c.z)
+		_blow(c, ad, aspd, blow)
 		_emit(c.node, w, w > 0.03)
+		_emit_drift(c.node, w * blow, w * blow > 0.03)
 		c.low_t = c.low_t + delta if want < 0.05 else 0.0
 		if c.age >= c.life or c.low_t > 0.4:
 			c.on = false
 			_emit(c.node, 0.0, false)
+			_emit_drift(c.node, 0.0, false)
+
+
+## The air at the ship (SeaWind's velocity, with its gusts), or a moderate breeze along the swell without one.
+func _air_now() -> Vector3:
+	if _wind_node == null or not is_instance_valid(_wind_node):
+		_wind_node = get_tree().get_first_node_in_group("wind")
+	if _wind_node != null and _wind_node.has_method("velocity"):
+		return _wind_node.velocity()
+	var a := deg_to_rad(ocean.wind_heading_deg)
+	return Vector3(sin(a), 0.0, -cos(a)) * 8.5
+
+
+## Aim a crest's spray with the wind. blow 0 (up to ~11 m/s): it goes up and falls back as before. blow 1 (a gale, ~20 m/s
+## and up): torn off the crest and flung away low and fast downwind at about half the wind's speed, pushed on by it as it
+## flies, and the spume streams off along the water.
+func _blow(c: Crest, ad: Vector3, s: float, b: float) -> void:
+	var pm := c.pm
+	pm.direction = (ad * (0.8 + 1.6 * b) + Vector3.UP).normalized()
+	pm.spread = lerpf(35.0, 16.0, b)
+	pm.initial_velocity_min = lerpf(1.5, 0.35 * s, b)
+	pm.initial_velocity_max = lerpf(4.5, 0.6 * s, b)
+	pm.gravity = Vector3(ad.x * 6.0 * b, -7.0 + 2.5 * b, ad.z * 6.0 * b)
+	var drift := c.node.get_meta("drift") as GPUParticles3D
+	var dpm := drift.process_material as ParticleProcessMaterial
+	dpm.direction = (ad + Vector3.UP * 0.22).normalized()
+	dpm.initial_velocity_min = 0.35 * s
+	dpm.initial_velocity_max = 0.65 * s
+	dpm.gravity = Vector3(ad.x * 2.0, 0.3, ad.z * 2.0)
+
+
+func _emit_drift(node: GPUParticles3D, ratio: float, on: bool) -> void:
+	var drift := node.get_meta("drift") as GPUParticles3D
+	drift.amount_ratio = clampf(ratio, 0.0, 1.0)
+	drift.emitting = on
 
 
 ## Where the sea hits the hull: watch the water height at points just outside the hull's sides, bow and stern. If it
@@ -301,9 +466,22 @@ func _burst(pos: Vector3, out: Vector3, power: float) -> void:
 	pm.direction = Vector3(out.x * 0.6, 1.0, out.z * 0.6).normalized()
 	pm.initial_velocity_min = 2.5 + 3.0 * power
 	pm.initial_velocity_max = 4.5 + 5.0 * power
+	# in a gale the slam's water is blown away downwind as it flies (over the deck, if the sea hit the weather side)
+	var air := _air_now()
+	var aspd := Vector2(air.x, air.z).length()
+	var ad := Vector3(air.x, 0.0, air.z) / maxf(aspd, 0.01)
+	var blow := smoothstep(11.0, 20.0, aspd)
+	pm.gravity = Vector3(ad.x * 7.0 * blow, -9.8, ad.z * 7.0 * blow)
 	b.global_position = pos
 	b.amount_ratio = 0.35 + 0.65 * power
 	var bl := b.get_meta("blobs") as GPUParticles3D
 	bl.amount_ratio = 0.35 + 0.65 * power
 	b.restart()
 	bl.restart()
+	var mist := b.get_meta("mist") as GPUParticles3D
+	if mist != null:
+		var mpm := mist.process_material as ParticleProcessMaterial
+		mpm.direction = Vector3(out.x * 0.5, 1.0, out.z * 0.5).normalized()
+		mpm.gravity = ad * (0.9 + 5.0 * blow) + Vector3(0.0, 0.11, 0.0)      # the wind carries it off, hard in a gale
+		mist.amount_ratio = 0.3 + 0.7 * power
+		mist.restart()

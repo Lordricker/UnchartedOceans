@@ -26,6 +26,16 @@ extends Area3D
 ## Draw the climber in to the middle of the box's depth as they climb (rope ladders: the shrouds and the mast
 ## ladder) instead of keeping the depth they grabbed it at. ShipRigging sets this for the ladders it builds.
 @export var snap_depth := false
+## Pull the climber onto the middle of the box's width as soon as they grab it, and keep them there (A/D do nothing).
+## For the hull ladders, which are one rung wide: grabbing at the edge of the box used to bounce you in and out of it.
+## The wide rope nets (the shrouds) turn this off (ship_rigging.gd) so you can still shift along them.
+@export var center_on_grab := true
+## Optional: make this zone one of a ship's rigging climbs (ship_rigging.gd). "shroud_a" / "shroud_b" are the two nets (when you reach the
+## top of one you are taken to the perch, the Climb_Barrel point; "mast" is the rung ladder up a mast). Leave empty for an ordinary ladder:
+## any Area3D with this script and a BoxShape3D child works on its own, you only have to touch it.
+@export var rigging_id := ""
+## Which mast the rigging climb belongs to ("main" or "fore").
+@export var rigging_mast := "main"
 
 func _ready() -> void:
 	add_to_group("ship_ladders")
@@ -40,6 +50,11 @@ func _box() -> CollisionShape3D:
 		if cs and not cs.disabled and cs.shape is BoxShape3D:
 			return cs
 	return null
+
+## The middle of the box, in world space.
+func center_world() -> Vector3:
+	var cs := _box()
+	return cs.global_position if cs else global_position
 
 ## World point p in the box's own space (centre of the box = origin).
 func local_point(p: Vector3) -> Vector3:

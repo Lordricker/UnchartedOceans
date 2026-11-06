@@ -25,12 +25,20 @@ extends Node
 @export var cooldown := 0.9
 ## Where you stand in the barrel is the Climb_Barrel marker moved this far toward the bow (m), so you are in the barrel and not at its edge.
 @export var nest_forward_m := 0.3
+## The shroud and mast climbing boxes are made from the brig's markers, which were sized too deep: the box stuck out
+## well past the ropes. Their depth (in/out of the ship) is held to this many metres, centred on the marker, and the
+## extra reach to grab one from outside it to this many.
+@export var max_ladder_depth := 0.45
+@export var max_grab_slack := 0.3
+## Move the boxes this far toward the ship (m), if their middle sits out past the ropes (0 = where the marker is).
+@export var ladder_inset := 0.0
 
 var _ship: Node3D
 var _player: Node
 var _masts := {}                  # "main" / "fore" -> {"ladders": {id: ShipLadder}, "points": {id: Node3D}, "net": "shroud_a"}
 var _owner := {}                  # ShipLadder -> mast name
 var _busy := false
+var _hull_ladders := 0
 var _cool := 0.0
 var _in_nest := false
 var _armed := false               # in the barrel: true once all movement keys have been let go
@@ -58,16 +66,43 @@ func _setup() -> void:
 		var lad: Area3D = ladder_script.new()
 		lad.name = "Rungs"
 		lad.set("snap_depth", true)
-		lad.set("grab_slack", float(ex.get("grab_slack", 0.7)))
+		lad.set("center_on_grab", false)       # the nets are wide: you can still shift along them
+		lad.set("grab_slack", minf(float(ex.get("grab_slack", 0.7)), max_grab_slack))
 		var cs := CollisionShape3D.new()
 		var box := BoxShape3D.new()
-		box.size = Vector3(float(sz[0]), float(sz[1]), float(sz[2]))
+		box.size = Vector3(float(sz[0]), float(sz[1]), minf(float(sz[2]), max_ladder_depth))
 		cs.shape = box
+		cs.position = Vector3(0.0, 0.0, -ladder_inset)
 		lad.add_child(cs)
 		n.add_child(lad)
 		var mast := String(ex.get("mast", "main"))
 		_mast(mast)["ladders"][String(ex.get("ladder_id", n.name))] = lad
 		_owner[lad] = mast
+	# Zones placed in the ship's scene (ship_ladder.gd with a rigging_id): the nets / mast ladder, no markers needed
+	for n in get_tree().get_nodes_in_group("ship_ladders"):
+		var sl := n as ShipLadder
+		if sl == null or String(sl.rigging_id) == "" or not _ship.is_ancestor_of(sl):
+			continue
+		_mast(String(sl.rigging_mast))["ladders"][String(sl.rigging_id)] = sl
+		_owner[sl] = String(sl.rigging_mast)
+	# Boarding ladders on the hull, for climbing back aboard from the water: one-rung-wide boxes, +Y up, +Z away from the ship
+	# (markers of role hull_ladder, extras ladder_size = along the ship, up, in/out). They need no mast, nets or points.
+	for n in get_tree().get_nodes_in_group("role_hull_ladder"):
+		if not (n is Node3D) or not _ship.is_ancestor_of(n):
+			continue
+		var hx = n.get_meta("extras") if n.has_meta("extras") else {}
+		if not (hx is Dictionary) or not hx.has("ladder_size"):
+			continue
+		var hs: Array = hx["ladder_size"]
+		var hl: Area3D = ladder_script.new()
+		hl.name = "Rungs"
+		var hcs := CollisionShape3D.new()
+		var hbox := BoxShape3D.new()
+		hbox.size = Vector3(float(hs[0]), float(hs[1]), float(hs[2]))
+		hcs.shape = hbox
+		hl.add_child(hcs)
+		n.add_child(hl)
+		_hull_ladders += 1
 	for n in get_tree().get_nodes_in_group("role_climb_point"):
 		if not (n is Node3D) or not _ship.is_ancestor_of(n):
 			continue
@@ -77,6 +112,8 @@ func _setup() -> void:
 	for m in _masts.keys():
 		var d: Dictionary = _masts[m]
 		print("ShipRigging: %s mast: ladders %s, points %s" % [m, d["ladders"].keys(), d["points"].keys()])
+	if _hull_ladders > 0:
+		print("ShipRigging: %d hull boarding ladders" % _hull_ladders)
 	if _masts.is_empty():
 		push_warning("ShipRigging: the brig has no climbing markers (Ladder_*, Climb_*); rigging left alone")
 		set_physics_process(false)
@@ -110,6 +147,9 @@ func _physics_process(delta: float) -> void:
 		if lp.y >= half.y - top_margin and m["points"].has("mast_base"):
 			m["net"] = "shroud_a" if lad == m["ladders"].get("shroud_a") else "shroud_b"
 			_move_to(mast, "mast_base", Callable())
+		elif lp.y >= half.y - top_margin and m["points"].has("barrel") and not m["ladders"].has("mast"):
+			m["net"] = "shroud_a" if lad == m["ladders"].get("shroud_a") else "shroud_b"
+			_move_to(mast, "barrel", _arrived_in_nest.bind(mast))
 	elif lad == m["ladders"].get("mast"):
 		if lp.y >= half.y - top_margin and m["points"].has("barrel"):
 			_move_to(mast, "barrel", _arrived_in_nest.bind(mast))
@@ -192,4 +232,6 @@ func _stand_in_nest(pl: Node3D) -> void:
 		_armed = true                            # the key that brought you here has been let go
 	elif _armed and not _busy:
 		_in_nest = false
-		_move_to(_exit_mast, "nest_exit", Callable())
+		var exit_pts: Dictionary = _masts[_exit_mast]["points"]
+		var exit_id := "nest_exit" if exit_pts.has("nest_exit") else "shroud_top_" + String(_masts[_exit_mast]["net"]).right(1)
+		_move_to(_exit_mast, exit_id, Callable())
