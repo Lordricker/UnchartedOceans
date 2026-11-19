@@ -129,3 +129,7 @@ func _process(delta: float) -> void:
 	if want != _outlined:
 		_outlined = want
 		Outline.set_on(_brake, want)
+		if want:
+			Outline.show_name(self, "Bilge pump")
+		else:
+			Outline.hide_name(self)

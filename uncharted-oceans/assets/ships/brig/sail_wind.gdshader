@@ -25,6 +25,10 @@ uniform float gust = 0.0;
 uniform float slack = 1.0;
 uniform float flutter_amp = 0.035;                // metres, base shiver of a filled sail
 uniform float flutter_speed = 6.0;
+// Flutter phase, radians, counted up by the script (phase += delta * speed). Changing the speed then only changes how
+// fast the wave runs from now on; TIME * speed would jump the whole wave every time the speed changed (the flag jitter).
+// Below 0: the old TIME * speed, for a material nobody counts for.
+uniform float flutter_phase = -1.0;
 uniform float cloth_roughness = 0.92;
 uniform float translucency = 0.10;                // sun glowing through the canvas
 uniform vec3 tint : source_color = vec3(0.93, 0.92, 0.9);
@@ -32,7 +36,7 @@ uniform vec3 tint : source_color = vec3(0.93, 0.92, 0.9);
 void vertex() {
 	float w = COLOR.r;
 	float belly = (fill - 1.0) * w * belly_depth;
-	float t = TIME * flutter_speed * (1.0 + luff * 0.8);
+	float t = flutter_phase >= 0.0 ? flutter_phase : TIME * flutter_speed * (1.0 + luff * 0.8);
 	float ph = COLOR.b * 9.0 + COLOR.g * 5.0;
 	float wave = sin(t + ph) * 0.6 + sin(t * 1.73 + ph * 1.9 + 1.3) * 0.4;
 	float amp = (flutter_amp + gust * 0.04 + luff * 0.30) * slack;

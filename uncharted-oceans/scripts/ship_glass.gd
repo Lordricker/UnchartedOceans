@@ -32,8 +32,18 @@ extends Node
 @export var split_words := PackedStringArray(["br_glassdim", "br_glow"])
 @export var glass_min_y := 2.5
 
+## Glass you can stand on: every roof-like glass face (skylights, deck lights) also gets an invisible collision
+## surface on the ship's walkable body (ShipBody), so the player cannot drop through the pane into the cabin.
+## Upright glass (windows) is left alone. Meshes whose node name has one of collide_skip_words are skipped.
+@export var glass_collision := true
+## A glass face counts as roof-like when its normal points up or down by at least this much (0.5 = within 60 degrees of flat).
+@export_range(0.0, 1.0) var collide_min_up := 0.5
+@export var collide_skip_words := PackedStringArray(["binnacle", "compass", "lamp", "lantern"])
+
 ## What was made clear, as "mesh/material" (for checking).
 var cleared: Array[String] = []
+
+var _glass_surfaces: Array = []   # [MeshInstance3D, surface index] for every surface made clear
 
 var _clear_mat: StandardMaterial3D
 var _frame: Node3D
@@ -60,7 +70,10 @@ func _apply() -> void:
 	if _frame == null:
 		_frame = root as Node3D
 	_clear_mat = _make_clear()
+	_glass_surfaces.clear()
 	var n := _walk(root)
+	if glass_collision:
+		_add_glass_collision(root)
 	if n == 0:
 		push_warning("ShipGlass: found no glass surfaces on %s (no material named like %s)" % [root.name, ", ".join(material_words)])
 	else:
@@ -111,6 +124,7 @@ func _fix(mi: MeshInstance3D) -> int:
 			is_glass = (not skip) and (by_node or _has_word(nm, material_words))
 		if is_glass:
 			mi.set_surface_override_material(s, _clear_mat)
+			_glass_surfaces.append([mi, s])
 			cleared.append("%s/%s" % [mi.name, nm])
 			changed += 1
 		else:
@@ -194,8 +208,64 @@ func _split(mi: MeshInstance3D) -> int:
 	gi.visibility_range_end_margin = mi.visibility_range_end_margin
 	gi.visibility_range_fade_mode = mi.visibility_range_fade_mode
 	mi.add_child(gi)
+	for gs in glass.get_surface_count():
+		_glass_surfaces.append([gi, gs])
 	cleared.append("%s/cut %d glass triangles" % [mi.name, tris])
 	return 1
+
+
+## One invisible trimesh from every roof-like glass face, added to the ship's walkable body (ShipBody) so it
+## rides with the ship. Built in ShipBody's own space, so the shape needs no transform.
+func _add_glass_collision(root: Node) -> void:
+	var body := root.find_child("ShipBody", true, false) as Node3D
+	if body == null:
+		push_warning("ShipGlass: no ShipBody on %s, glass has no collision (skylights can be fallen through)" % root.name)
+		return
+	var to_body := body.global_transform.affine_inverse()
+	var faces := PackedVector3Array()
+	for pair in _glass_surfaces:
+		var mi: MeshInstance3D = pair[0]
+		if not is_instance_valid(mi) or mi.mesh == null:
+			continue
+		if _has_word(String(mi.name), collide_skip_words) or _has_word(String(mi.get_parent().name), collide_skip_words):
+			continue
+		var s: int = pair[1]
+		if s >= mi.mesh.get_surface_count():
+			continue
+		var arr: Array = mi.mesh.surface_get_arrays(s)
+		if arr.size() <= Mesh.ARRAY_VERTEX or not (arr[Mesh.ARRAY_VERTEX] is PackedVector3Array):
+			continue
+		var v: PackedVector3Array = arr[Mesh.ARRAY_VERTEX]
+		var idx := PackedInt32Array()
+		if arr[Mesh.ARRAY_INDEX] is PackedInt32Array and (arr[Mesh.ARRAY_INDEX] as PackedInt32Array).size() > 0:
+			idx = arr[Mesh.ARRAY_INDEX]
+		else:
+			idx.resize(v.size())
+			for i in v.size():
+				idx[i] = i
+		var xf := to_body * mi.global_transform
+		for t in range(0, idx.size() - 2, 3):
+			var a := xf * v[idx[t]]
+			var b := xf * v[idx[t + 1]]
+			var c := xf * v[idx[t + 2]]
+			var nrm := (b - a).cross(c - a)
+			if nrm.length() < 0.000001:
+				continue
+			if absf(nrm.normalized().y) >= collide_min_up:
+				faces.append(a)
+				faces.append(b)
+				faces.append(c)
+	if faces.is_empty():
+		return
+	var shape := ConcavePolygonShape3D.new()
+	shape.set_faces(faces)
+	shape.backface_collision = true
+	var cs := CollisionShape3D.new()
+	cs.name = "Col_GlassRoof"
+	cs.shape = shape
+	body.add_child(cs)
+	cs.set_meta("collision_group", "Col_GlassRoof")
+	print("ShipGlass: %d roof-like glass triangles now solid (Col_GlassRoof on %s)" % [faces.size() / 3, body.name])
 
 
 func _has_word(text: String, words: PackedStringArray) -> bool:

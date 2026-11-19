@@ -129,19 +129,21 @@ uniform float chart_on = 0.0;
 uniform vec2 chart_origin = vec2(0.0);
 uniform vec2 chart_size = vec2(600000.0, 400000.0);
 uniform float chart_mpp = 390.625;
-uniform sampler2D chart_land : filter_linear, repeat_disable;
-uniform sampler2D chart_shore : filter_linear, repeat_disable;
+uniform sampler2D chart_land : filter_linear, repeat_enable;
+uniform sampler2D chart_shore : filter_linear, repeat_enable;
 uniform float curve_k = 0.0;               // 1 / (2 * planet radius)
 uniform vec2 foam_off1 = vec2(0.0);
 uniform vec2 foam_off2 = vec2(0.0);
 // For the surf along the world's coasts: the same ground the terrain draws (world_ground.gdshaderinc). relief_m,
 // coast_level and detail_m must match world_terrain.gdshader's (they only shape the land, so a mismatch would barely move
 // the surf).
-uniform sampler2D chart_height16 : filter_nearest, repeat_disable;
+uniform sampler2D chart_height16 : filter_nearest, repeat_enable;
 uniform vec2 chart_px = vec2(1536.0, 1024.0);
 uniform float relief_m = 1100.0;
 uniform float coast_level = 0.2431;
 uniform float detail_m = 55.0;
+uniform float surf_period = 9.0;           // High setting: seconds between the wave fronts that roll in over the shallows
+uniform vec3 shore_turq : source_color = vec3(0.07, 0.5, 0.5);   // High setting: the clear turquoise of sunlit shallows over sand
 uniform float coast_surf = 1.0;            // 0 = no surf along the world's coasts
 
 #include "res://shaders/world_ground.gdshaderinc"
@@ -149,6 +151,11 @@ uniform float coast_surf = 1.0;            // 0 = no surf along the world's coas
 // ---- hull mask (set by ship_motion.gd; same data as the old sea shader) ----
 uniform mat4 ship_inv;
 uniform float half_beam[43];
+// The same table cut hi_y above the waterline (ship_motion.gd). When a wave lifts the sea inside the hull above the
+// waterline, the hull there is wider than at the waterline (the topsides flare), so the mask widens with the water's
+// height or a thin line of sea shows along the inside of the planking.
+uniform float half_beam_hi[43];
+uniform float hi_y = 0.6;
 uniform float y_min = -10.5;
 uniform float y_step = 0.5;
 uniform int sample_count = 0;
@@ -172,6 +179,9 @@ float chart_scale(vec2 p) {
 	float land = textureLod(chart_land, uv, 0.0).r;
 	float shore = textureLod(chart_shore, uv, 0.0).r;
 	float depth = land >= 0.5 ? 0.0 : chart_shelf_depth(shore * 255.0 * chart_mpp / 1000.0);
+	if (shore * 255.0 * chart_mpp < 1500.0) {
+		depth = max(-chart_ground_y(p), 0.0);      // near a coast: the beach profile (WorldGround.depth_m on the CPU)
+	}
 	return pow(clamp(depth / shoal_depth, 0.0, 1.0), shoal_pow);
 }
 
@@ -229,9 +239,18 @@ vec3 waves(vec2 p, int n, float footprint, out vec3 fx) {
 // never repeats). After Inigo Quilez; hash after Dave Hoskins' "hash without sine".
 // Returns (value about -0.7..0.7, d/dx, d/dy).
 vec2 hash22(vec2 p) {
-	vec3 p3 = fract(vec3(p.xyx) * vec3(0.1031, 0.1030, 0.0973));
-	p3 += dot(p3, p3.yzx + 33.33);
-	return fract((p3.xx + p3.yz) * p3.zy) * 2.0 - 1.0;
+	// Integer hash (pcg2d) of the lattice point. It was Dave Hoskins' float "hash without sine", but at large lattice
+	// coordinates the GPU could round the same corner differently from the cells on either side of it, and the hash turned
+	// that into a different value: every lattice line of the ripples became a hard seam (the quilted look). Integers are exact.
+	uvec2 v = uvec2(ivec2(floor(p)));
+	v = v * 1664525u + 1013904223u;
+	v.x += v.y * 1664525u;
+	v.y += v.x * 1664525u;
+	v = v ^ (v >> 16u);
+	v.x += v.y * 1664525u;
+	v.y += v.x * 1664525u;
+	v = v ^ (v >> 16u);
+	return vec2(v >> 8u) * (2.0 / 16777215.0) - 1.0;
 }
 vec3 gnoised(vec2 p) {
 	vec2 i = floor(p);
@@ -355,7 +374,7 @@ vec4 foam_cells(vec2 p) {
 	const float K = 1.5;
 	float dome = sqrt(max(1.0 - K * K * best, 0.0));
 	vec2 grad = K * K * bv / max(dome, 0.3);
-	float rnd = hash22(bid + vec2(13.7, 5.1)).x * 0.5 + 0.5;
+	float rnd = hash22(bid + vec2(1013.0, 5077.0)).x * 0.5 + 0.5;
 	return vec4(dome, grad, rnd);
 }
 
@@ -565,7 +584,28 @@ void vertex() {
 	}
 	shoal_v = sc;
 	wave_h = w.x * sc;
-	VERTEX.y += w.x * sc - dist * dist * curve_k + wake_height(wp.xz) + trail_height(wp.xz);
+	float roll = 0.0;
+	if (chart_on > 0.5 && coast_surf > 0.0 && sc < 0.999) {
+		vec2 cp = wp.xz + chart_origin;
+		float x = -shore_d(cp);
+		if (x > 0.0 && x < 120.0 && port_pad_w(wp.xz) < 0.3) {      // a port's pad (its harbour) has no surf
+			vec3 ck = coast_kind(cp);
+			float xb = surf_break_x(sea_amplitude, shore_slopes(ck).x);
+			for (int f = 0; f < 2; f++) {
+				float u = surf_u(cp, ocean_time, surf_period, f);
+				if (u < SURF_IN) {
+					float xf = xb * 2.3 * pow(1.0 - u / SURF_IN, 1.25);
+					// grows as it shoals, peaks at the breaker line, collapses into the white water after it
+					float hgt_f = (0.18 + 0.32 * sea_amplitude) * smoothstep(xb * 2.4, xb * 1.1, xf) * smoothstep(xb * 0.25, xb * 0.85, xf);
+					float dx = x - xf;
+					float shape = dx < 0.0 ? exp(-dx * dx / 2.0) : exp(-dx * dx / 18.0);   // steep face toward the beach
+					roll = max(roll, hgt_f * shape * (f == 0 ? 1.0 : 0.75));
+				}
+			}
+			roll *= coast_surf * smoothstep(0.0, 0.5, x);
+		}
+	}
+	VERTEX.y += w.x * sc + roll - dist * dist * curve_k + wake_height(wp.xz) + trail_height(wp.xz);
 }
 
 void fragment() {
@@ -579,11 +619,20 @@ void fragment() {
 			int i = int(floor(f));
 			int j = min(i + 1, sample_count - 1);
 			float hb = mix(half_beam[i], half_beam[j], fract(f));
+			float hh = mix(half_beam_hi[i], half_beam_hi[j], fract(f));
+			hb += max(hh - hb, 0.0) * clamp(l.y / hi_y, 0.0, 4.0);
 			if (abs(l.x) < hb - inset) discard;
 		}
 	}
 
-	float footprint = max(length(fwidth(world_xz)), 0.002);
+	// Metres of sea per pixel, worked out smoothly from the distance and the viewing angle. (It used to be
+	// length(fwidth(world_xz)), but world_xz is the undisplaced grid, so on the wave-displaced mesh that value was constant
+	// per triangle and jumped at every edge: each fade then showed the mesh's quads as a "stitched" square pattern, worst
+	// on High, whose extra fine detail fades in close to the camera.)
+	float px_ang = 2.0 / (PROJECTION_MATRIX[1][1] * VIEWPORT_SIZE.y);           // view-space size of a pixel at 1 m
+	vec3 to_cam = CAMERA_POSITION_WORLD - wpos;
+	float cos_v = max(abs(to_cam.y) / max(length(to_cam), 0.001), 0.02);      // grazing views stretch the pixel along the sea
+	float footprint = max(length(-VERTEX.z * px_ang * vec2(1.0, 1.0 / cos_v)), 0.002);
 	vec3 fx;
 	vec3 w = waves(world_xz, octaves, footprint, fx);
 	vec3 isl = island_on > 0.5 ? island_info(world_xz) : vec3(-99.0, 1.0, 99.0);
@@ -726,25 +775,57 @@ void fragment() {
 		foam = max(foam, clamp(zone * lace * 1.0 + edge * 0.7, 0.0, 1.0) * smoothstep(0.0, 0.05, 1.0 - float(isl.x > 0.0)));
 	}
 
-	// Surf along the world's coasts (world mode): the island's white water, where the chart's ground comes up to the
-	// surface. The depth comes from chart_ground_y(), the very ground the terrain draws, so it lies on the terrain's
-	// waterline. Bands roll in toward the shore with the swell. Rocky stretches (coast_kind) get a narrower band of
-	// heavier white water breaking against the rock; beaches get the wide, lacy wash. Skipped (one texture read) more
-	// than ~1.2 km from any coast.
+	// Surf along the world's coasts (world mode), in metres from the waterline (shore_d, the same distance the terrain's
+	// beach is shaped from): wave fronts run in, steepen and break over the last tens of metres (their white water a churned
+	// line with lace trailing behind it), and the leftover foam thins out as the next one comes. The water then runs up the
+	// sand, which the terrain draws (world_terrain.gdshader), in step. Kept apart from the other foam so the High setting's
+	// bubble cells do not break it into floes. Skipped (one texture read) far from any coast.
+	float shore_depth = 99.0;          // sea depth under this pixel near a world coast (m), for the shallows' colour
+	vec3 shore_k = vec3(0.0);
+	float surf = 0.0;
+	float surf_thick = 0.0;
+	// the lace pattern: soft blobs about a metre across plus a net of thin veins (read here, outside the branches)
+	float sp1 = texture(foam_noise, world_xz * 0.065 + vec2(0.37, 0.11)).r;
+	float sp2 = texture(foam_noise, world_xz * 0.21 + vec2(0.71, 0.23)).r;
+	float surf_pat = clamp(0.55 * sp1 + 0.45 * (1.0 - abs(2.0 * sp2 - 1.0)) + (nz - 0.5) * 0.25, 0.0, 1.0);
 	if (chart_on > 0.5 && coast_surf > 0.0) {
 		vec2 cuv = (world_xz + chart_origin) / chart_size;
 		float shore_m = textureLod(chart_shore, cuv, 0.0).r * 255.0 * chart_mpp;
-		if (shore_m < 1200.0) {
+		if (shore_m < 1500.0) {
+			vec2 cp = world_xz + chart_origin;
 			float gy = chart_ground_y(world_xz);
 			if (gy < 0.0) {
-				float depth_here = -gy;
-				vec3 ck = coast_kind(world_xz + chart_origin);
-				float reach = (shore_foam_width + sea_amplitude * 1.2) * mix(1.0, 0.45, ck.y);
-				float pulse = 0.5 + 0.5 * sin(ocean_time * 0.9 + depth_here * 2.2 + nz * 3.0);
-				float zone = 1.0 - smoothstep(0.0, reach * (0.55 + 0.6 * pulse), depth_here);
-				float lace = smoothstep(0.30, 0.62, nz + zone * 0.45);
-				float edge = 1.0 - smoothstep(0.0, mix(0.18, 0.35, ck.y), depth_here);   // solid line right at the water line
-				foam = max(foam, clamp(zone * lace + edge * mix(0.7, 0.95, ck.y), 0.0, 1.0) * coast_surf);
+				vec3 ck = coast_kind(cp);
+				shore_depth = -gy;
+				shore_k = ck;
+				float x = max(-shore_d(cp), 0.0);
+				vec3 sl = shore_slopes(ck);
+				float xb = surf_break_x(sea_amplitude, sl.x);
+				if (x < xb * 2.6 && port_pad_w(world_xz) < 0.3) {      // a port's pad (its harbour) has no surf
+					for (int f = 0; f < 2; f++) {
+						float u = surf_u(cp, ocean_time, surf_period, f);
+						float amp = f == 0 ? 1.0 : 0.75;
+						if (u < SURF_IN) {
+							float xf = xb * 2.3 * pow(1.0 - u / SURF_IN, 1.25);       // where the front is now
+							float brk = smoothstep(xb * 1.2, xb * 0.7, xf);           // 0 = still a swell, 1 = broken
+							float w = mix(0.5, 1.4 + 0.06 * xf, brk);
+							float ln = exp(-pow((x - xf) / w, 2.0));
+							float trail = x > xf ? exp(-(x - xf) / (2.5 + 5.0 * brk)) * brk : 0.0;
+							float dens = max(ln * mix(0.3, 1.0, brk), trail * 0.8) * amp;
+							surf = max(surf, surf_lace(dens, surf_pat));
+							surf_thick = max(surf_thick, ln * brk * amp);
+						} else {
+							// the foam the broken wave left in the inner surf zone, thinning out
+							float sres = (u - SURF_IN) / (1.0 - SURF_IN);
+							float rem = (1.0 - sres) * 0.55 * (1.0 - smoothstep(xb * 0.4, xb * 1.1, x)) * amp;
+							surf = max(surf, surf_lace(rem, surf_pat));
+						}
+					}
+					// right at the edge of the water: a thin wash
+					surf = max(surf, surf_lace(0.6 * (1.0 - smoothstep(0.0, 1.2, x)), surf_pat));
+					surf *= coast_surf;
+					surf_thick *= coast_surf;
+				}
 			}
 		}
 	}
@@ -758,9 +839,18 @@ void fragment() {
 	vec2 fbump = vec2(0.0);
 	if (high_water > 0.5 && foam > 0.03) {
 		float dens = foam;
-		float fa = 1.0 - smoothstep(0.18, 0.45, footprint * 2.4);
-		float fb = 1.0 - smoothstep(0.18, 0.45, footprint * 6.1);
-		float fc = (1.0 - smoothstep(0.18, 0.45, footprint * 18.0)) * high_detail;   // the finest cells, ~5.5 cm across
+		// Each set of cells shows only while its cells are well over 5 pixels across (it was ~2-5 px, which left whole
+		// cells switching on and off a pixel at a time: the foam's edges broke into stair-steps and the thin foam left
+		// behind crests became rows of one-pixel "stitches"). ea/eb/ec widen each cut-off by the pixel size in cell units.
+		float pa = footprint * 2.4;
+		float pb = footprint * 6.1;
+		float pcc = footprint * 18.0;
+		float fa = 1.0 - smoothstep(0.07, 0.18, pa);
+		float fb = 1.0 - smoothstep(0.07, 0.18, pb);
+		float fc = (1.0 - smoothstep(0.07, 0.18, pcc)) * high_detail;   // the finest cells, ~5.5 cm across
+		float ea = 0.1 + pa * 1.5;
+		float eb = 0.1 + pb * 1.5;
+		float ec = 0.1 + pcc * 1.5;
 		hq_w = fa;
 		if (fa > 0.0) {
 			vec2 q = world_xz - foam_scroll;
@@ -769,8 +859,8 @@ void fragment() {
 			float wob = (nz - 0.5) * 0.3;
 			float thr_a = 1.15 * (1.0 - dens) - 0.12;
 			float thr_b = 1.15 * (1.0 - dens * 0.85) - 0.12;
-			float al_a = smoothstep(thr_a, thr_a + 0.1, ca.w * 0.75 + ca.x * 0.25 + wob);
-			float al_b = smoothstep(thr_b, thr_b + 0.1, cb.w * 0.75 + cb.x * 0.25 + wob) * fb;
+			float al_a = smoothstep(thr_a, thr_a + ea, ca.w * 0.75 + ca.x * 0.25 + wob);
+			float al_b = smoothstep(thr_b, thr_b + eb, cb.w * 0.75 + cb.x * 0.25 + wob) * fb;
 			float present = smoothstep(0.03, 0.2, dens);
 			// the finest cells don't make foam of their own: they carve small holes and speckle into the clumps above,
 			// so the foam reads as fine bubbles and thin lace instead of solid white patches
@@ -779,7 +869,7 @@ void fragment() {
 			if (fc > 0.0) {
 				cc = foam_cells(q * 18.0 + vec2(7.3, 51.9));
 				float thr_c = 1.15 * (1.0 - dens * 0.7) - 0.12;
-				al_c = mix(1.0, 0.3 + 0.7 * smoothstep(thr_c, thr_c + 0.1, cc.w * 0.75 + cc.x * 0.25 + wob), fc);
+				al_c = mix(1.0, 0.3 + 0.7 * smoothstep(thr_c, thr_c + ec, cc.w * 0.75 + cc.x * 0.25 + wob), fc);
 			}
 			float hq = max(max(al_a, al_b) * present * al_c, foam * 0.3 * (0.6 + 0.4 * al_c));
 			foam = mix(foam, hq, fa);
@@ -787,6 +877,7 @@ void fragment() {
 			fbump = (ca.yz * 0.6 + cb.yz * 0.4 * fb + cc.yz * 0.5 * fc) * foam_bump;
 		}
 	}
+	foam = max(foam, surf);
 	if (hq_w > 0.0) {
 		vec3 nf = normalize(vec3(-(slope.x + fbump.x * foam), 1.0, -(slope.y + fbump.y * foam)));
 		NORMAL = normalize((VIEW_MATRIX * vec4(nf, 0.0)).xyz);
@@ -804,7 +895,20 @@ void fragment() {
 	body *= 1.0 - 0.45 * water_dark;
 	body *= 1.0 - 0.35 * wcalm;                      // the boat's slick: the same water, just darker
 	body *= 1.0 + rip.x * ripple_tint;               // ripples: slightly lighter/darker bands
+	// High setting: sunlit shallows over sand go a clear turquoise (strongest over beaches and in the south, gone at night
+	// and under storm cloud), fading out in deeper water
+	float lagoon = 0.0;
+	if (shore_depth < 16.0) {
+		// over sand the shallows go a clear turquoise (strongest in the south, gone at night and under storm cloud); right at
+		// the edge the water is so thin the sand shows through instead, and it deepens to the sea's blue by about 15 m
+		float lat_g = clamp((world_xz.y + chart_origin.y) / chart_size.y, 0.0, 1.0);
+		float day = clamp(dot(horizon_color, vec3(0.333)) * 2.0, 0.0, 1.0);
+		lagoon = smoothstep(0.15, 1.2, shore_depth) * (1.0 - smoothstep(2.5, 8.0, shore_depth));
+		lagoon *= mix(0.25, 1.0, shore_k.x) * mix(0.6, 1.0, smoothstep(0.35, 0.85, lat_g)) * day * (1.0 - water_dark);
+		body = mix(body, shore_turq, lagoon * 0.62);
+	}
 	thick = max(thick, clamp(foam - crest_foam, 0.0, 1.0) * 1.2);   // surf along the shore is thick white water
+	thick = max(thick, surf_thick);
 	vec3 foam_col = mix(foam_color * 0.72 + body * 0.35, foam_color, clamp(thick * 1.3, 0.0, 1.0));   // thin foam shows the water through it
 	foam_col *= mix(1.0, 0.66 + 0.34 * billow, hq_w * smoothstep(0.1, 0.5, foam));   // High setting: shaded creases between the bubbles
 	ALBEDO = mix(body, foam_col, foam);
@@ -822,5 +926,5 @@ void fragment() {
 
 	// see-through where the water is thin; reflections (grazing angles) and foam stay opaque
 	float fresnel = pow(1.0 - max(dot(n_world, v_world), 0.0), 5.0);
-	ALPHA = clamp(max(max(1.0 - clarity, fresnel), foam), 0.0, 1.0);
+	ALPHA = clamp(max(max(1.0 - clarity + lagoon * 0.2, fresnel), foam), 0.0, 1.0);
 }

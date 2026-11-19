@@ -1,6 +1,6 @@
 [gd_scene format=3]
 
-[ext_resource type="PackedScene" path="res://scenes/ships/cutter.tscn" id="1_cutter"]
+[ext_resource type="PackedScene" path="res://scenes/ships/schooner.tscn" id="1_schooner"]
 [ext_resource type="Script" uid="uid://da07cl2ygaab4" path="res://scripts/player.gd" id="2_player"]
 [ext_resource type="Script" uid="uid://cvusuacxmt4to" path="res://scripts/ship_motion.gd" id="3_motion"]
 [ext_resource type="Shader" path="res://shaders/ocean.gdshader" id="4_sea"]
@@ -71,14 +71,14 @@ radius = 24000.0
 
 [node name="ShipRig" type="Node3D" parent="." unique_id=2100207574]
 script = ExtResource("3_motion")
-ship_path = NodePath("CutterShip/Cutter")
-ship_class = 0
-sample_points = PackedVector2Array(0, -5, 0, 5, -1.5, -2, 1.5, -2, -1.5, 0.5, 1.5, 0.5, -1.4, 3.5, 1.4, 3.5)
+ship_path = NodePath("SchoonerShip/Schooner")
+ship_class = 3
+sample_points = PackedVector2Array(0, -6.5, 0, 6.5, -1.8, -3.5, 1.8, -3.5, -2, 0.5, 2, 0.5, -1.8, 4.5, 1.8, 4.5)
 test_rock = false
 test_island = false
 harbor_enabled = true
-max_turn_rate_deg = 9.0
-turn_lag = 1.2
+max_turn_rate_deg = 7.0
+turn_lag = 1.6
 wheel_enabled = true
 helm_enabled = true
 windsock_enabled = true
@@ -95,15 +95,18 @@ deck_water_enabled = true
 anchor_enabled = true
 sails_enabled = true
 
-[node name="CutterShip" parent="ShipRig" instance=ExtResource("1_cutter")]
+[node name="SchoonerShip" parent="ShipRig" instance=ExtResource("1_schooner")]
 
 [node name="Flooding" type="Node3D" parent="ShipRig"]
 script = ExtResource("7_flood")
 
 [node name="Player" type="CharacterBody3D" parent="." unique_id=638429936]
-transform = Transform3D(0.9659, 0, 0.2588, 0, 1, 0, -0.2588, 0, 0.9659, 0.3, 0.375, 4.6)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.5, 4.5)
 script = ExtResource("2_player")
 start_pitch_deg = -30.0
+start_cargo = {
+"cannon_shot": 6
+}
 
 [node name="CollisionShape3D" type="CollisionShape3D" parent="Player" unique_id=1045953852]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.51, 0)
@@ -144,5 +147,15 @@ port_scenes = {
 "CS14": "res://assets/port/PortSmall_CS14.glb",
 "CS15": "res://assets/port/PortSmall_CS15.glb",
 "CS16": "res://assets/port/PortSmall_CS16.glb",
-"CS17": "res://assets/port/PortSmall_CS17.glb"
+"CS17": "res://assets/port/PortSmall_CS17.glb",
+"DS19": "res://assets/port/PortSmall_DS19.glb",
+"DS20": "res://assets/port/PortSmall_DS20.glb",
+"DS21": "res://assets/port/PortSmall_DS21.glb",
+"DS22": "res://assets/port/PortSmall_DS22.glb",
+"AS08": "res://assets/port/PortSmall_AS08.glb",
+"CS18": "res://assets/port/PortSmall_CS18.glb",
+"DS23": "res://assets/port/PortSmall_DS23.glb",
+"BC01": "res://assets/port/PortCapital_Asian.glb",
+"DC03": "res://assets/port/PortCapital_African.glb",
+"FF24": "res://assets/port/PortSmall_FF24.glb"
 }

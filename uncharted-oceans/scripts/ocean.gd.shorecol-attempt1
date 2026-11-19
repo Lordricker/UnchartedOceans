@@ -1,0 +1,568 @@
+class_name Ocean
+extends MeshInstance3D
+## Open ocean: builds a camera-following radial grid, generates the wave table for the
+## current sea state, feeds it to ocean.gdshader, and answers get_height() on the CPU
+## with the same math, so ships float on exactly the waves you see.
+##
+## Keys (in game): 1 / 2 / 3 / 4 = calm / moderate / rough / storm (4 only away from ports: storm = rough's chop plus big swells).
+
+enum SeaState { CALM, MODERATE, ROUGH, STORM }
+
+## Continuous sea state: 0 = calm .. 3 = storm, blending between the presets. sea_state is its rounded value; setting
+## sea_state by hand (the 1-4 keys) sets this to match. The world's weather moves it smoothly with retarget().
+var sea_level := 1.0
+var _quiet := false
+## A short note for the debug readout when a storm sea was refused (key 4 close to a port).
+var storm_note := ""
+var _note_t := 0.0
+@export var sea_state: SeaState = SeaState.MODERATE:
+	set(v):
+		sea_state = v
+		if _quiet:
+			return
+		sea_level = float(v)
+		if is_inside_tree():
+			_apply_sea_state()
+## Direction the wind (and the main swell) travels toward, in degrees around Y. 0 = toward -Z.
+@export_range(0.0, 360.0) var wind_heading_deg := 35.0
+## How far the waves' directions spread around the wind, in degrees.
+@export_range(0.0, 90.0) var direction_spread_deg := 55.0
+@export var wave_seed := 7
+@export var sun_path: NodePath = ^"../Sun"
+## Waves used for per-pixel detail (the main GPU cost). The ripple pattern carries the finest
+## detail, so 16 is plenty; 28 = the old full detail, 12 = cheapest.
+@export_range(10, 32) var detail_octaves := 16
+## Water quality, like SkySystem.volumetric_quality. Standard is the sea as it is. High costs more GPU and adds: more small
+## waves (HIGH_EXTRA_OCTAVES more octaves of chop), foam that lingers behind breaking crests, and the ship's wake as water
+## that stays behind her (WakeTrail: the V of arms and the churned track, which bend when she turns and outlast her).
+## O (or F3) flips it while playing.
+@export_enum("Standard:0", "High:1") var water_quality := 0:
+	set(v):
+		water_quality = v
+		if is_inside_tree():
+			_apply_quality()
+## World mode (see WorldStreamer): radius of the planet in metres, for the curved horizon (0 = flat sea, as before).
+## Earth is 6370000. The sea drops away by d^2 / (2R), so an eye 3 m up sees the horizon at about 6 km.
+@export var curvature_radius_m := 0.0
+## The storm sea (key 4, the big swells) is blocked, and any storm sea eases down to rough, this close to a port (m). It
+## used to be the 6 km ring in which a port scene loads, which was far too wide; harbours themselves are only 200-300 m.
+@export var port_calm_radius_m := 1500.0
+@export_group("Mesh")
+@export var radius := 2500.0
+@export var segments := 320
+@export var first_ring := 0.35     ## radial spacing next to the camera (m)
+@export var ring_growth := 1.035   ## each ring this much wider than the last
+
+const MAX_WAVES := 32
+const G := 9.81
+## How much of the sea's through-the-wave glow is left when the sun gives no light (night, or hidden by a storm):
+## the sky's own light, not the sun's.
+const SUN_SCATTER_FLOOR := 0.07
+
+# per sea state: base wavelength (m), base amplitude (m), peak, warp, foam amount,
+# amplitude falloff per octave (higher = more energy in the shorter, steeper waves),
+# ripple strength (0 = no ripple pattern),
+# swell (0..1: how much of the big ocean swell replaces the longest chop waves, see SWELL_*),
+# foam_z (whitecaps form where the crest-fold score, in standard deviations, is above this; calibrated so the whitecap
+# coverage follows Monahan & O'Muircheartaigh's law at the wind of each state: SeaWind.speeds = 3 / 8.5 / 14 / 22 m/s
+# gives 0.02 / 0.57 / 3.1 / 14.5 % of the sea; the numbers are the quantiles of the fold score minus 0.1, measured on
+# this very wave table). The foam amount is how opaque the foam is, no longer how much of it there is.
+# The storm preset has the same chop as rough; it only adds the swell on top.
+# (Measured significant wave height of the table: 0.4 / 1.5 / 3.3 / 15 m. Real Beaufort at those winds is about
+# 0.3 / 2.1 / 4.8 / 9.2 m, so the storm is much bigger than a real force 9 on purpose.)
+const PRESETS := {
+	SeaState.CALM:     [38.0, 0.22, 0.8, 0.35, 0.0, 0.80, 0.0, 0.0, 3.9],
+	SeaState.MODERATE: [62.0, 0.70, 1.0, 0.50, 0.5, 0.82, 0.6, 0.0, 2.55],
+	SeaState.ROUGH:    [85.0, 1.40, 1.35, 0.60, 0.75, 0.845, 0.85, 0.0, 1.75],
+	SeaState.STORM:    [85.0, 1.40, 1.35, 0.60, 0.9, 0.845, 0.85, 1.0, 1.0],
+}
+## The storm swell: long, tall ocean swells that replace the first (longest) waves of the table at swell = 1.
+## Wavelength and crest-to-trough height in metres for each of those waves; together they stack to well over the
+## brig's height at the biggest moments. Tune SWELL_HEIGHTS to taste (the chop is untouched).
+const SWELL_LAMBDAS := [250.0, 205.0, 170.0]
+const SWELL_HEIGHTS := [9.0, 6.0, 4.0]
+const SWELL_SPREAD := 0.45   ## swell directions are this much tighter around the wind than the chop's
+const WAVELENGTH_FALLOFF := 1.18   ## each octave's wavelength = previous / this
+const HIGH_EXTRA_OCTAVES := 6      ## more small waves per pixel on the High water setting (down to about 2.6 m)
+## How fast foam rides downwind on the surface (m/s) at calm / moderate / rough / storm: about 3.5% of the wind
+## (SeaWind.speeds 3 / 8.5 / 14 / 22 m/s). The foam patterns drift at this speed, and on High the foam left behind a
+## breaking crest travels with it as it thins out.
+const FOAM_DRIFT := [0.12, 0.3, 0.5, 0.77]
+
+var time := 0.0
+var octaves := 16
+## The whitecap threshold and fold variance of the current sea state (what the water shader gets as foam_z and jac_v);
+## get_fold_z() and WaveSpray read them.
+var foam_z_now := 1.8
+var jac_v_now := 0.156
+var vertex_octaves := 10
+var peak := 1.0
+var warp := 0.5
+var height_offset := 0.0
+var sea_amplitude := 1.0
+
+var _dx := PackedFloat32Array()
+var _dz := PackedFloat32Array()
+var _k := PackedFloat32Array()
+var _a := PackedFloat32Array()
+var _w := PackedFloat32Array()
+var _p := PackedFloat32Array()
+var _p_base := PackedFloat32Array()   # the seeded phases, before the world-origin shift
+var _mat: ShaderMaterial
+var _sun: DirectionalLight3D
+var _island: Island
+## The foam and ripple patterns' frame (see _update_flow): which way they lie, their origin, and how far the foam has
+## drifted. Added up here frame by frame (64-bit), so a change in the wind changes only how fast they move, never where
+## they are.
+var _flow_dir := Vector2.ZERO
+var _flow_ox := 0.0
+var _flow_oz := 0.0
+var _scroll_x := 0.0
+var _scroll_z := 0.0
+var _foam_run := 0.0
+## World mode: the chart and where the Godot origin sits on it (chart metres, 64-bit floats).
+var chart: WorldChart
+## The terrain's ground on the CPU (set by WorldStreamer): the swell dies out in the last metres of water, as drawn.
+var ground    # world_ground.gd
+## A port scene's own ground (Godot world x, z, radius): the world-coast damping is off inside it (set by WorldTerrain.set_hole).
+var shore_hole := Vector3(0.0, 0.0, -1.0)
+
+func set_shore_hole(h: Vector3) -> void:
+	shore_hole = h
+	if _mat:
+		_mat.set_shader_parameter("shore_hole", h)
+var _ox := 0.0
+var _oz := 0.0
+
+func _ready() -> void:
+	# grab the material first: replacing the mesh drops surface override materials
+	_mat = material_override as ShaderMaterial
+	if _mat == null and get_surface_override_material_count() > 0:
+		_mat = get_surface_override_material(0) as ShaderMaterial
+	mesh = _build_mesh()
+	material_override = _mat
+	# the sea never needs to cast shadows; casting would redraw this 100k-tri mesh into
+	# every shadow cascade each frame
+	cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_sun = get_node_or_null(sun_path) as DirectionalLight3D
+	if _mat:
+		_mat.set_shader_parameter("curve_k", 0.5 / curvature_radius_m if curvature_radius_m > 0.0 else 0.0)
+	_apply_sea_state()
+
+## Storm seas (key 4, sea level 3: the big swell) are not allowed close to a port. "Close" is port_calm_radius_m (1.5 km).
+## It needs the chart, so outside the world scene it is always false.
+func near_port() -> bool:
+	if chart == null:
+		return false
+	var ship := get_tree().get_first_node_in_group("ships") as Node3D
+	if ship == null:
+		return false
+	var np := chart.nearest_port(ship.global_position.x + _ox, ship.global_position.z + _oz)
+	return not np.is_empty() and float(np["dist_m"]) <= port_calm_radius_m
+
+func storm_allowed() -> bool:
+	return not near_port()
+
+## A key 4 press that was turned down: puts a short note on the debug readout.
+func refuse_storm() -> void:
+	storm_note = "storm refused: too close to a port"
+	_note_t = 4.0
+
+func get_ocean_material() -> ShaderMaterial:
+	return _mat
+
+## An island (island.gd) tells the ocean about its heightmap: waves shoal (shrink) as the water
+## gets shallow and stay small inside a sheltered harbour, and the shader draws surf foam along
+## the shore. Both the shader and get_height() use the same numbers, so ships follow what you see.
+## One island at a time for now.
+func register_island(isl: Island) -> void:
+	_island = isl
+	if _mat and isl:
+		var res := isl.cells + 1
+		_mat.set_shader_parameter("island_tex", isl.texture)
+		_mat.set_shader_parameter("island_origin", Vector2(isl.global_position.x, isl.global_position.z))
+		_mat.set_shader_parameter("island_size", isl.domain_size)
+		_mat.set_shader_parameter("island_uv", Vector2(float(res - 1) / res, 0.5 / res))
+		_mat.set_shader_parameter("shoal_depth", Island.SHOAL_DEPTH)
+		_mat.set_shader_parameter("shoal_pow", Island.SHOAL_POW)
+		_mat.set_shader_parameter("island_on", 1.0)
+
+## World mode: tell the ocean about the chart and where the Godot origin sits on it. The waves are
+## defined in chart coordinates, so when the origin is rebased the wave phases are shifted by the
+## difference (computed in 64-bit here), and the sea looks and floats exactly as it did. Also turns on
+## macro shoaling from the chart's shelf. Call again after every rebase.
+func set_world(c: WorldChart, ox: float, oz: float) -> void:
+	var first := chart == null
+	if not first:
+		# a rebase moves everything in the scene by the change of origin: move the patterns' frame with it, so the foam
+		# and ripples stay on the same water (unless the totals have grown so big that float precision would suffer: then
+		# they start again from zero, a single jump)
+		var mx := ox - _ox
+		var mz := oz - _oz
+		_flow_ox -= mx
+		_flow_oz -= mz
+		_scroll_x -= mx
+		_scroll_z -= mz
+		if absf(_scroll_x) > 50000.0 or absf(_scroll_z) > 50000.0 or absf(_flow_ox) > 50000.0 or absf(_flow_oz) > 50000.0:
+			_scroll_x = 0.0
+			_scroll_z = 0.0
+			_flow_ox = 0.0
+			_flow_oz = 0.0
+	chart = c
+	_ox = ox
+	_oz = oz
+	_refresh_phase()
+	if _mat == null or c == null:
+		return
+	_mat.set_shader_parameter("chart_on", 1.0)
+	_mat.set_shader_parameter("shore_hole", shore_hole)
+	_mat.set_shader_parameter("chart_origin", Vector2(ox, oz))
+	_mat.set_shader_parameter("chart_size", Vector2(c.width_m, c.height_m))
+	_mat.set_shader_parameter("chart_mpp", c.mpp)
+	if first:
+		_mat.set_shader_parameter("chart_land", c.texture_of("land"))
+		_mat.set_shader_parameter("chart_shore", c.texture_of("shore"))
+		# the surf along the coasts asks the same ground height the terrain draws, which needs the 16-bit heightmap
+		_mat.set_shader_parameter("chart_px", Vector2(c.px_w, c.px_h))
+		var h16 := c.texture_of("height16")
+		if h16:
+			_mat.set_shader_parameter("chart_height16", h16)
+		else:
+			_mat.set_shader_parameter("coast_surf", 0.0)
+	_mat.set_shader_parameter("w_p", _p)
+	# the foam textures repeat every 1/scale metres, so shifting them by the fractional part keeps them put
+	var f1 := Vector2(fposmod(ox * 0.071, 1.0), fposmod(oz * 0.071, 1.0))
+	var f2x := (0.8 * ox - 0.6 * oz) * 0.193
+	var f2y := (0.6 * ox + 0.8 * oz) * 0.193
+	_mat.set_shader_parameter("foam_off1", f1)
+	_mat.set_shader_parameter("foam_off2", Vector2(fposmod(f2x, 1.0), fposmod(f2y, 1.0)))
+
+func _refresh_phase() -> void:
+	if _p_base.size() != _p.size():
+		return
+	for i in _p.size():
+		_p[i] = fposmod(_p_base[i] + (_dx[i] * _ox + _dz[i] * _oz) * _k[i], TAU)
+
+## Scale on the wave height at world (x, z): 1 in open water, smaller toward shore and in harbour.
+func wave_scale(x: float, z: float) -> float:
+	var s := _island.wave_scale(x, z) if _island else 1.0
+	if chart:
+		s *= chart.wave_scale(x + _ox, z + _oz)
+	return s
+
+func _unhandled_input(e: InputEvent) -> void:
+	if e is InputEventKey and e.pressed and not e.echo:
+		# O flips the water quality (F3 too, but many laptops need Fn for the F row, so it may never reach the game)
+		if e.physical_keycode == KEY_O or e.physical_keycode == KEY_F3:
+			water_quality = 1 - water_quality
+			var q_name := "High" if water_quality >= 1 else "Standard"
+			print("Ocean: water quality ", q_name)
+			storm_note = "water quality: " + q_name         # shows on the debug readout (H)
+			_note_t = 3.0
+			return
+		# in the world the SeaWind takes these keys (it sets the wind and the sea follows), so leave them to it
+		var wind_node = get_tree().get_first_node_in_group("wind")
+		if wind_node != null and wind_node.has_method("owns_sea_keys") and wind_node.owns_sea_keys():
+			return
+		match e.physical_keycode:
+			KEY_1: sea_state = SeaState.CALM
+			KEY_2: sea_state = SeaState.MODERATE
+			KEY_3: sea_state = SeaState.ROUGH
+			KEY_4:
+				if storm_allowed():
+					sea_state = SeaState.STORM
+				else:
+					refuse_storm()
+
+func _process(delta: float) -> void:
+	time += delta
+	if _note_t > 0.0:
+		_note_t -= delta
+		if _note_t <= 0.0:
+			storm_note = ""
+	var cam := get_viewport().get_camera_3d()
+	var view := Vector2.ZERO
+	if cam:
+		var c := cam.global_position
+		global_position = Vector3(c.x, 0.0, c.z)
+		view = Vector2(c.x, c.z)
+	_update_flow(delta, view)
+	if _mat:
+		_mat.set_shader_parameter("ocean_time", time)
+		if _sun:
+			_mat.set_shader_parameter("sun_dir", _sun.global_transform.basis.z)
+			# the light scattered through the waves follows the sun's own colour and strength, so the sea goes dark
+			# at night and in a storm (a SkySystem or the weather dims the sun); with a plain full-strength sun
+			# (energy 1) this is the colour the shader always had
+			var k := lerpf(SUN_SCATTER_FLOOR, 1.0, clampf(_sun.light_energy, 0.0, 1.0)) if _sun.visible else SUN_SCATTER_FLOOR
+			var lc := _sun.light_color
+			_mat.set_shader_parameter("sun_color", Color(lc.r * k, lc.g * k, lc.b * k))
+
+## Water surface height at world (x, z). Uses the mesh (swell) octaves only, which is what
+## a hull feels; the finer octaves are normal detail.
+func get_height(x: float, z: float, n: int = -1) -> float:
+	if n < 0:
+		n = vertex_octaves
+	var px := x
+	var pz := z
+	var h := 0.0
+	for i in mini(n, _k.size()):
+		var xx := (_dx[i] * px + _dz[i] * pz) * _k[i] + time * _w[i] + _p[i]
+		var s := sin(xx)
+		var e := exp(peak * (s - 1.0))
+		h += _a[i] * e
+		var d := _a[i] * peak * e * cos(xx)
+		px += _dx[i] * d * warp
+		pz += _dz[i] * d * warp
+	h += height_offset
+	h *= wave_scale(x, z)
+	# the last couple of metres of water before a world beach: the swell has broken (as ocean.gdshader draws it)
+	var in_port := shore_hole.z > 0.0 and Vector2(x, z).distance_to(Vector2(shore_hole.x, shore_hole.y)) < shore_hole.z
+	if ground and chart and not in_port and chart.shore_distance_m(x + _ox, z + _oz) < 1200.0:
+		h *= clampf(-ground.ground_y(x + _ox, z + _oz) / 2.5, 0.0, 1.0)
+	return h
+
+## The crest-fold score the water shader draws whitecaps from (fold_z in ocean.gdshader): high where a crest is bunching
+## up to break, and it is a whitecap where it is above foam_z_now. Same maths as the shader with every wave added up.
+## WaveSpray uses it to find the crests that should throw spray.
+func get_fold_z(x: float, z: float, n: int = -1) -> float:
+	if n < 0:
+		n = octaves
+	var px := x
+	var pz := z
+	var jac := 1.0
+	var jvar := 0.0
+	for i in mini(n, _k.size()):
+		var xx := (_dx[i] * px + _dz[i] * pz) * _k[i] + time * _w[i] + _p[i]
+		var s := sin(xx)
+		var c := cos(xx)
+		var e := exp(peak * (s - 1.0))
+		var a := _a[i]
+		var d := a * peak * e * c
+		var fk := warp * a * peak * _k[i]
+		jac *= maxf(1.0 + fk * e * (peak * c * c - s), 0.02)
+		jvar += fk * fk
+		px += _dx[i] * d * warp
+		pz += _dz[i] * d * warp
+	return (1.0 - jac) * wave_scale(x, z) / maxf(sqrt(jvar * jac_v_now), 0.004)
+
+func _apply_sea_state() -> void:
+	var pr: Array = _preset_at(sea_level)
+	var lambda0: float = pr[0]
+	var amp0: float = pr[1]
+	peak = pr[2]
+	warp = pr[3]
+	var foam: float = pr[4]
+	var amp_falloff: float = pr[5]
+	var ripple: float = pr[6]
+	var swell: float = pr[7]
+	var foam_z: float = pr[8]
+	foam_z_now = foam_z
+	jac_v_now = _fold_variance(peak)
+	octaves = _octaves_now()
+	vertex_octaves = 10
+
+	var rng := RandomNumberGenerator.new()
+	rng.seed = wave_seed
+	_dx.resize(MAX_WAVES); _dz.resize(MAX_WAVES); _k.resize(MAX_WAVES)
+	_a.resize(MAX_WAVES); _w.resize(MAX_WAVES); _p.resize(MAX_WAVES)
+	var wind := deg_to_rad(wind_heading_deg)
+	var spread := deg_to_rad(direction_spread_deg)
+	var lam := lambda0
+	var amp := amp0
+	var mean := 0.0
+	var m := _exp_sine_mean(peak)
+	for i in MAX_WAVES:
+		# small waves are pushed around by local gusts, so they spread wider
+		var lam_i := lam
+		var amp_i := amp
+		var spread_i := 0.6 + 0.6 * float(i) / MAX_WAVES
+		if swell > 0.0 and i < SWELL_LAMBDAS.size():
+			# the longest waves become the big swell (the rng is still drawn once per wave, so nothing else moves)
+			lam_i = lerpf(lam, float(SWELL_LAMBDAS[i]), swell)
+			amp_i = lerpf(amp, float(SWELL_HEIGHTS[i]), swell)
+			spread_i *= lerpf(1.0, SWELL_SPREAD, swell)
+		var ang := wind + rng.randf_range(-1.0, 1.0) * spread * spread_i
+		# A wave sin(k*d.p + w*t) travels toward -d, so d points to where the wave comes FROM: the opposite of the wind,
+		# which blows toward `ang`. (This used to be +sin / -cos, which made the swell roll against the wind.)
+		_dx[i] = -sin(ang)
+		_dz[i] = cos(ang)
+		_k[i] = TAU / lam_i
+		_a[i] = amp_i
+		_w[i] = sqrt(G * _k[i])          # deep-water dispersion: long waves travel faster
+		_p[i] = rng.randf() * TAU
+		if i < vertex_octaves:
+			mean += amp_i * m
+		lam /= WAVELENGTH_FALLOFF
+		amp *= amp_falloff
+	height_offset = -mean
+	_p_base = _p.duplicate()
+	_refresh_phase()
+	# rough crest height above mean level, for foam and scatter
+	sea_amplitude = 0.0
+	for i in vertex_octaves:
+		sea_amplitude += _a[i] * (1.0 - m)
+	sea_amplitude *= 0.5
+
+	if _mat:
+		_mat.set_shader_parameter("w_dx", _dx)
+		_mat.set_shader_parameter("w_dz", _dz)
+		_mat.set_shader_parameter("w_k", _k)
+		_mat.set_shader_parameter("w_a", _a)
+		_mat.set_shader_parameter("w_w", _w)
+		_mat.set_shader_parameter("w_p", _p)
+		_mat.set_shader_parameter("octaves", octaves)
+		_mat.set_shader_parameter("high_water", 1.0 if water_quality >= 1 else 0.0)
+		_mat.set_shader_parameter("vertex_octaves", vertex_octaves)
+		_mat.set_shader_parameter("peak", peak)
+		_mat.set_shader_parameter("warp", warp)
+		_mat.set_shader_parameter("height_offset", height_offset)
+		_mat.set_shader_parameter("sea_amplitude", sea_amplitude)
+		_mat.set_shader_parameter("foam_amount", foam)
+		_mat.set_shader_parameter("foam_z", foam_z)
+		_mat.set_shader_parameter("foam_drift", _foam_drift_at(sea_level))
+		_mat.set_shader_parameter("jac_v", _fold_variance(peak))
+		_mat.set_shader_parameter("ripple_strength", ripple)
+		_mat.set_shader_parameter("wind_dir", Vector2(sin(wind), -cos(wind)))
+
+## Moves the foam and ripple patterns on by one frame. The foam drifts downwind at FOAM_DRIFT; when the wind turns, the
+## patterns' frame turns with it about `pivot` (the camera), so the water in view keeps its pattern and only the far water
+## swings round, smoothly. (The shader used to work all of this out as speed * ocean_time along the wind, which made
+## the patterns jump every time the weather nudged the wind.)
+func _update_flow(delta: float, pivot: Vector2) -> void:
+	var w := deg_to_rad(wind_heading_deg)
+	var dir := Vector2(sin(w), -cos(w))
+	if _flow_dir == Vector2.ZERO:
+		_flow_dir = dir
+	else:
+		var ang := _flow_dir.angle_to(dir)
+		if absf(ang) > 1e-6:
+			var v := (pivot - Vector2(_flow_ox, _flow_oz)).rotated(ang)
+			_flow_ox = pivot.x - v.x
+			_flow_oz = pivot.y - v.y
+			_flow_dir = dir
+	var drift := _foam_drift_at(sea_level)
+	_scroll_x += dir.x * drift * delta
+	_scroll_z += dir.y * drift * delta
+	_foam_run += drift * delta
+	if _mat:
+		_mat.set_shader_parameter("flow_dir", _flow_dir)
+		_mat.set_shader_parameter("flow_o", Vector2(_flow_ox, _flow_oz))
+		_mat.set_shader_parameter("foam_scroll", Vector2(_scroll_x, _scroll_z))
+		_mat.set_shader_parameter("foam_run", _foam_run)
+
+## FOAM_DRIFT for a continuous sea level (0 = calm .. 3 = storm).
+static func _foam_drift_at(level: float) -> float:
+	var l := clampf(level, 0.0, 3.0)
+	var i := mini(int(floor(l)), 2)
+	return lerpf(float(FOAM_DRIFT[i]), float(FOAM_DRIFT[i + 1]), l - float(i))
+
+## Mean of exp(k*(sin x - 1)) over a cycle = e^-k * I0(k).
+static func _exp_sine_mean(k: float) -> float:
+	var i0 := 1.0
+	var term := 1.0
+	for j in range(1, 12):
+		term *= (k * 0.5) * (k * 0.5) / float(j * j)
+		i0 += term
+	return exp(-k) * i0
+
+## Variance of one wave's crest-fold term, e * (k * cos^2 - sin) with e = exp(k * (sin - 1)) (k = the peak), over a cycle.
+## Its mean is 0 (it is the derivative of a periodic function). The shader divides the fold by the square root of the
+## sum of these over the waves, which turns it into a standard score; see the foam in ocean.gdshader.
+static func _fold_variance(k: float) -> float:
+	var n := 128
+	var sum := 0.0
+	for j in n:
+		var x := TAU * float(j) / float(n)
+		var s := sin(x)
+		var c := cos(x)
+		var g := exp(k * (s - 1.0)) * (k * c * c - s)
+		sum += g * g
+	return sum / float(n)
+
+## How many waves the fragment stage adds up per pixel: detail_octaves, plus the extra small waves of the High setting.
+func _octaves_now() -> int:
+	return mini(detail_octaves + (HIGH_EXTRA_OCTAVES if water_quality >= 1 else 0), MAX_WAVES)
+
+## Switch the water quality without rebuilding the wave table (so the sea does not jump): only the shader's settings change.
+func _apply_quality() -> void:
+	octaves = _octaves_now()
+	if _mat:
+		_mat.set_shader_parameter("octaves", octaves)
+		_mat.set_shader_parameter("high_water", 1.0 if water_quality >= 1 else 0.0)
+
+func _build_mesh() -> ArrayMesh:
+	var radii := PackedFloat32Array([0.0])
+	var step := first_ring
+	while radii[radii.size() - 1] < radius:
+		radii.append(radii[radii.size() - 1] + step)
+		step *= ring_growth
+	var verts := PackedVector3Array()
+	var idx := PackedInt32Array()
+	verts.append(Vector3.ZERO)
+	for r in range(1, radii.size()):
+		for s in segments:
+			var a := TAU * float(s) / segments
+			verts.append(Vector3(cos(a) * radii[r], 0.0, sin(a) * radii[r]))
+	# centre fan
+	for s in segments:
+		var s2 := (s + 1) % segments
+		idx.append_array([0, 1 + s, 1 + s2])
+	# rings
+	for r in range(1, radii.size() - 1):
+		var b0 := 1 + (r - 1) * segments
+		var b1 := 1 + r * segments
+		for s in segments:
+			var s2 := (s + 1) % segments
+			idx.append_array([b0 + s, b1 + s, b0 + s2, b0 + s2, b1 + s, b1 + s2])
+	var normals := PackedVector3Array()
+	normals.resize(verts.size())
+	normals.fill(Vector3.UP)
+	var arr := []
+	arr.resize(Mesh.ARRAY_MAX)
+	arr[Mesh.ARRAY_VERTEX] = verts
+	arr[Mesh.ARRAY_NORMAL] = normals
+	arr[Mesh.ARRAY_INDEX] = idx
+	var am := ArrayMesh.new()
+	am.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr)
+	am.custom_aabb = AABB(Vector3(-radius, -20.0, -radius), Vector3(radius * 2.0, 40.0, radius * 2.0))
+	return am
+
+## The preset values for a continuous sea level (0 = calm .. 3 = storm), blended between the two nearest presets.
+func _preset_at(level: float) -> Array:
+	var l := clampf(level, 0.0, 3.0)
+	var i := mini(int(floor(l)), 2)
+	var f := l - float(i)
+	var a: Array = PRESETS[i]
+	var b: Array = PRESETS[i + 1]
+	var out: Array = []
+	for j in a.size():
+		out.append(lerpf(float(a[j]), float(b[j]), f))
+	return out
+
+## Turn the swell to a new direction and/or sea level without a visible jump. The wave table is rebuilt for the new
+## values, then every wave's phase is corrected so that, at `pivot` (x, z in the Godot scene: the ship), each wave has
+## exactly the phase it had a moment ago. Around that point the sea carries on as it was; further off it swings round
+## gradually. Call it every frame while the weather is changing (SeaWind does): the phases only match exactly at the
+## pivot, so a big step makes the water further off visibly jump, while many tiny steps make it swing round smoothly.
+func retarget(heading_deg: float, level: float, pivot: Vector2) -> void:
+	var have_table := _k.size() == MAX_WAVES and _p_base.size() == MAX_WAVES
+	var before := PackedFloat64Array()
+	before.resize(MAX_WAVES)
+	if have_table:
+		for i in MAX_WAVES:
+			before[i] = (_dx[i] * pivot.x + _dz[i] * pivot.y) * _k[i] + time * _w[i] + _p[i]
+	wind_heading_deg = fposmod(heading_deg, 360.0)
+	sea_level = clampf(level, 0.0, 3.0)
+	_quiet = true
+	sea_state = clampi(roundi(sea_level), 0, 3) as SeaState
+	_quiet = false
+	_apply_sea_state()
+	if not have_table:
+		return
+	for i in MAX_WAVES:
+		var now := (_dx[i] * pivot.x + _dz[i] * pivot.y) * _k[i] + time * _w[i] + _p[i]
+		_p_base[i] = fposmod(_p_base[i] + (before[i] - now), TAU)
+	_refresh_phase()
+	if _mat:
+		_mat.set_shader_parameter("w_p", _p)

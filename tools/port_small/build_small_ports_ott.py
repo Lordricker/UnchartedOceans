@@ -29,6 +29,7 @@ PORTS = [
     ("CS15", "LL", [("HM", 2), ("AM", 3)], 22, 32),
     ("CS16", "RR", [("AM", 4), ("HM", 3)], 23, 33),
     ("CS17", "LR", [("HM", 4), ("AM", 1)], 24, 34),
+    ("CS18", "RL", [("AM", 1), ("HM", 3)], 25, 35),
 ]
 def base(n): return re.sub(r"\.\d{3}$", "", n)
 
@@ -228,7 +229,10 @@ def build_port(pid, layout, bldgs, sseed, lseed):
     for me in extra_meshes:
         if me.users == 0: bpy.data.meshes.remove(me)
 
-for cfg in PORTS: build_port(*cfg)
+ONLY = [x for x in os.environ.get('PORT_ONLY', '').split(',') if x]   # e.g. PORT_ONLY=AS08 rebuilds just that port
+for cfg in PORTS:
+    if ONLY and cfg[0] not in ONLY: continue
+    build_port(*cfg)
 
 IMPORT = """[remap]
 

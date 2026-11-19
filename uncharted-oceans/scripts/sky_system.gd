@@ -130,6 +130,25 @@ signal lightning(cell: StormCell, distance_m: float, thunder_delay_s: float)
 @export var ambient_from_sky := false
 @export var debug_overlay := true
 
+@export_group("Look")
+## The richer lighting look: AgX tone mapping, sky-tinted ambient at lower strength (shade gets depth and a cool
+## top / dark underside instead of one flat fill), SSAO contact shadows, SSIL bounce light, volumetric haze the sun
+## shines through, soft sun shadows and a touch of bloom. F4 toggles it in game to compare with the old look.
+@export var cinematic_look := true:
+	set(v):
+		cinematic_look = v
+		if _env != null:
+			_apply_look()
+## How much of the flat ambient fill is kept with the look on (lower = deeper shade, more contrast).
+@export_range(0.0, 1.0) var look_ambient_scale := 0.7
+## Share of the ambient that comes from the sky cubemap (the rest is the single colour worked out here, which keeps
+## the night from going black).
+@export_range(0.0, 1.0) var look_sky_ambient := 0.65
+## Volumetric haze density in clear weather (it thickens with overcast and storms).
+@export_range(0.0, 0.05, 0.0005) var look_haze := 0.001
+## Tone-mapping exposure with the look on.
+@export_range(0.5, 2.0) var look_exposure := 1.3
+
 ## The storms in the world.
 var storms: Array[StormCell] = []
 
@@ -166,6 +185,7 @@ var _vol_ready := false
 var _vol_wait := 0.0
 var _vol_time := 0.0
 var _diag_t := 2.0
+var _look_q := -1
 
 func _ready() -> void:
 	add_to_group("sky_system")      # Ambience finds it here to play the thunder
@@ -228,6 +248,59 @@ func _setup() -> void:
 	_env.fog_enabled = true
 	_env.fog_sky_affect = 0.0
 	_build_sky()
+	_apply_look()
+
+## Turns the richer look on or off (see cinematic_look). Weather-driven parts (haze density and colour, ambient
+## strength) are updated every frame in _apply().
+## The parts follow the graphics quality (volumetric_quality), measured on the Victus at the capital:
+##   all tiers  AgX, exposure, colour grade, sky-tinted ambient (~free)
+##   Medium+    volumetric haze, soft sun shadows, bloom (~2 ms together)
+##   High       SSAO + SSIL (~5.5 ms: most of it is the extra depth/normal pass of the whole scene they share)
+func _apply_look() -> void:
+	var on := cinematic_look
+	var q := volumetric_quality
+	_look_q = q
+	_env.tonemap_mode = Environment.TONE_MAPPER_AGX if on else Environment.TONE_MAPPER_FILMIC
+	_env.tonemap_exposure = look_exposure if on else 1.0
+	if on:
+		_env.ambient_light_source = Environment.AMBIENT_SOURCE_SKY
+		_env.ambient_light_sky_contribution = look_sky_ambient
+	else:
+		_env.ambient_light_source = Environment.AMBIENT_SOURCE_SKY if ambient_from_sky else Environment.AMBIENT_SOURCE_COLOR
+		_env.ambient_light_sky_contribution = 1.0
+	# contact shadows in corners, under eaves, between planks
+	_env.ssao_enabled = on and q >= 2
+	_env.ssao_radius = 1.2
+	_env.ssao_intensity = 2.2
+	_env.ssao_power = 1.6
+	_env.ssao_detail = 0.6
+	_env.ssao_light_affect = 0.15
+	# bounce light: sunlit walls and sand tint what faces them
+	_env.ssil_enabled = on and q >= 2
+	_env.ssil_radius = 6.0
+	_env.ssil_intensity = 1.2
+	# haze in the air the sun shines through (only the first ~150 m; the exponential fog carries the distance)
+	_env.volumetric_fog_enabled = on and q >= 1
+	_env.volumetric_fog_length = 160.0
+	_env.volumetric_fog_detail_spread = 2.0
+	_env.volumetric_fog_anisotropy = 0.6
+	_env.volumetric_fog_ambient_inject = 1.0
+	_env.volumetric_fog_sky_affect = 0.0
+	_env.volumetric_fog_temporal_reprojection_enabled = true
+	# a little bloom on the sun glints, lanterns and bright sky
+	_env.glow_enabled = on and q >= 1
+	_env.glow_intensity = 0.6
+	_env.glow_bloom = 0.04
+	_env.glow_hdr_threshold = 1.0
+	_env.glow_blend_mode = Environment.GLOW_BLEND_MODE_SOFTLIGHT
+	_env.adjustment_enabled = on
+	_env.adjustment_contrast = 1.06
+	_env.adjustment_saturation = 1.15
+	if sun:
+		# the real sun is about half a degree across: soft, widening shadow edges
+		sun.light_angular_distance = 0.5 if on and q >= 1 else 0.0
+		sun.light_volumetric_fog_energy = 1.0
+	print("SkySystem: cinematic look ", "on" if on else "off")
 
 func _build_sky() -> void:
 	var sky := Sky.new()
@@ -426,6 +499,8 @@ func _process(delta: float) -> void:
 	_diag(delta)
 	_step_storms(delta)
 	_update_moon_cloud(delta)
+	if _look_q != volumetric_quality:
+		_apply_look()
 	_apply()
 	_update_debug()
 
@@ -435,6 +510,8 @@ func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventKey and event.pressed and not event.echo and event.physical_keycode == KEY_F2:
 		volumetric_storms = not volumetric_storms
 		print("SkySystem: volumetric storms ", "on" if volumetric_storms else "off (painted storm wall)")
+	if event is InputEventKey and event.pressed and not event.echo and event.physical_keycode == KEY_F4:
+		cinematic_look = not cinematic_look
 
 # ---------------------------------------------------------------- sun and moon positions
 
@@ -754,11 +831,14 @@ func _apply() -> void:
 			var ac := mid.lerp(hor, 0.5).lerp(Color(0.7, 0.8, 1.0), clampf(flash_light, 0.0, 1.0) * 0.6)
 			ac = ac.lerp(under_c, under_k * 0.5)
 			_env.ambient_light_color = ac.lerp(moon_ambient_color, clampf(moon_amb_k * 0.85, 0.0, 1.0))
-			_env.ambient_light_energy = amb
+			_env.ambient_light_energy = amb * (look_ambient_scale if cinematic_look else 1.0)
 		var fog_c := hor.lerp(mid, 0.15)
 		fog_c = fog_c.lerp(under_c, under_k * 0.4)
 		_env.fog_light_color = fog_c.lerp(moon_ambient_color.lightened(0.1), clampf(moon_amb_k * 0.6, 0.0, 1.0))
 		_env.fog_density = lerpf(0.00018, 0.0011, clampf(s * 0.8 + o * 0.25, 0.0, 1.0))
+		if cinematic_look:
+			_env.volumetric_fog_density = look_haze * (1.0 + 2.5 * clampf(s + o * 0.5, 0.0, 1.0))
+			_env.volumetric_fog_albedo = _env.fog_light_color.lightened(0.35)
 
 	_last_zen = zen
 	_last_hor = hor
@@ -826,7 +906,8 @@ func _update_debug() -> void:
 			phase_name(moon_phase), moon_age_days(), moon_elevation_deg(), _last_moon_str, _moon_cloud, _moon_ring]
 	var tier_name: String = ["Low", "Medium", "High"][clampi(volumetric_quality, 0, 2)]
 	var cloud_line := "raymarched cumulus" if cumulus_active() else "flat layer"
-	_dbg.text = "SKY DEBUG   F1 = swap sky renderer   F2 = volumetric storms on/off\nrenderer: %s   ambient: %s   quality: %s   clouds: %s\nsun %+.1f deg   light %.2f   ambient %.2f\nzenith #%s   horizon #%s\n%s\n%s" % [
+	_dbg.text = "SKY DEBUG   F1 = swap sky renderer   F2 = volumetric storms on/off   F4 = look %s\nrenderer: %s   ambient: %s   quality: %s   clouds: %s\nsun %+.1f deg   light %.2f   ambient %.2f\nzenith #%s   horizon #%s\n%s\n%s" % [
+		"ON" if cinematic_look else "off",
 		"custom shader" if use_shader_sky else "built-in (same colours)",
 		"sky cubemap" if ambient_from_sky else "single colour",
 		tier_name, cloud_line,

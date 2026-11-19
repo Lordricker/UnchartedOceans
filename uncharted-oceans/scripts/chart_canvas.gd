@@ -26,6 +26,9 @@ var ring_per_km := 0.02
 var active := true
 ## The ship's dot is drawn 1/dot_scale of its size: the magnifying glass sets this to its zoom so the dot stays small.
 var dot_scale := 1.0
+## The ship's dot fades in and out: seconds per blink, and the faintest it gets (1 = no blink).
+var dot_blink_period := 1.8
+var dot_blink_min := 0.4
 
 var _chart: WorldChart
 var _scale := 1.0                 # canvas pixels per chart pixel
@@ -111,17 +114,19 @@ func _draw() -> void:
 	# frame
 	draw_rect(Rect2(Vector2.ZERO, Vector2(w_px, h_px)), Color(0.12, 0.07, 0.03), false, 10.0)
 	# the planned route
-	var cx := float(streamer.call("ship_cx"))
-	var cz := float(streamer.call("ship_cz"))
+	# the world wraps: the ship and the route are drawn on the chart's own copy of them, and a leg that runs off one
+	# edge is drawn again coming in at the other
+	var cs := WorldChart.canon(Vector2(float(streamer.call("ship_cx")), float(streamer.call("ship_cz"))))
+	var cx := cs.x
+	var cz := cs.y
 	var route: Array = streamer.get("route")
 	var ri := int(streamer.get("route_i"))
 	if route.size() > 1:      # a dashed course only for a planned multi-leg route; with none the diamond is the only mark
-		var pts := PackedVector2Array([_p(cx, cz)])
+		var prev := cs
 		for i in range(mini(ri, route.size() - 1), route.size()):
-			var wp: Vector2 = route[i]
-			pts.append(_p(wp.x, wp.y))
-		for i in range(pts.size() - 1):
-			draw_dashed_line(pts[i], pts[i + 1], Color(GOLD, 0.75), 3.0, 14.0)
+			var wp: Vector2 = WorldChart.near(route[i], prev)
+			_wrapped_dash(prev, wp)
+			prev = wp
 	# ports
 	var dest := String(streamer.get("destination"))
 	for p in _chart.ports:
@@ -137,9 +142,9 @@ func _draw() -> void:
 			var diamond := PackedVector2Array([pos + Vector2(0, -dr), pos + Vector2(dr, 0), pos + Vector2(0, dr), pos + Vector2(-dr, 0)])
 			draw_colored_polygon(diamond, Color(GOLD, 0.35))
 			draw_polyline(PackedVector2Array([diamond[0], diamond[1], diamond[2], diamond[3], diamond[0]]), GOLD, 4.0)
-			_text(pos + Vector2(r + 5.0, 6.0), String(p["id"]), 18 if big else 15, GOLD)
+			_text(pos + Vector2(r + 5.0, 6.0), String(p["name"]), 18 if big else 15, GOLD)
 		else:
-			_text(pos + Vector2(r + 5.0, 6.0), String(p["id"]), 18 if big else 15, INK)
+			_text(pos + Vector2(r + 5.0, 6.0), String(p["name"]), 18 if big else 15, INK)
 	# the ship: a ring that grows with the distance from the last port, and the marker
 	var sp := _p(cx, cz)
 	var from_port := 0.0
@@ -150,7 +155,9 @@ func _draw() -> void:
 	draw_circle(sp, ring_px, Color(1.0, 0.95, 0.4, 0.12))
 	draw_arc(sp, ring_px, 0.0, TAU, 64, Color(1.0, 0.95, 0.4, 0.8), 2.5)
 	# just a dot: the way you are pointing is read off the compass, not the chart
-	draw_circle(sp, 9.0 / dot_scale, Color(1.0, 0.95, 0.4))
+	# a faint slow blink so the eye finds "you are here": fades between dot_blink_min and full, smooth, not on/off
+	var blink := 0.5 + 0.5 * sin(Time.get_ticks_msec() / 1000.0 * TAU / dot_blink_period)
+	draw_circle(sp, 9.0 / dot_scale, Color(1.0, 0.95, 0.4, lerpf(dot_blink_min, 1.0, blink)))
 	draw_arc(sp, 9.0 / dot_scale, 0.0, TAU, 24, Color(0, 0, 0, 0.9), 2.5 / dot_scale)
 	# scale bar (100 km) and north
 	var bar := 100000.0 / _chart.mpp * _scale
@@ -163,3 +170,16 @@ func _draw() -> void:
 	draw_line(np2 + Vector2(0, 40), np2 + Vector2(0, -26), INK, 4.0)
 	draw_colored_polygon(PackedVector2Array([np2 + Vector2(0, -42), np2 + Vector2(-9, -22), np2 + Vector2(9, -22)]), INK)
 	_text(np2 + Vector2(0, -50), "N", 26, INK, true)
+
+
+## A dashed leg from a to b (chart metres, b the copy nearest a), on the chart and, if it crosses an edge, again on the
+## far side.
+func _wrapped_dash(a: Vector2, b: Vector2) -> void:
+	var a0 := WorldChart.canon(a)
+	var b0 := a0 + (b - a)
+	draw_dashed_line(_p(a0.x, a0.y), _p(b0.x, b0.y), Color(GOLD, 0.75), 3.0, 14.0)
+	var inside := b0.x >= 0.0 and b0.y >= 0.0 and b0.x <= _chart.width_m and b0.y <= _chart.height_m
+	if not inside:
+		var b1 := WorldChart.canon(b0)
+		var a1 := b1 - (b - a)
+		draw_dashed_line(_p(a1.x, a1.y), _p(b1.x, b1.y), Color(GOLD, 0.75), 3.0, 14.0)

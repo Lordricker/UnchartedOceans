@@ -21,3 +21,6 @@ mono_crash.*.json
 # brig merge pipeline: generated intermediates and the scratch folder
 _to_delete/
 tools/brig_merge/out/
+
+# in-game bug reports (Esc > Report a bug)
+bug_reports/

@@ -32,7 +32,19 @@ extends Node3D
 @export var swing_lift := 0.02             ## the forward-swinging hand rises a little
 @export var bob_height := 0.012
 @export var side_sway := 0.01
-@export var run_closed := 0.3              ## how much the fingers curl at a full run
+
+@export_group("Running")
+## Metres per left+right cycle at a full run. Running strides are long, so the arms pump at a steady
+## ~1.7 cycles a second instead of buzzing at the walking stride's rate.
+@export var run_stride_length := 3.2
+## Elbows bend when you run: the hands come up, in toward the chest and a little closer.
+@export var run_offset := Vector3(-0.045, 0.085, 0.04)
+@export var run_pitch_deg := 16.0          ## fingers tip up more with the elbows bent
+@export var run_swing_distance := 0.12     ## forward/back pump
+@export var run_swing_lift := 0.07         ## the forward hand rises as it pumps forward...
+@export var run_cross := 0.035             ## ...and drifts in toward the middle
+@export var run_bob := 0.018               ## jolt at each footfall
+@export var run_closed := 0.5              ## loose fists at a full run
 
 @export_group("Air")
 @export var air_follow := 0.012            ## hand offset per m/s of vertical speed (rise = drop, fall = float)
@@ -234,9 +246,11 @@ func _update_state(delta: float) -> void:
 
 	# walking: phase follows distance, amplitude follows speed
 	var speed := ground_speed if grounded else 0.0
-	_walk_phase += speed * delta / stride_length * TAU
-	_walk_amp = move_toward(_walk_amp, clampf(speed / 3.0, 0.0, 1.6), 6.0 * delta)
-	_run_amp = move_toward(_run_amp, clampf((speed - 3.0) / 2.5, 0.0, 1.0) if sprinting else 0.0, 4.0 * delta)
+	_run_amp = move_toward(_run_amp, clampf((speed - 3.0) / 2.5, 0.0, 1.0) if sprinting else 0.0, 3.0 * delta)
+	# the stride lengthens as you speed up, so the arm rate stays human
+	var stride := lerpf(stride_length, run_stride_length, smoothstep(0.0, 1.0, _run_amp))
+	_walk_phase += speed * delta / maxf(stride, 0.1) * TAU
+	_walk_amp = move_toward(_walk_amp, clampf(speed / 3.0, 0.0, 1.0), 6.0 * delta)
 	# climbing: phase follows height climbed (negative when climbing down)
 	if climbing:
 		_climb_phase += climb_rate * delta / climb_cycle_length
@@ -331,12 +345,30 @@ func _ground_pose(s: float, i: int) -> Array:
 	var pos := _mirror_pos(rest_position, s)
 	var rot := _mirror_rot(rest_rotation_deg, s)
 	var ph := _walk_phase + (0.0 if i == 0 else PI)
-	var a := _walk_amp
+	var r := smoothstep(0.0, 1.0, _run_amp)
+	var a := _walk_amp * (1.0 - r)
+	# walking: easy swing from the shoulder
 	pos.z += sin(ph) * swing_distance * a
 	pos.y += sin(ph) * swing_lift * a + sin(2.0 * _walk_phase + 1.2) * bob_height * a
 	pos.x += s * cos(ph) * side_sway * a
 	rot.x += sin(ph) * 7.0 * a
 	rot.z += s * cos(ph) * 4.0 * a
+	if r > 0.0:
+		# running: elbows bent, hands pump forward-up-in and back-down-out on an arc
+		var sw := -sin(ph)                     # +1 = this hand fully forward
+		var fwd := maxf(sw, 0.0)
+		pos += _mirror_pos(run_offset, s) * r
+		pos.z -= sw * run_swing_distance * r * 0.5
+		pos.y += (sw * 0.5 + fwd * fwd * 0.5) * run_swing_lift * r
+		pos.x -= s * fwd * run_cross * r
+		# a jolt down at each footfall (one per arm extreme), sharp then easing off
+		var strike := pow(1.0 - absf(cos(_walk_phase)), 3.0)
+		pos.y -= strike * run_bob * r
+		# the wrist follows a beat behind the arm, so it reads as a pump, not a slide
+		var lag := -sin(ph - 0.45)
+		rot.x += (run_pitch_deg + lag * 14.0) * r
+		rot.y += s * fwd * 10.0 * r            # forward hand turns in across the body
+		rot.z += s * lag * 6.0 * r
 	# breathing / idle drift, slightly different per hand
 	var t := _time + (0.0 if i == 0 else 1.7)
 	pos.y += sin(t * 1.5) * 0.0035

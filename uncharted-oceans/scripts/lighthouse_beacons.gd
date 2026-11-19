@@ -210,8 +210,10 @@ func _process(delta: float) -> void:
 		if real != null:
 			pos = real.global_position + Vector3(0.0, 0.4, 0.0)
 		else:
-			var sx: float = float(it["x"]) - ox
-			var sz: float = float(it["z"]) - oz
+			# the copy of the light nearest the ship (the world wraps)
+			var nl := WorldChart.near(Vector2(float(it["x"]), float(it["z"])), Vector2(float(streamer.ship_cx()), float(streamer.ship_cz())))
+			var sx: float = nl.x - ox
+			var sz: float = nl.y - oz
 			if lighthouse_offsets.has(id) and streamer.port_scenes.has(id):
 				var o: Vector3 = Basis(Vector3.UP, float(streamer.port_yaw(id))) * (lighthouse_offsets[id] as Vector3)
 				sx += o.x

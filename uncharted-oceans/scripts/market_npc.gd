@@ -18,6 +18,11 @@ var bounds := AABB()
 var _model: Node3D
 
 
+## What the aim prompt says while you look at this person (courier_npc.gd says its own).
+func prompt_text() -> String:
+	return "Click: talk to %s" % stall.title
+
+
 ## Turn to face a world position (+Z is the front of the models).
 func face(target: Vector3) -> void:
 	var d := target - global_position

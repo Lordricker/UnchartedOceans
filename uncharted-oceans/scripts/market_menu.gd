@@ -153,7 +153,7 @@ func _refresh_harbor_master() -> void:
 		l.text = "The harbour master has no ledger of ships here."
 		_list.add_child(l)
 		return
-	_list.add_child(_heading("Ships in this harbour   (%d)" % fleet.ship_count()))
+	_list.add_child(_heading("Your other ships in this harbour   (%d)" % fleet.ship_count()))
 	var can := fleet.can_switch()
 	if not can:
 		var warn := Label.new()
@@ -192,7 +192,7 @@ func _refresh_harbor_master() -> void:
 		shown += 1
 	if shown == 0:
 		var none := Label.new()
-		none.text = "No other ships lying here."
+		none.text = "None. Ships lying in the berths are for sale: walk aboard one to buy her."
 		box.add_child(none)
 
 

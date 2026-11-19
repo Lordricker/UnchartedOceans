@@ -1,0 +1,242 @@
+class_name WorldTerrain
+extends MeshInstance3D
+## Macro terrain for the world chart: land from the heightmap, sea floor from the shelf.
+## A camera-following radial grid (like the Ocean) displaced in world_terrain.gdshader; no collision.
+## The streamer calls set_world() after every rebase of the origin.
+
+@export var radius := 110000.0     ## mountains show over the horizon, so this reaches far
+@export var segments := 288
+@export var first_ring := 40.0
+@export var ring_growth := 1.04
+@export var relief_m := 1100.0
+@export var curvature_radius_m := 6370000.0
+
+var ocean: Node        ## the sea (set by WorldStreamer): its quality, clock and sun drive the shore effects of the High setting
+var _mat: ShaderMaterial
+## The port's terrain hole, Godot world (x, z, radius); radius <= 0 = none. Read by the shore collider and the keel test.
+var hole_world := Vector3(0.0, 0.0, -1.0)
+
+## The detail patch: a fine grid locked to the world (so the waterline does not crawl as the camera moves) that draws
+## the ground near the camera instead of the coarse rings. Only shown near a coast.
+@export var patch_size_m := 768.0
+@export var patch_cell_high_m := 3.0      ## High water setting
+@export var patch_cell_std_m := 6.0       ## Standard (the old laptop)
+@export var patch_show_shore_m := 1500.0
+## Sand detail up close, from the shared Poly Haven set (textures/port/shared, the same files the ports use).
+const SAND_DIFF := "res://textures/port/shared/sand_01_diff_1k.jpg"
+const SAND_NOR := "res://textures/port/shared/sand_01_nor_gl_1k.jpg"
+const SAND_TILE_M := 3.0
+var _patch: MeshInstance3D
+var _patch_cell := 0.0
+var _chart: WorldChart
+var _ox := 0.0
+var _oz := 0.0
+var _vis_t := 0.0
+
+func _ready() -> void:
+	var sh := load("res://shaders/world_terrain.gdshader") as Shader
+	_mat = ShaderMaterial.new()
+	_mat.shader = sh
+	_mat.set_shader_parameter("relief_m", relief_m)
+	_mat.set_shader_parameter("curve_k", 0.5 / curvature_radius_m if curvature_radius_m > 0.0 else 0.0)
+	mesh = _build_mesh()
+	material_override = _mat
+	cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	if ResourceLoader.exists(SAND_DIFF):
+		_mat.set_shader_parameter("sand_detail", load(SAND_DIFF))
+	if ResourceLoader.exists(SAND_NOR):
+		_mat.set_shader_parameter("sand_normal", load(SAND_NOR))
+	_patch = MeshInstance3D.new()
+	_patch.name = "DetailPatch"
+	_patch.material_override = _mat
+	_patch.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_patch.top_level = true
+	_patch.visible = false
+	add_child(_patch)
+	_patch.set_instance_shader_parameter("patch_layer", 1.0)
+
+func set_world(c: WorldChart, ox: float, oz: float) -> void:
+	_chart = c
+	_ox = ox
+	_oz = oz
+	if _mat == null:
+		return
+	# the sand texture's offset for this origin, worked out in 64-bit (the shader's own float would be too coarse)
+	_mat.set_shader_parameter("sand_uv_off", Vector2(fposmod(ox, SAND_TILE_M), fposmod(oz, SAND_TILE_M)) / SAND_TILE_M)
+	_mat.set_shader_parameter("sand_tile_m", SAND_TILE_M)
+	_mat.set_shader_parameter("chart_origin", Vector2(ox, oz))
+	_mat.set_shader_parameter("chart_size", Vector2(c.width_m, c.height_m))
+	_mat.set_shader_parameter("chart_px", Vector2(c.px_w, c.px_h))
+	_mat.set_shader_parameter("chart_mpp", c.mpp)
+	_mat.set_shader_parameter("chart_land", c.texture_of("land"))
+	_mat.set_shader_parameter("chart_shore", c.texture_of("shore"))
+	var h16 := c.texture_of("height16")
+	if h16:
+		_mat.set_shader_parameter("chart_height16", h16)
+
+## Cut a hole in the terrain (Godot world xz and radius) where a full port scene brings its own ground; radius <= 0 clears it.
+func set_hole(x: float, z: float, r: float) -> void:
+	hole_world = Vector3(x, z, r)
+	if ocean and ocean.has_method("set_shore_hole"):
+		# the whole harbour (as far out as the port's own grounding reaches), not just the cut in the land
+		ocean.set_shore_hole(Vector3(x, z, r + 380.0) if r > 0.0 else hole_world)
+	if _mat:
+		_mat.set_shader_parameter("hole", Vector3(x, z, r))
+
+func _process(_delta: float) -> void:
+	var cam := get_viewport().get_camera_3d()
+	if cam:
+		global_position = Vector3(cam.global_position.x, 0.0, cam.global_position.z)
+		_update_patch(cam.global_position, _delta)
+	_push_sea()
+
+
+## Shows the detail patch round the camera near a coast, its grid snapped to the world so it never slides, and tells the
+## coarse rings to leave that square to it.
+func _update_patch(cam: Vector3, delta: float) -> void:
+	if _patch == null or _chart == null:
+		return
+	_vis_t -= delta
+	if _vis_t <= 0.0:
+		_vis_t = 0.5
+		var cx := _ox + cam.x
+		var cz := _oz + cam.z
+		var near := _chart.is_land(cx, cz) or _chart.shore_distance_m(cx, cz) < patch_show_shore_m
+		_patch.visible = near
+		var cell := patch_cell_high_m if _high() else patch_cell_std_m
+		if near and cell != _patch_cell:
+			_patch_cell = cell
+			_patch.mesh = _build_patch(cell)
+	if not _patch.visible:
+		_mat.set_shader_parameter("patch_rect", Vector4.ZERO)
+		return
+	# snap in chart space (64-bit), so the vertices sit on the same world points whatever the origin
+	var sx := roundf((_ox + cam.x) / _patch_cell) * _patch_cell - _ox
+	var sz := roundf((_oz + cam.z) / _patch_cell) * _patch_cell - _oz
+	_patch.global_position = Vector3(sx, 0.0, sz)
+	var h := patch_size_m * 0.5
+	_mat.set_shader_parameter("patch_rect", Vector4(sx - h, sz - h, sx + h, sz + h))
+
+
+func _high() -> bool:
+	if ocean == null:
+		return true
+	return int(ocean.get("water_quality")) >= 1
+
+
+## A square grid patch_size_m across in cells of `cell` m, with a skirt hanging round its edge (COLOR.r = 1, the shader
+## drops it) to hide any crack against the coarse rings.
+func _build_patch(cell: float) -> ArrayMesh:
+	var n := int(round(patch_size_m / cell))
+	var h := patch_size_m * 0.5
+	var verts := PackedVector3Array()
+	var cols := PackedColorArray()
+	var idx := PackedInt32Array()
+	verts.resize((n + 1) * (n + 1))
+	cols.resize((n + 1) * (n + 1))
+	for j in n + 1:
+		for i in n + 1:
+			verts[j * (n + 1) + i] = Vector3(-h + i * cell, 0.0, -h + j * cell)
+			cols[j * (n + 1) + i] = Color(0, 0, 0)
+	for j in n:
+		for i in n:
+			var a := j * (n + 1) + i
+			idx.append_array([a, a + 1, a + n + 1, a + 1, a + n + 2, a + n + 1])
+	# the edge loop, in order round the square, and its skirt copy
+	var ring := PackedInt32Array()
+	for i in n:
+		ring.append(i)
+	for j in n:
+		ring.append(j * (n + 1) + n)
+	for i in range(n, 0, -1):
+		ring.append(n * (n + 1) + i)
+	for j in range(n, 0, -1):
+		ring.append(j * (n + 1))
+	var base := verts.size()
+	for k in ring.size():
+		verts.append(verts[ring[k]])
+		cols.append(Color(1, 0, 0))
+	var m := ring.size()
+	for k in m:
+		var k2 := (k + 1) % m
+		var a := ring[k]
+		var b := ring[k2]
+		var sa := base + k
+		var sb := base + k2
+		idx.append_array([a, sa, b, b, sa, sb, a, b, sa, b, sb, sa])   # both faces
+	var normals := PackedVector3Array()
+	normals.resize(verts.size())
+	normals.fill(Vector3.UP)
+	var arr := []
+	arr.resize(Mesh.ARRAY_MAX)
+	arr[Mesh.ARRAY_VERTEX] = verts
+	arr[Mesh.ARRAY_NORMAL] = normals
+	arr[Mesh.ARRAY_COLOR] = cols
+	arr[Mesh.ARRAY_INDEX] = idx
+	var am := ArrayMesh.new()
+	am.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr)
+	am.custom_aabb = AABB(Vector3(-h, -3000.0, -h), Vector3(patch_size_m, 6000.0, patch_size_m))
+	return am
+
+
+## The High water setting's caustics and swash follow the sea: its quality, clock and sun (the shader does nothing on Standard).
+func _push_sea() -> void:
+	if _mat == null or ocean == null:
+		return
+	var om := ocean.call("get_ocean_material") as ShaderMaterial
+	if om == null:
+		return
+	var hw = om.get_shader_parameter("high_water")
+	var high: bool = hw != null and float(hw) > 0.5
+	_mat.set_shader_parameter("high_water", 1.0 if high else 0.0)
+	# the swash's wet sand (both settings) runs on the sea's clock and swell
+	_mat.set_shader_parameter("ocean_time", float(ocean.get("time")))
+	var sa = om.get_shader_parameter("sea_amplitude")
+	_mat.set_shader_parameter("sea_amp", 0.5 if sa == null else float(sa))
+	var sp = om.get_shader_parameter("surf_period")
+	_mat.set_shader_parameter("surf_period", 9.0 if sp == null else float(sp))
+	if not high:
+		return
+	var wd = om.get_shader_parameter("water_dark")
+	_mat.set_shader_parameter("water_dark", 0.0 if wd == null else float(wd))
+	var sun = ocean.get("_sun")
+	if sun is DirectionalLight3D:
+		var l := sun as DirectionalLight3D
+		_mat.set_shader_parameter("sun_dir", l.global_transform.basis.z)
+		_mat.set_shader_parameter("sun_color", l.light_color)
+		_mat.set_shader_parameter("sun_level", clampf(l.light_energy, 0.0, 1.0) if l.visible else 0.0)
+
+func _build_mesh() -> ArrayMesh:
+	var radii := PackedFloat32Array([0.0])
+	var step := first_ring
+	while radii[radii.size() - 1] < radius:
+		radii.append(radii[radii.size() - 1] + step)
+		step *= ring_growth
+	var verts := PackedVector3Array()
+	var idx := PackedInt32Array()
+	verts.append(Vector3.ZERO)
+	for r in range(1, radii.size()):
+		for s in segments:
+			var a := TAU * float(s) / segments
+			verts.append(Vector3(cos(a) * radii[r], 0.0, sin(a) * radii[r]))
+	for s in segments:
+		var s2 := (s + 1) % segments
+		idx.append_array([0, 1 + s, 1 + s2])
+	for r in range(1, radii.size() - 1):
+		var b0 := 1 + (r - 1) * segments
+		var b1 := 1 + r * segments
+		for s in segments:
+			var s2 := (s + 1) % segments
+			idx.append_array([b0 + s, b1 + s, b0 + s2, b0 + s2, b1 + s, b1 + s2])
+	var normals := PackedVector3Array()
+	normals.resize(verts.size())
+	normals.fill(Vector3.UP)
+	var arr := []
+	arr.resize(Mesh.ARRAY_MAX)
+	arr[Mesh.ARRAY_VERTEX] = verts
+	arr[Mesh.ARRAY_NORMAL] = normals
+	arr[Mesh.ARRAY_INDEX] = idx
+	var am := ArrayMesh.new()
+	am.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr)
+	am.custom_aabb = AABB(Vector3(-radius, -3000.0, -radius), Vector3(radius * 2.0, 6000.0, radius * 2.0))
+	return am

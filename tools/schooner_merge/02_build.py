@@ -58,7 +58,7 @@ def wbox(o):
 GROUPS = {
  "Hull": ["Hull", "Keel", "Stem", "GiltLine", "TransomTrim", "NameBoard", "TransomWindowFrames", "CapRail"],
  "MainDeck": ["Deck", "HoldFloor", "ForepeakFloor", "FloorStep", "CabinFloor", "Companionway_Steps"],
- "DeckFittings": ["Anchors", "BelayPins", "PinRails", "BinnacleBody", "BinnacleBrass", "Blocks", "BoardingSteps", "BowspritBitts", "BowspritStep", "Catheads",
+ "DeckFittings": ["Capstan", "Anchors", "BelayPins", "PinRails", "BinnacleBody", "BinnacleBrass", "Blocks", "BoardingSteps", "BowspritBitts", "BowspritStep", "Catheads",
                   "Chainplates", "Channels", "Cleats", "CompanionCoaming", "Deadeyes", "GunPortFrames", "HatchCoaming", "HoldLadder", "Lanyards",
                   "LookoutBarrel", "LookoutFloor", "LookoutHoops", "MastBands", "MooringCleat", "Mooring_Rope", "SheetHorses", "Skylight", "SkylightBars",
                   "WheelStand", "Windlass", "RudderGudgeons"],

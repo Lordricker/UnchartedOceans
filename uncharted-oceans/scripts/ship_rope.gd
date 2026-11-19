@@ -106,7 +106,7 @@ func _span() -> PackedVector3Array:
 		pts.append(pin)
 	else:
 		var yr := sails.rec("Fore_0" if key == 0 else "Main_0")
-		var tip := sails.yard_point(yr, Vector3(-5.1 * float(side), 0.0, 0.1))
+		var tip := sails.yard_point(yr, Vector3(-float(sails.brace_tip[key]) * float(side), 0.0, 0.1))
 		pts.append(tip)
 		pts.append(block)
 		pts.append(pin + Vector3(0, 0.1, 0))

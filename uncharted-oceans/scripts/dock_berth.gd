@@ -190,8 +190,22 @@ func _physics_process(_delta: float) -> void:
 func bollards_world() -> PackedVector3Array:
 	var out := PackedVector3Array()
 	for along in [9.0, 3.0, -3.0, -9.0]:
-		out.append(to_global(Vector3(-0.35, deck_y + 0.5, -along)))
+		var p := Vector3(-0.35, deck_y + 0.5, -along)
+		# a real bollard of the port model near this spot takes the line (two lines may share one, as on a real quay)
+		var best := INF
+		for q in real_bollards:
+			var d := Vector2(q.x - p.x, q.z - p.z).length()
+			if d < best and d < BOLLARD_REACH_M:
+				best = d
+				p = q
+		out.append(to_global(p))
 	return out
+
+## The tops of the port model's own bollards round this berth, in the berth's frame (world_streamer.gd fills it from the
+## "*Bollard*" meshes). Empty: the lines go to the plain spots on the quay edge above.
+var real_bollards: Array[Vector3] = []
+## How far (m) from a line's plain spot a real bollard may be and still take it.
+const BOLLARD_REACH_M := 10.0
 
 ## Where the docked ship's origin rests, for a ship of this class. A class can ask to lie further out (slot_offset in
 ## ShipClasses, e.g. the cutter on the outer edge of the light so its gangway is gentler).

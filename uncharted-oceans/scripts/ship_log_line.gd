@@ -453,6 +453,7 @@ func _process(delta: float) -> void:
 	Outline.set_on(_coil, a == 1)
 	for m in _glass_parts:
 		m.material_overlay = Outline.material() if a == 2 else null
+	Outline.show_name(self, ["", "Log line", "Sand glass"][clampi(a, 0, 2)])
 
 ## The ship's size class (ShipClasses.Size), for the class's own numbers.
 func _ship_class() -> int:

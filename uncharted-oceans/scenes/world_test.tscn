@@ -145,5 +145,15 @@ port_scenes = {
 "CS14": "res://assets/port/PortSmall_CS14.glb",
 "CS15": "res://assets/port/PortSmall_CS15.glb",
 "CS16": "res://assets/port/PortSmall_CS16.glb",
-"CS17": "res://assets/port/PortSmall_CS17.glb"
+"CS17": "res://assets/port/PortSmall_CS17.glb",
+"DS19": "res://assets/port/PortSmall_DS19.glb",
+"DS20": "res://assets/port/PortSmall_DS20.glb",
+"DS21": "res://assets/port/PortSmall_DS21.glb",
+"DS22": "res://assets/port/PortSmall_DS22.glb",
+"AS08": "res://assets/port/PortSmall_AS08.glb",
+"CS18": "res://assets/port/PortSmall_CS18.glb",
+"DS23": "res://assets/port/PortSmall_DS23.glb",
+"BC01": "res://assets/port/PortCapital_Asian.glb",
+"DC03": "res://assets/port/PortCapital_African.glb",
+"FF24": "res://assets/port/PortSmall_FF24.glb"
 }

@@ -1,0 +1,412 @@
+{
+	"_comment": "The first voyage (tutorial_director.gd). Each step: station = where Silas stands (silas_cobb.gd), done = flags, any of which finishes the step (flags are set by the director's pollers, so doing things out of order still counts), lines = said when the step starts, early = said instead if it was already done, nudge = said in turn when nothing happens for nudge_after_s. Line ids are for the voice files later: res://assets/audio/voice/silas/<id>.ogg. {km} {kn} {kmh} {hours} are filled in live.",
+	"route": "AS06",
+	"nudge_after_s": 90,
+	"tips": [
+		{
+			"id": "tip_creep",
+			"when": "creeping",
+			"after_flag": "cast_off",
+			"text": "In harbour, with every sail furled, the boats tow her at about a knot. You can't get stuck in port. Set a sail and you're the wind's again."
+		},
+		{
+			"id": "tip_aground",
+			"when": "aground",
+			"after_flag": "cast_off",
+			"text": "Aground. It happens. You can always turn her, even stuck fast: the crew pole the bow round. Swing her about and sail off the way you came."
+		}
+	],
+	"steps": [
+		{
+			"id": "buy",
+			"station": "gangway",
+			"done": [
+				"bought"
+			],
+			"lines": [
+				{
+					"id": "orders_1",
+					"text": "Paid in full, so she's yours. I'm only here to see she outlives the week."
+				},
+				{
+					"id": "buy_1",
+					"text": "Market's up the quay. Go ashore, speak to a stallholder, buy one box of something cheap."
+				},
+				{
+					"id": "buy_2",
+					"text": "You'll lose money on it either way. Think of it as tuition. I'll wait aboard, holding the boat."
+				}
+			],
+			"early": [
+				{
+					"id": "buy_early",
+					"text": "Bought already. Good. Spending is the one skill nobody has to teach."
+				}
+			],
+			"nudge": [
+				{
+					"id": "buy_n1",
+					"text": "Stallholder. Walk up, click him. Press Buy. The coin is the easy part."
+				},
+				{
+					"id": "buy_n2",
+					"text": "Still aboard? The quay is that way. Mind the gap."
+				}
+			]
+		},
+		{
+			"id": "stow",
+			"station": "hold",
+			"done": [
+				"stowed"
+			],
+			"lines": [
+				{
+					"id": "stow_1",
+					"text": "What you buy goes to the port box on the quay. Empty hands, click the box, carry it aboard."
+				},
+				{
+					"id": "stow_2",
+					"text": "Down in the hold, hold Space. Green means it fits. Red means it doesn't. I'd not have thought it needed saying."
+				},
+				{
+					"id": "stow_3",
+					"text": "E tips it, R turns it, click sets it down. Heavy cargo low and in the middle, or she rolls."
+				}
+			],
+			"early": [
+				{
+					"id": "stow_early",
+					"text": "Stowed already. Tidy."
+				}
+			],
+			"nudge": [
+				{
+					"id": "stow_n1",
+					"text": "Port box, by the pier. Click it with empty hands and bring it aboard."
+				},
+				{
+					"id": "stow_n2",
+					"text": "In the hold, hold Space and look for green. Click to set it down."
+				}
+			]
+		},
+		{
+			"id": "castoff",
+			"station": "tiller",
+			"done": [
+				"cast_off"
+			],
+			"lines": [
+				{
+					"id": "castoff_1",
+					"text": "To the tiller. She's a cutter; it's a stick, not a wheel."
+				},
+				{
+					"id": "castoff_2",
+					"text": "Press E there to cast off. Lines off the rail, unless you plan to tow the pier to sea."
+				}
+			],
+			"early": [
+				{
+					"id": "castoff_early",
+					"text": "Already off the pier. I'd have said something, but you were quick."
+				}
+			],
+			"nudge": [
+				{
+					"id": "castoff_n1",
+					"text": "At the tiller, press E. That's the whole instruction."
+				}
+			]
+		},
+		{
+			"id": "sails",
+			"station": "mast",
+			"done": [
+				"sails_set"
+			],
+			"lines": [
+				{
+					"id": "sails_1",
+					"text": "Sails. Their lines run to the pins at the rail. Haul a line down to furl, ease it upward to set."
+				},
+				{
+					"id": "sails_2",
+					"text": "Let go and the pin holds it. Set her up and she'll draw."
+				}
+			],
+			"early": [
+				{
+					"id": "sails_early",
+					"text": "Sails already up. Good. Cloth does nothing furled."
+				}
+			],
+			"nudge": [
+				{
+					"id": "sails_n1",
+					"text": "Click a sail line and ease it up. Then the cloth drops."
+				}
+			]
+		},
+		{
+			"id": "speed",
+			"station": "tiller",
+			"done": [
+				"speed_good"
+			],
+			"lines": [
+				{
+					"id": "speed_1",
+					"text": "Take the tiller. Wind behind you, she flies. Wind in your face, you're a very slow raft."
+				},
+				{
+					"id": "speed_2",
+					"text": "The windsock shows it. Keep the wind behind you and hold her there a while."
+				}
+			],
+			"early": [
+				{
+					"id": "speed_early",
+					"text": "She's moving nicely. Don't let it go to your head."
+				}
+			],
+			"nudge": [
+				{
+					"id": "speed_n1",
+					"text": "Watch the windsock. Turn her until the wind is behind you."
+				},
+				{
+					"id": "speed_n2",
+					"text": "Sails set? Tiller steady? Then it's just patience."
+				}
+			]
+		},
+		{
+			"id": "chart",
+			"station": "chart",
+			"done": [
+				"heading_ok"
+			],
+			"lines": [
+				{
+					"id": "chart_1",
+					"text": "Chart's on the cabin table. Click it. North's up, the gold diamond is where we're going."
+				},
+				{
+					"id": "chart_2",
+					"text": "Read the heading off the compass at the tiller and steer for the diamond. Q centres the tiller, Z holds your course."
+				}
+			],
+			"early": [
+				{
+					"id": "chart_early",
+					"text": "On course already. Either you can read a chart or you're lucky."
+				}
+			],
+			"nudge": [
+				{
+					"id": "chart_n1",
+					"text": "Cabin table. Click the chart. The gold diamond is the port."
+				},
+				{
+					"id": "chart_n2",
+					"text": "Bring her round until the compass agrees with the diamond. Within a few degrees will do."
+				}
+			]
+		},
+		{
+			"id": "log",
+			"station": "log",
+			"done": [
+				"log_read"
+			],
+			"lines": [
+				{
+					"id": "log_1",
+					"text": "How fast are we going? You can guess, as most do, or measure it with the log line on the stern rail. Click the coil."
+				},
+				{
+					"id": "log_2",
+					"text": "Count the blocks that run over the rail while the sand glass runs. Blocks are knots."
+				}
+			],
+			"early": [
+				{
+					"id": "log_early",
+					"text": "You've taken a reading already. A proper navigator."
+				}
+			],
+			"nudge": [
+				{
+					"id": "log_n1",
+					"text": "Stern rail, the coil. Click it, and count the blocks until the sand runs out."
+				}
+			]
+		},
+		{
+			"id": "sleep",
+			"station": "bed",
+			"done": [
+				"arrived"
+			],
+			"on_port_in_sight": [
+				{
+					"id": "sleep_port_1",
+					"text": "There's the port, {km} kilometres off. No more sleeping: sail her in awake from here. I'll tell you when to start slowing."
+				}
+			],
+			"on_slept": [
+				{
+					"id": "sleep_wake_1",
+					"text": "Awake at a marker. She stops at each one so you can turn her. Still {km} kilometres to go, about {hours} hours at this pace."
+				},
+				{
+					"id": "sleep_wake_2",
+					"text": "Another marker. Turn onto the new heading, check the sails are drawing, and back to bed. {km} kilometres left."
+				}
+			],
+			"lines": [
+				{
+					"id": "sleep_1",
+					"text": "Long way yet. Sums first. {km} kilometres to go, and we're making {kn} knots."
+				},
+				{
+					"id": "sleep_2",
+					"text": "Knots times 1.852 is kilometres an hour. That's {kmh}. {km} over {kmh} comes to about {hours} hours."
+				},
+				{
+					"id": "sleep_3",
+					"text": "Hold your course, check the sails are drawing, then click the bed. Type the hours, or ask for morning. She wakes you at each marker."
+				}
+			],
+			"early": [
+				{
+					"id": "sleep_early",
+					"text": "Land already? Then you slept, or you sailed it awake. Either way, no sums needed."
+				}
+			],
+			"nudge": [
+				{
+					"id": "sleep_n1",
+					"text": "Bed's in the cabin. Click it, type the hours, press Enter."
+				},
+				{
+					"id": "sleep_n2",
+					"text": "She needs to be on course with sails drawing, or you'll wake up somewhere unlovely."
+				}
+			]
+		},
+		{
+			"id": "dock",
+			"station": "tiller",
+			"done": [
+				"docked"
+			],
+			"lines": [
+				{
+					"id": "dock_1",
+					"text": "Land. Now the hard part: stopping. Once you're in the harbour, haul every sail up. The boats tow her along at about a knot, so she can't stall. Dock under three knots."
+				},
+				{
+					"id": "dock_2",
+					"text": "Line her up with the light at the berth. Amber, then green. Press E to dock. Gently. She's older than you and she's earned it."
+				}
+			],
+			"early": [],
+			"nudge": [
+				{
+					"id": "dock_n1",
+					"text": "Slower. Furl a sail or two. Wait for the light to go green."
+				},
+				{
+					"id": "dock_n2",
+					"text": "Light's green, speed's low? Press E."
+				}
+			]
+		},
+		{
+			"id": "sell",
+			"station": "gangway",
+			"done": [
+				"sold"
+			],
+			"lines": [
+				{
+					"id": "sell_1",
+					"text": "Fast to the pier. The gangway's out. Ashore, find a stallholder, and open his 'We buy'."
+				},
+				{
+					"id": "sell_2",
+					"text": "He buys from your hold. Sell the box. Buy cheap, sell dear, that's the whole trade. Mind you, today you'll lose a little. I did warn you."
+				}
+			],
+			"early": [
+				{
+					"id": "sell_early",
+					"text": "Sold already. Look at you, a merchant."
+				}
+			],
+			"nudge": [
+				{
+					"id": "sell_n1",
+					"text": "Stallholder who deals in your goods. Click him, then We buy, then Sell."
+				},
+				{
+					"id": "sell_n2",
+					"text": "Nothing to sell? It's still in the hold. Bring it up to the stallholder's side of the quay."
+				}
+			]
+		},
+		{
+			"id": "books",
+			"station": "bookshelf",
+			"done": [
+				"book_read"
+			],
+			"lines": [
+				{
+					"id": "books_1",
+					"text": "One more thing. The shelf in the cabin. Every rope, sum and trick I've told you is written down there, and a few I didn't."
+				},
+				{
+					"id": "books_2",
+					"text": "Click a book to read it. When you forget something, and you will, that's where to look."
+				}
+			],
+			"early": [
+				{
+					"id": "books_early",
+					"text": "You've found the books already. Good. Everything I've said is in there, written slower."
+				}
+			],
+			"nudge": [
+				{
+					"id": "books_n1",
+					"text": "Cabin. The shelf. Click a book. They don't bite."
+				},
+				{
+					"id": "books_n2",
+					"text": "Anything white-outlined is yours to click. The shelf's outlined. Hint, hint."
+				}
+			]
+		},
+		{
+			"id": "end",
+			"station": "tiller",
+			"done": [],
+			"lines": [
+				{
+					"id": "end_1",
+					"text": "That's the lot: buy, stow, sail, steer, count, sleep, dock, sell. The rest is the sea's business."
+				},
+				{
+					"id": "end_2",
+					"text": "She's yours. I'm told I'm retired. Esc for the menu when you've had enough of me."
+				}
+			],
+			"early": [],
+			"nudge": []
+		}
+	]
+}

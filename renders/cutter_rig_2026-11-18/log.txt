@@ -1,0 +1,89 @@
+Godot Engine v4.7.2.stable.official.ed1daf0bf - https://godotengine.org
+D3D12 12_0 - Forward+ - Using Device #0: NVIDIA - NVIDIA GeForce RTX 3050 Ti Laptop GPU
+
+SkySystem: shader loaded=true  sky mode=shader  environment=/root/WorldCutterTest/WorldEnvironment  sun=/root/WorldCutterTest/Sun
+WARNING: ShipSails: no sail node Sail_Fore_2
+   at: push_warning (core/variant/variant_utility.cpp:1033)
+   GDScript backtrace (most recent call first):
+       [0] _find_sails (res://scripts/ship_sails.gd:228)
+       [1] _ready (res://scripts/ship_sails.gd:163)
+       [2] _ready (res://scripts/ship_motion.gd:222)
+WARNING: ShipSails: no sail node Sail_Fore_1
+   at: push_warning (core/variant/variant_utility.cpp:1033)
+   GDScript backtrace (most recent call first):
+       [0] _find_sails (res://scripts/ship_sails.gd:228)
+       [1] _ready (res://scripts/ship_sails.gd:163)
+       [2] _ready (res://scripts/ship_motion.gd:222)
+WARNING: ShipSails: no sail node Sail_Fore_0
+   at: push_warning (core/variant/variant_utility.cpp:1033)
+   GDScript backtrace (most recent call first):
+       [0] _find_sails (res://scripts/ship_sails.gd:228)
+       [1] _ready (res://scripts/ship_sails.gd:163)
+       [2] _ready (res://scripts/ship_motion.gd:222)
+WARNING: ShipSails: no sail node Sail_ForeStaysail
+   at: push_warning (core/variant/variant_utility.cpp:1033)
+   GDScript backtrace (most recent call first):
+       [0] _find_sails (res://scripts/ship_sails.gd:228)
+       [1] _ready (res://scripts/ship_sails.gd:163)
+       [2] _ready (res://scripts/ship_motion.gd:222)
+WARNING: ShipSails: no sail node Sail_Main_2
+   at: push_warning (core/variant/variant_utility.cpp:1033)
+   GDScript backtrace (most recent call first):
+       [0] _find_sails (res://scripts/ship_sails.gd:228)
+       [1] _ready (res://scripts/ship_sails.gd:163)
+       [2] _ready (res://scripts/ship_motion.gd:222)
+WARNING: ShipSails: no sail node Sail_Main_1
+   at: push_warning (core/variant/variant_utility.cpp:1033)
+   GDScript backtrace (most recent call first):
+       [0] _find_sails (res://scripts/ship_sails.gd:228)
+       [1] _ready (res://scripts/ship_sails.gd:163)
+       [2] _ready (res://scripts/ship_motion.gd:222)
+WARNING: ShipSails: no sail node Sail_Main_0
+   at: push_warning (core/variant/variant_utility.cpp:1033)
+   GDScript backtrace (most recent call first):
+       [0] _find_sails (res://scripts/ship_sails.gd:228)
+       [1] _ready (res://scripts/ship_sails.gd:163)
+       [2] _ready (res://scripts/ship_motion.gd:222)
+WARNING: ShipAnchor: no coil of cable near (0.0, -9.0, 0.0) in DeckFittings (check coil_pos); the capstan alone is the anchor control
+   at: push_warning (core/variant/variant_utility.cpp:1033)
+   GDScript backtrace (most recent call first):
+       [0] _carve (res://scripts/ship_anchor.gd:174)
+       [1] _build (res://scripts/ship_anchor.gd:98)
+       [2] _ready (res://scripts/ship_anchor.gd:83)
+       [3] _ready (res://scripts/ship_motion.gd:227)
+WARNING: ShipBookshelf: no room on the shelf for the book 'side_quests'
+   at: push_warning (core/variant/variant_utility.cpp:1033)
+   GDScript backtrace (most recent call first):
+       [0] _add_missing_books (res://scripts/ship_bookshelf.gd:148)
+       [1] _ready (res://scripts/ship_bookshelf.gd:96)
+       [2] _ready (res://scripts/ship_motion.gd:265)
+ship_flooding: hold grid 419 spaces (122 squares with stacked spaces), 1460 links, built in 22 ms
+ship_deck_water: deck grid 9 squares + 0 that drop into the hold, 18 rail edges (0 with a rail, tops 0.00 to 0.00 m), 10 sea samples, built in 11 ms
+ShipRigging: main mast: ladders ["shroud_a", "shroud_b"], points ["barrel", "shroud_top_a", "shroud_top_b"]
+ShipGlass: made 2 glass surfaces clear: BinnacleGlass/M_Compass_Glass, Glass/CT_Glass
+ShipDeckPatch: filled a 0.3 m2 hole at x -0.7..-0.5 z -3.8..-3.0 (deck about y 0.82)
+ShipDeckPatch: filled a 0.3 m2 hole at x 0.5..0.7 z -3.8..-3.0 (deck about y 0.82)
+ShipDeckPatch: filled a 0.1 m2 hole at x -0.1..0.1 z -3.4..-3.4 (deck about y -0.98)
+ShipDeckPatch: filled a 0.0 m2 hole at x -0.3..-0.3 z -3.0..-3.0 (deck about y -0.98)
+ShipDeckPatch: filled a 0.0 m2 hole at x 0.3..0.3 z -3.0..-3.0 (deck about y -0.98)
+ShipDeckPatch: probed 1548 squares, 142 with deck, filled 5 hole(s), left 0 alone
+Cargo hold: 403 free cells (6 m3)
+RockField: 3 rocks around the ship
+MarketDirector: 10 stallholders in AC00
+MarketDirector: 5 courier people in AC00
+SkyDiag: storms=0 [] exposure=0.00 vol_ready=true vol_on=true observer=(1774.577, 2282.766)
+RENDER sails node ShipSails recs=2
+RENDER line Line_0 [(0.0, 2.15, 3.2), (0.0, 1.55, 5.2)]
+RENDER line Line_1 [(0.0, 3.475903, -4.024048), (-0.7, 0.95, -1.5)]
+RENDER line Line_2 [(0.0, 3.475903, -4.024048), (0.7, 0.95, -1.5)]
+RENDER sail Jib
+RENDER sail Spanker
+SkyDiag: storms=0 [] exposure=0.00 vol_ready=true vol_on=true observer=(0.0, 0.0)
+RENDER saved C:/Users/Victus/Documents/GitHub/UnchartedOceans/renders/cutter_rig_2026-11-18/head_side.png
+RENDER saved C:/Users/Victus/Documents/GitHub/UnchartedOceans/renders/cutter_rig_2026-11-18/sheet_side.png
+RENDER saved C:/Users/Victus/Documents/GitHub/UnchartedOceans/renders/cutter_rig_2026-11-18/sheet_top.png
+RENDER saved C:/Users/Victus/Documents/GitHub/UnchartedOceans/renders/cutter_rig_2026-11-18/stern.png
+RENDER saved C:/Users/Victus/Documents/GitHub/UnchartedOceans/renders/cutter_rig_2026-11-18/stern_side.png
+SkyDiag: storms=0 [] exposure=0.00 vol_ready=true vol_on=true observer=(1769.518, 2278.068)
+RENDER saved C:/Users/Victus/Documents/GitHub/UnchartedOceans/renders/cutter_rig_2026-11-18/rig.png
+RENDER saved C:/Users/Victus/Documents/GitHub/UnchartedOceans/renders/cutter_rig_2026-11-18/masthead.png

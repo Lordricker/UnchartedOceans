@@ -15,6 +15,9 @@ const StallScript := preload("res://scripts/market_stall.gd")
 const NpcScript := preload("res://scripts/market_npc.gd")
 const MenuScript := preload("res://scripts/market_menu.gd")
 const Outline := preload("res://scripts/interact_outline.gd")
+const CourierNpcScript := preload("res://scripts/courier_npc.gd")
+const CourierDialogScript := preload("res://scripts/courier_dialog.gd")
+const QuestsScript := preload("res://scripts/courier_quests.gd")
 
 ## How far you can reach to talk to someone (m). The customer spot is about 3.3 m from the stallholder.
 @export var reach := 4.5
@@ -27,6 +30,7 @@ const Outline := preload("res://scripts/interact_outline.gd")
 var player: CharacterBody3D
 var cam: Camera3D
 var menu                # the MarketMenu
+var dialog              # the CourierDialog
 
 var _aim                # the MarketNpc being aimed at, or null
 var _label: Label
@@ -44,6 +48,10 @@ func _ready() -> void:
 	menu.name = "MarketMenu"
 	add_child(menu)
 	menu.closed.connect(_on_menu_closed)
+	dialog = CourierDialogScript.new()
+	dialog.name = "CourierDialog"
+	add_child(dialog)
+	dialog.closed.connect(_on_menu_closed)
 	_make_prompt()
 
 
@@ -75,6 +83,7 @@ func _process(delta: float) -> void:
 		_scan_t = scan_every_s
 		_scan_ports()
 		_scan_berths()
+		_scan_couriers()
 	_update_aim()
 
 
@@ -92,6 +101,23 @@ func _scan_ports() -> void:
 			_fill_market(port, str(port.get_meta("port_id", "")))
 
 
+## "npc_stand", "customer_stand" or "" for a child of a market bay. Most ports tag these with marker = ...;
+## PortCapital_African (Kisara) tags them with npc_role instead and only the node name (..._NPC / ..._Customer)
+## says which is which, so that is read too.
+func _stand_kind(c: Node) -> String:
+	var ex := _extras(c)
+	var m := str(ex.get("marker", ""))
+	if m != "":
+		return m
+	if ex.has("npc_role"):
+		var nm := String(c.name).to_lower()
+		if nm.ends_with("_npc"):
+			return "npc_stand"
+		if nm.ends_with("_customer"):
+			return "customer_stand"
+	return ""
+
+
 func _fill_market(port: Node3D, port_id: String) -> void:
 	var made := 0
 	for n in port.find_children("*", "Node3D", true, false):
@@ -101,7 +127,7 @@ func _fill_market(port: Node3D, port_id: String) -> void:
 		var npc_at: Node3D = null
 		var customer_at: Node3D = null
 		for c in n.get_children():
-			match str(_extras(c).get("marker", "")):
+			match _stand_kind(c):
 				"npc_stand":
 					npc_at = c as Node3D
 				"customer_stand":
@@ -171,10 +197,165 @@ func _scan_berths() -> void:
 		_boxes[id] = box
 
 
+# ------------------------------------------------------------------ ports: courier people
+
+## How many courier people stand about a port, by tier (courier_npc.gd).
+const COURIERS_BY_TIER := {"capital": 5, "free_port": 3, "small": 3}
+const COURIER_MODELS := ["Sailor", "Provisions", "Navigator", "Chandler", "Smith", "SpiceTrader"]
+## Scans (every scan_every_s) to keep trying for open ground before settling for fewer people.
+const COURIER_TRIES := 20
+## Nearest to a stallholder, a port box or another courier a person may stand (m).
+const COURIER_SPACING := 4.0
+
+
+## Once a port is stocked with stallholders and the ship is near (so the quay's collision has loaded), stands a few
+## courier people on open ground round it: on the quay and the streets, near the market bays and the berths.
+## Each slot picks its spot the same way within a run (so the same person is in the same place every time the port loads), but differently from run to run.
+func _scan_couriers() -> void:
+	var ship := get_tree().get_first_node_in_group("ships") as Node3D
+	if ship == null or player == null:
+		return
+	for s in get_tree().get_nodes_in_group("world_streamer"):
+		for c in s.get_children():
+			var port := c as Node3D
+			if port == null or not String(port.name).begins_with("Port_"):
+				continue
+			if not port.has_meta("market_done") or port.has_meta("couriers_done"):
+				continue
+			if port.global_position.distance_to(ship.global_position) > berth_range_m + 600.0:
+				continue
+			_try_couriers(port, ship)
+
+
+func _try_couriers(port: Node3D, ship: Node3D) -> void:
+	var port_id := str(port.get_meta("port_id", ""))
+	var anchors := _courier_anchors(port)
+	var near := INF
+	for a in anchors:
+		near = minf(near, a.distance_to(ship.global_position))
+	if near > berth_range_m:
+		return
+	var tries := int(port.get_meta("courier_tries", 0)) + 1
+	port.set_meta("courier_tries", tries)
+	var tier := "small"
+	var chart := QuestsScript.chart()
+	if chart != null:
+		tier = String(chart.get_port(port_id).get("tier", "small"))
+	var want := int(COURIERS_BY_TIER.get(tier, 3))
+	var taken: Array[Vector3] = []
+	for n in get_tree().get_nodes_in_group("market_npcs"):
+		if port.is_ancestor_of(n):
+			taken.append((n as Node3D).global_position)
+	for n in get_tree().get_nodes_in_group("cargo_generators"):
+		if port.is_ancestor_of(n):
+			taken.append((n as Node3D).global_position)
+	for n in get_tree().get_nodes_in_group("dock_berths"):
+		if n.get_parent() == port:
+			taken.append((n as Node3D).global_position)
+	var placed := 0
+	for i in want:
+		if port.has_meta("courier_%d" % i):
+			placed += 1
+			continue
+		var rng := RandomNumberGenerator.new()
+		rng.seed = hash("%s/courier_slot_%d/%d" % [port_id, i, QuestsScript.session_salt()])
+		var pos = _courier_spot(rng, anchors, taken)
+		if pos == null:
+			continue
+		port.set_meta("courier_%d" % i, true)
+		taken.append(pos as Vector3)
+		placed += 1
+		var npc := CourierNpcScript.new()
+		npc.name = "Courier_%d" % i
+		port.add_child(npc)
+		npc.global_position = pos as Vector3
+		npc.global_rotation = Vector3(0.0, rng.randf() * TAU, 0.0)
+		npc.setup_courier("%s/courier_%d" % [port_id, i], port_id, QuestsScript.name_for(port_id, i),
+			String(COURIER_MODELS[rng.randi_range(0, COURIER_MODELS.size() - 1)]))
+	if placed >= want or tries >= COURIER_TRIES:
+		port.set_meta("couriers_done", true)
+		print("MarketDirector: %d courier people in %s" % [placed, port_id])
+
+
+## The market bays and berths of a port: where the courier people stand near.
+func _courier_anchors(port: Node3D) -> Array[Vector3]:
+	var out: Array[Vector3] = []
+	for n in port.find_children("*", "Node3D", true, false):
+		if str(_extras(n).get("game_role", "")) == "market_bay":
+			out.append((n as Node3D).global_position)
+	for n in get_tree().get_nodes_in_group("dock_berths"):
+		if n.get_parent() == port:
+			out.append((n as Node3D).global_position)
+	if out.is_empty():
+		out.append(port.global_position)
+	return out
+
+
+## A free spot of open, level ground within reach of an anchor, or null. Fixed random draws (rng), so it is repeatable.
+func _courier_spot(rng: RandomNumberGenerator, anchors: Array[Vector3], taken: Array[Vector3]):
+	var space := player.get_world_3d().direct_space_state
+	var skip: Array[RID] = [player.get_rid()]
+	for attempt in 50:
+		var a: Vector3 = anchors[rng.randi_range(0, anchors.size() - 1)]
+		var ang := rng.randf() * TAU
+		var r := rng.randf_range(4.5, 18.0)
+		var p := a + Vector3(cos(ang) * r, 0.0, sin(ang) * r)
+		var hit := _ground_at(space, p.x, p.z, a.y + 2.2, a.y - 3.0, skip)
+		if hit.is_empty() or (hit["normal"] as Vector3).y < 0.92:
+			continue
+		var pos: Vector3 = hit["position"]
+		if absf(pos.y - a.y) > 2.0 or _on_a_ship(hit["collider"]):
+			continue
+		var crowded := false
+		for t in taken:
+			if Vector2(t.x - pos.x, t.z - pos.z).length() < COURIER_SPACING:
+				crowded = true
+				break
+		if crowded:
+			continue
+		# level ground all round (not on the edge of a quay), no wall or prop pressed against them, room overhead
+		var edge := false
+		for d in [Vector3(0.9, 0, 0), Vector3(-0.9, 0, 0), Vector3(0, 0, 0.9), Vector3(0, 0, -0.9)]:
+			var h2 := _ground_at(space, pos.x + d.x, pos.z + d.z, pos.y + 0.8, pos.y - 1.0, skip)
+			if h2.is_empty() or absf((h2["position"] as Vector3).y - pos.y) > 0.3:
+				edge = true
+				break
+		if edge:
+			continue
+		var blocked := false
+		for k in 8:
+			var dir := Vector3(cos(k * TAU / 8.0), 0.0, sin(k * TAU / 8.0))
+			var q := PhysicsRayQueryParameters3D.create(pos + Vector3(0, 0.9, 0), pos + Vector3(0, 0.9, 0) + dir * 0.7, 1 | Island.LAYER_BIT, skip)
+			if not space.intersect_ray(q).is_empty():
+				blocked = true
+				break
+		if blocked:
+			continue
+		var up := PhysicsRayQueryParameters3D.create(pos + Vector3(0, 0.1, 0), pos + Vector3(0, 2.5, 0), 1 | Island.LAYER_BIT, skip)
+		if not space.intersect_ray(up).is_empty():
+			continue
+		return pos
+	return null
+
+
+func _ground_at(space: PhysicsDirectSpaceState3D, x: float, z: float, top: float, bottom: float, skip: Array[RID]) -> Dictionary:
+	var q := PhysicsRayQueryParameters3D.create(Vector3(x, top, z), Vector3(x, bottom, z), Island.LAYER_BIT, skip)
+	return space.intersect_ray(q)
+
+
+func _on_a_ship(collider) -> bool:
+	var n := collider as Node
+	while n != null:
+		if n.is_in_group("ships"):
+			return true
+		n = n.get_parent()
+	return false
+
+
 # ------------------------------------------------------------------ aiming and clicking
 
 func _update_aim() -> void:
-	if player == null or cam == null or menu.is_open:
+	if player == null or cam == null or menu.is_open or dialog.is_open:
 		_set_aim(null)
 		return
 	var captured := Input.mouse_mode == Input.MOUSE_MODE_CAPTURED and not bool(player.get("input_locked"))
@@ -208,7 +389,7 @@ func _set_aim(n) -> void:
 		if n != null:
 			Outline.set_on(n, true)
 	if _aim != null and is_instance_valid(_aim):
-		_label.text = "Click: talk to %s" % _aim.stall.title
+		_label.text = _aim.prompt_text()
 		_label.visible = true
 	else:
 		_label.visible = false
@@ -218,13 +399,16 @@ func _input(e: InputEvent) -> void:
 	var mb := e as InputEventMouseButton
 	if mb == null or not mb.pressed or mb.button_index != MOUSE_BUTTON_LEFT:
 		return
-	if _aim == null or not is_instance_valid(_aim) or menu.is_open:
+	if _aim == null or not is_instance_valid(_aim) or menu.is_open or dialog.is_open:
 		return
-	var stall = _aim.stall
+	var npc = _aim
 	_set_aim(null)
 	player.set("input_locked", true)
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
-	menu.open_for(stall, player.global_position)
+	if npc.has_method("is_courier"):
+		dialog.open_for(npc, player.global_position)
+	else:
+		menu.open_for(npc.stall, player.global_position)
 	get_viewport().set_input_as_handled()
 
 

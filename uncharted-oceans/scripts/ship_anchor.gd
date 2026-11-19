@@ -599,6 +599,10 @@ func _process(delta: float) -> void:
 			Outline.set_on(_spin, want)
 		if _coil_mi != null:
 			Outline.set_on(_coil_mi, want)
+		if want:
+			Outline.show_name(self, "Capstan")
+		else:
+			Outline.hide_name(self)
 	_update_label()
 
 

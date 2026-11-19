@@ -12,7 +12,7 @@ extends Node
 ## Without a weather node (a plain test scene) it works as it always did: the direction is the Ocean's
 ## wind_heading_deg and the strength follows the Ocean's sea state.
 ##
-## Keys (in game): 1-4 set the wind to calm / moderate / rough / storm strength, [ and ] swing it 15 degrees to port /
+## Keys (in game): 1-4 (Shift+1-4 in the world scenes, where 1-4 are fast time) set the wind to calm / moderate / rough / storm strength, [ and ] swing it 15 degrees to port /
 ## starboard of where it is going. In the world scene those take the wind over by hand; \ gives it back to the weather.
 
 ## True wind speed for each sea state, m/s (calm, moderate, rough, storm). About 6, 16, 27, 43 knots.
@@ -109,6 +109,8 @@ func _unhandled_input(e: InputEvent) -> void:
 	if _weather_mode():
 		match e.physical_keycode:
 			KEY_1, KEY_2, KEY_3, KEY_4:
+				if _streamer != null and not e.shift_pressed:
+					return                              # in the world, 1-4 are fast time (WorldStreamer); Shift+1-4 set the wind
 				if e.physical_keycode == KEY_4 and not _ocean.storm_allowed():
 					_ocean.refuse_storm()          # no storm sea close to a port
 					return

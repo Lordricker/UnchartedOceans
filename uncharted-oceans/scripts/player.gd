@@ -28,10 +28,12 @@ extends CharacterBody3D
 @export_range(0.0, 1.0, 0.05) var air_control := 0.25
 @export var step_height := 0.35
 ## Standing height in metres. The capsule and eye height follow it (eyes at 93%).
-@export_range(0.8, 2.0, 0.01) var player_height := 1.32
-@export_range(0.15, 0.4, 0.01) var player_radius := 0.22
+@export_range(0.8, 2.0, 0.01) var player_height := 1.6
+@export_range(0.15, 0.4, 0.01) var player_radius := 0.17
 ## Which way you look when the game starts, in degrees (negative = down). world_test.tscn puts you at the wheel looking down at it.
 @export_range(-85.0, 85.0, 0.5) var start_pitch_deg := 0.0
+## What the ship's hold starts with, {good id: boxes} (goods.json ids, e.g. {"cannon_shot": 6}). Stowed once the hold is ready.
+@export var start_cargo: Dictionary = {}
 
 ## Physics layer of the ships' outer hull skin (ship_motion.gd hull_skin_layer).
 @export_range(1, 32) var hull_skin_layer := 3
@@ -55,6 +57,15 @@ extends CharacterBody3D
 
 @export_group("Ladders")
 @export var ladder_regrab_delay := 0.5   ## after jumping off, before a ladder box catches you again
+
+@export_group("Ducking")
+## Height while ducking (metres). Hold C to duck; you stay ducked under a low doorway or beam
+## until there's room to stand, even if you let go.
+@export_range(0.7, 1.5, 0.01) var duck_height := 1.0
+## How fast you shrink and stand back up, in metres per second.
+@export var duck_speed := 8.0
+## Walking speed multiplier while fully ducked.
+@export_range(0.2, 1.0, 0.05) var duck_move_mult := 0.6
 
 @export_group("Hands")
 ## First-person gloves. Clear this to play without hands.
@@ -102,9 +113,15 @@ var _base_mask := 1
 var _ladder_entry_z := 0.0
 var _step_over := 0.0
 var _climb_rate := 0.0
+## Current (animated) body height: player_height standing, duck_height ducked.
+var _cur_height := 0.0
+var _applied_height := -1.0
+var _probe: CapsuleShape3D
+var _probe_query: PhysicsShapeQueryParameters3D
 
 func _ready() -> void:
 	add_to_group("player")
+	_cur_height = player_height
 	_apply_height()
 	head.rotation.x = deg_to_rad(start_pitch_deg)
 	spawn = global_transform
@@ -116,6 +133,8 @@ func _ready() -> void:
 	platform_on_leave = PLATFORM_ON_LEAVE_DO_NOTHING
 	collision_mask |= 1 << (hull_skin_layer - 1)   # the ship's outside hull (ship_motion.gd)
 	collision_mask |= Island.LAYER_BIT              # island ground, pier and gangway (island.gd, ship_harbor.gd)
+	collision_mask |= 1 << 9                        # stowed and dropped cargo boxes (cargo_system.gd CARGO_LAYER_BIT)
+	collision_mask |= 1 << 10                       # the world's beaches and cliffs near you (shore_collider.gd)
 	_base_mask = collision_mask
 	_ocean = get_node_or_null(ocean_path) as Ocean
 	_make_tint()
@@ -124,18 +143,57 @@ func _ready() -> void:
 		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 
 func _apply_height() -> void:
+	var h := _cur_height
+	_applied_height = h
 	var cs := get_node_or_null("CollisionShape3D") as CollisionShape3D
 	if cs and cs.shape is CapsuleShape3D:
-		var cap := (cs.shape as CapsuleShape3D).duplicate() as CapsuleShape3D
+		var cap := cs.shape as CapsuleShape3D
+		if not cap.resource_local_to_scene and cap.resource_path != "":
+			cap = cap.duplicate() as CapsuleShape3D   # don't resize a shape shared with other nodes
 		cap.radius = player_radius
-		cap.height = player_height
+		cap.height = maxf(h, player_radius * 2.0 + 0.01)
 		cs.shape = cap
-		cs.position = Vector3(0.0, player_height * 0.5, 0.0)
-	head.position = Vector3(0.0, player_height * 0.93, 0.0)
+		cs.position = Vector3(0.0, h * 0.5, 0.0)
+	head.position = Vector3(0.0, h * 0.93, 0.0)
+
+# ---------------------------------------------------------------- ducking
+
+## True if something solid sits in the slab y0..y1 (metres above the feet) at world point p.
+func _zone_hits(p: Vector3, y0: float, y1: float) -> bool:
+	var r := player_radius - 0.02
+	var h := maxf(y1 - y0, r * 2.0 + 0.01)
+	if _probe == null:
+		_probe = CapsuleShape3D.new()
+		_probe_query = PhysicsShapeQueryParameters3D.new()
+		_probe_query.shape = _probe
+		_probe_query.exclude = [get_rid()]
+	_probe.radius = r
+	_probe.height = h
+	_probe_query.collision_mask = _base_mask
+	_probe_query.transform = Transform3D(Basis.IDENTITY, p + up_direction * (y0 + h * 0.5))
+	return not get_world_3d().direct_space_state.intersect_shape(_probe_query, 1).is_empty()
+
+## Hold C to duck. Letting go only stands you up if there's headroom, so you can't pop up
+## into a low doorway or beam.
+func _update_duck(delta: float) -> void:
+	var want := false
+	if not swimming and ladder == null:
+		want = Input.is_physical_key_pressed(KEY_C) and not use_auto and not input_locked
+		if not want and _cur_height < player_height:
+			want = _zone_hits(global_position, duck_height, player_height)   # no room to stand yet
+	var target := duck_height if want else player_height
+	_cur_height = move_toward(_cur_height, target, duck_speed * delta)
+	if absf(_cur_height - _applied_height) > 0.0005:
+		_apply_height()
+
+## 0 = standing, 1 = fully ducked.
+func _duck_amount() -> float:
+	return clampf((player_height - _cur_height) / maxf(player_height - duck_height, 0.01), 0.0, 1.0)
 
 func _make_cargo() -> void:
 	cargo = CargoSystem.new()
 	cargo.name = "CargoSystem"
+	cargo.starting_cargo = start_cargo
 	add_child(cargo)
 
 func _make_hands() -> void:
@@ -241,6 +299,8 @@ func _physics_process(delta: float) -> void:
 	if is_on_floor() and ladder == null and not swimming:
 		rotate_y(get_platform_angular_velocity().y * delta)
 
+	_update_duck(delta)
+
 	var center := global_position + up_direction * player_height * 0.5
 	var feet := global_position
 	var top := global_position + up_direction * player_height
@@ -257,7 +317,7 @@ func _physics_process(delta: float) -> void:
 		_climb(delta, input, space_pressed)
 	else:
 		if prev:
-			var v := _ship_velocity(global_position)
+			var v := Vector3.ZERO if prev.fixed else _ship_velocity(global_position)
 			_air_base = Vector3(v.x, 0.0, v.z)
 			if prev.local_point(feet).y >= prev.half_size().y - 0.05 and input.y < 0.0:
 				# out the top holding W: W walks forward again; a little lift and full control
@@ -319,6 +379,7 @@ func _move(delta: float, input: Vector2, space_down: bool, space_pressed: bool, 
 		elif (space_down or space_pressed) and submersion < 0.5:
 			velocity.y = jump_velocity
 		speed = run_speed if shift_down else walk_speed
+		speed *= lerpf(1.0, duck_move_mult, _duck_amount())
 		# wading: knee to chest deep water slows you down
 		speed *= lerpf(1.0, 0.5, smoothstep(0.15, 0.6, submersion))
 
@@ -385,7 +446,7 @@ func _climb(delta: float, input: Vector2, space_pressed: bool) -> void:
 	var up := b.y.normalized()
 	var out := b.z.normalized()
 	var side := b.x.normalized()
-	var carry := _ship_velocity(global_position)
+	var carry := Vector3.ZERO if ladder.fixed else _ship_velocity(global_position)   # a quay ladder stands still
 	swimming = false
 	submersion = 0.0
 	floor_snap_length = 0.0

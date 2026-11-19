@@ -1,0 +1,1598 @@
+class_name WorldStreamer
+extends Node3D
+## Streams the world chart (world_chart.gd) into the 3D scene around the ship, and runs the sailing loop.
+##
+##  - Floating origin: Godot coordinates stay small. A Godot position is a chart position minus the
+##    origin (origin_x, origin_z, 64-bit floats, a multiple of rebase_step_m). When the ship gets more
+##    than rebase_awake_m from the Godot origin, or after a sleep, the origin is rebased: the ship and
+##    player are moved together and the ocean's wave phases are shifted by the same amount in 64-bit,
+##    so the sea looks and floats exactly as before. Moving the ship teleports its collision bodies,
+##    so the player is paused for a few physics ticks to keep the kinematic velocity spike off them.
+##  - Ports: a port scene is spawned inside PORT_SPAWN_M (6 km) and freed outside PORT_DESPAWN_M (8 km).
+##    port_scenes maps a port id to its scene (loaded on a thread); other ports get a placeholder
+##    beacon. A real port scene is turned to face open water and cuts a hole in the macro terrain.
+##  - The run: run_to is the destination port. A route over open water (world_route.gd) gives the next
+##    waypoint, shown as a marker on the horizon (world_hud.gd). Point the ship at the marker.
+##  - Sleep (T): type the hours, Enter. The ship carries on along its heading at its current speed and
+##    wakes at the next waypoint, a port's spawn ring, land or the world edge, whichever comes first.
+##  - Macro terrain (world_terrain.gd) and macro shoaling (Ocean.set_world) come from the chart.
+##  - Macro grounding: the keel is checked against the chart's shelf. A port scene switches it off around
+##    itself (meta "own_grounding") because it brings its own seabed.
+##  - The world wraps on all four edges (2026-11-18). The origin is kept on the chart's own copy of the world
+##    (0..width_m, 0..height_m): a rebase that would put it past an edge puts it back in at the other side, and the
+##    waves are told the lap (_lap) so they carry on unbroken. Ports, lights and storms are drawn at their copy nearest
+##    the ship (WorldChart.near).
+##  - Fast time (keys 1-4: x1, x2, x4, x8; . and , step it) runs the whole world faster (Engine.time_scale), and only
+##    while you hold the wheel: let go and time is back to normal. Land, a port, a waypoint, a storm, a harbour or
+##    running aground drop it back to x1 by themselves.
+##
+## Chart coordinates: x east, z south, metres from the chart's top-left. Ship heading_deg (ship_motion)
+## grows to port, so the chart heading (0 = north, clockwise) is -heading_deg.
+
+signal port_spawned(id: String)
+signal port_despawned(id: String)
+signal slept(result: Dictionary)
+## Enter was pressed in the sleep window. If something listens (the bed does: it lies the camera down, fades to
+## black and calls sleep() itself while the screen is black), the sleep is left to it; with no listener it just happens.
+signal sleep_requested(hours: float)
+signal rebased(shift: Vector3)
+signal arrived(id: String)
+@export var sleep_turn_scale: float = 1.0
+@export var sleep_wheel_deadband_deg: float = 3.0
+
+@export var ocean_path: NodePath = ^"../Ocean"
+@export var ship_path: NodePath = ^"../ShipRig"
+@export var player_path: NodePath = ^"../Player"
+@export var home_port_id := "AC00"
+## Destination of the run ("" = none).
+@export var run_to := "CC02"
+## false: no intermediate waypoints. The only mark is the destination itself (the diamond on the horizon and on the chart),
+## and a sleep is never woken at a waypoint. true: plan a route round the coasts and wake at its corners (the old way).
+@export var plan_route := false
+## Berth node (in the home port scene) the ship starts at.
+@export var start_berth := "Berth_01"
+## The ship starts this far behind the berth's light (m, beyond the box and the hull's own length), on the berth's line,
+## so the first thing to do is sail in.
+@export var start_behind_box_m := 6.0
+## true: the run starts with the ship already lying in start_berth (lines ashore, gangway out). false: she starts
+## start_behind_box_m astern of that berth's light and has to sail in.
+@export var start_moored := true
+@export var start_distance_m := 2500.0
+@export var rebase_awake_m := 20000.0
+@export var rebase_step_m := 5000.0
+## Hours offered in the sleep prompt at first.
+@export var sleep_hours := 24.0
+## The hour of the day the "Sleep until morning" button counts to (the weather's clock, 0-24).
+@export var wake_hour := 6.0
+## Speed assumed while asleep when the ship is not moving under sail (m/s).
+@export var sleep_speed_mps := 3.5
+## A waypoint counts as reached inside this distance; a sleep also wakes at the closest approach if it passes within it.
+@export var waypoint_radius_m := 10000.0
+@export var key_sleep := KEY_T
+## Fast time: 1-4 pick x1, x2, x4, x8; . steps up one (and round to x1), , steps down one. Only while holding the wheel.
+@export var key_fast_forward := KEY_PERIOD
+@export var key_slower := KEY_COMMA
+## Put the ship back in the home port (a test aid). Not H: H shows and hides the debug readout.
+@export var key_home := KEY_HOME
+@export var key_replot := KEY_P
+@export var far_plane_m := 160000.0
+@export var terrain_enabled := true
+@export var macro_grounding := true
+## Invisible wall: the ship will not go closer than this (m) to a generated coast, awake or asleep. The chart's coast is only
+## good to about one pixel (781 m at the current chart width) and the land has no collision, so without it she can end up inside the terrain.
+@export var shore_standoff_m := 800.0
+## Awake, near a coast, the keel is tested against the exact ground the terrain draws (WorldGround) instead, so she sails
+## right in until she touches bottom; this wall then only applies while asleep (and well away from any coast).
+@export var exact_shore_grounding := true
+## Real collision for the player on the world's beaches and cliffs (shore_collider.gd).
+@export var shore_collision := true
+## Pause the player for a few physics ticks when the ship is moved (hides the kinematic velocity spike).
+@export var pause_player_on_move := true
+## Port id -> res:// path of its scene. Loaded on a thread when the port comes inside the spawn ring.
+@export var port_scenes := {}
+## Make the world's weather (world_weather.gd): the calendar, the seasonal wind and the storm seasons.
+@export var weather_enabled := true
+## false: no storms at all (the tutorial's fair-weather sea).
+@export var weather_storms := true
+## 0-24: the hour the world clock starts at; negative keeps the weather's own default.
+@export var weather_start_hour := -1.0
+## Not zero: a steady wind everywhere (m/s, x east, y south); see WorldWeather.fixed_wind_mps.
+@export var weather_fixed_wind := Vector2.ZERO
+## Far-reaching lighthouse lights (lighthouse_beacons.gd): a glow and a turning beam seen from the horizon, before the port itself has spawned.
+@export var beacons_enabled := true
+## Coastal rocks (rock_field.gd): scenery along the shores that also stops a hull that sails into one.
+@export var rocks_enabled := true
+
+const KEEL_CLEARANCE_M := 3.0
+const ROCK_HULL_HALF_BEAM_M := 3.0
+const PLAYER_PAUSE_TICKS := 3
+const MAX_SLEEP_HOURS := 999.0
+## No sleeping if a storm's weather would reach the ship within this many hours.
+const SLEEP_STORM_GRACE_H := 0.5
+## Fast time: the speeds keys 1-4 pick (and . cycles through, , steps back down). See set_fast_forward.
+const FAST_FORWARD_STEPS := [1.0, 2.0, 4.0, 8.0]
+## Fast time looks this many real seconds ahead for land, ports and storms, and drops back to x1 when it finds one.
+const FF_LOOKAHEAD_S := 20.0
+## A warning counts as the same one (and does not stop fast time again once you have turned it back up) while what
+## set it off stays within this distance (m) of where it first was.
+const FF_SAME_ALERT_M := 15000.0
+## What a real port scene turns off or cuts out of the macro layers around it.
+const PORT_OWN_GROUNDING_M := 700.0
+const PORT_TERRAIN_HOLE_M := 320.0
+const PORT_TERRAIN_HOLE_CENTER := Vector3(0.0, 0.0, 70.0)   # port-local, seaward of the quay
+
+var chart: WorldChart
+var origin_x := 0.0
+var origin_z := 0.0
+var aground := false
+var last_sleep := {}
+## The route to run_to: chart waypoints, the last one is the port. route_i is the one to steer for.
+var destination := ""
+var route: Array = []
+var route_i := 0
+var route_blind := false          # true when no sea route was found
+var arrived_flag := false
+## Sleep prompt state (read by the HUD).
+var prompt_open := false: set = _set_prompt_open
+## True while the bed plays the sleep sequence: no new sleep window until it is over.
+var sleep_busy := false
+var _storm_over := false      # during a sleep: the storm she lay in has passed, so she sails on again
+## Index into FAST_FORWARD_STEPS (0 = normal time). Read by the HUD.
+var fast_forward_i := 0
+var _ff_was_in_harbour := false
+## In fast time the player is stuck to the wheel: his physics is off and he is carried with the ship exactly, so the
+## big physics steps of x2-x8 cannot fling him off the deck.
+var helm_locked := false
+var _lock_local := Vector3.ZERO   # the player's feet in the ship's frame
+var _lock_yaw := 0.0
+var _ff_alerts := {}              # what has already stopped fast time: key -> chart position it was at
+var _ff_check_t := 0.0
+## Whole laps of the wrapped world the origin has been put back by (see relocate); the waves are laid out from
+## origin + _lap, so they never jump at the seam.
+var _lap := Vector2.ZERO
+var prompt_text := ""
+var prompt_preview := ""
+var message := ""
+var message_t := 0.0
+var line_blocked_m := -1.0        # >= 0: land lies this far along the line to the marker
+
+var _ocean: Ocean
+var _ship: Node3D
+var _player: Node3D
+var _terrain: WorldTerrain
+var _rocks: Node                  # rock_field.gd
+var ground            # world_ground.gd: the terrain's ground on the CPU (exact keel test, shore collider)
+var _shore_col: Node              # shore_collider.gd
+var _hud: WorldHud
+var _ports := {}              # id -> Node3D
+var _loading := {}            # id -> res path
+var _port_timer := 0.0
+var _pause_ticks := 0
+var _last_ok := Vector3.ZERO
+var _last_ok_shore := -1.0     # shore distance at _last_ok (-1 = not known yet)
+var _stuck_t := 0.0            # seconds held on land: past 1.5 she is floated clear
+var _cam_set := false
+var _mouth_cache := {}
+var _line_timer := 0.0
+var _replot_cool := 0.0
+
+
+func _ready() -> void:
+	add_to_group("world_streamer")        # the bed (ship_bed.gd) finds it here to open the sleep window
+	chart = WorldChart.load_default()
+	if chart == null:
+		push_error("WorldStreamer: no chart")
+		return
+	_ocean = get_node_or_null(ocean_path) as Ocean
+	_ship = get_node_or_null(ship_path) as Node3D
+	_player = get_node_or_null(player_path) as Node3D
+	if _ship != null and _ship.has_signal("moved"):
+		_ship.connect("moved", func() -> void:
+			if helm_locked:
+				_pin_player())
+	ground = load("res://scripts/world_ground.gd").new(chart)
+	if _ocean:
+		_ocean.ground = ground
+	if terrain_enabled:
+		_terrain = WorldTerrain.new()
+		_terrain.name = "Terrain"
+		_terrain.curvature_radius_m = _ocean.curvature_radius_m if _ocean else 6370000.0
+		_terrain.ocean = _ocean
+		add_child(_terrain)
+	var cl := CanvasLayer.new()
+	cl.layer = 5
+	_hud = WorldHud.new()
+	_hud.streamer = self
+	cl.add_child(_hud)
+	add_child(cl)
+	go_home()
+	if run_to != "":
+		set_destination(run_to)
+	if weather_enabled:
+		var wx: Node = load("res://scripts/world_weather.gd").new()
+		wx.name = "Weather"
+		if not weather_storms:
+			wx.set("storms_enabled", false)
+			wx.set("start_storm", false)
+		if weather_fixed_wind != Vector2.ZERO:
+			wx.set("fixed_wind_mps", weather_fixed_wind)
+		if weather_start_hour >= 0.0:
+			wx.set("start_hour", weather_start_hour)
+		add_child(wx)
+	if rocks_enabled and ResourceLoader.exists("res://scripts/rock_field.gd"):
+		_rocks = load("res://scripts/rock_field.gd").new()
+		_rocks.name = "Rocks"
+		_rocks.streamer = self
+		add_child(_rocks)
+	if shore_collision:
+		_shore_col = load("res://scripts/shore_collider.gd").new()
+		_shore_col.name = "ShoreCollider"
+		_shore_col.streamer = self
+		_shore_col.ground = ground
+		add_child(_shore_col)
+	if beacons_enabled:
+		var lb = load("res://scripts/lighthouse_beacons.gd").new()
+		lb.name = "LighthouseBeacons"
+		lb.streamer = self
+		add_child(lb)
+
+
+# ------------------------------------------------------------------ coordinates
+
+func chart_x(gx: float) -> float:
+	return origin_x + gx
+
+
+func chart_z(gz: float) -> float:
+	return origin_z + gz
+
+
+func ship_cx() -> float:
+	return origin_x + _ship.global_position.x
+
+
+func ship_cz() -> float:
+	return origin_z + _ship.global_position.z
+
+
+## Chart heading of the ship (0 = north, clockwise).
+func ship_chart_heading() -> float:
+	return fposmod(-float(_ship.get("heading_deg")), 360.0)
+
+
+func ship_depth_m() -> float:
+	return chart.sea_depth_m(ship_cx(), ship_cz())
+
+
+## Speed used while asleep: what the sails are giving now, or the default if she is hardly moving.
+func sleep_speed() -> float:
+	if ship_held():
+		return 0.0
+	if riding_out_storm():
+		return 0.0                     # under bare poles in a storm she lies a-hull and goes nowhere
+	var v := absf(float(_ship.get("speed")))
+	return v if v >= 0.5 else sleep_speed_mps
+
+
+## True when every sail is hauled up (furled): she is under bare poles. No sails node (the test scene) counts as no.
+func sails_furled() -> bool:
+	if _ship == null:
+		return false
+	var sl = _ship.get("sails")
+	if sl == null:
+		return false
+	var m = sl.get("model")
+	if m == null:
+		return false
+	for s in m.sails:
+		if s.set_frac > 0.1:
+			return false
+	return true
+
+
+## Furled up with a storm on her (or half an hour from her): a sleep rides it out. She goes nowhere, the storm does
+## not wake her, and the sleep result carries storm_hours (how long she lay in it) for the damage to be worked out from.
+## The storm is looked at with her standing still, so this never depends on sleep_speed().
+func riding_out_storm() -> bool:
+	if _storm_over or not sails_furled():
+		return false
+	var wx := get_tree().get_first_node_in_group("weather")
+	if wx == null:
+		return false
+	return float(wx.storm_wake_in(ship_cx(), ship_cz(), ship_chart_heading(), 0.0, SLEEP_STORM_GRACE_H)) >= 0.0
+
+
+## True while the ship stays where she is whatever the wind does: the anchor is down, or she is moored.
+func ship_held() -> bool:
+	for n in get_tree().get_nodes_in_group("ship_anchor"):
+		if n.has_method("holds_ship") and n.holds_ship():
+			return true
+	var hb := get_tree().get_first_node_in_group("ship_harbor")
+	return hb != null and bool(hb.get("moored"))
+
+
+## The harbour a chart position lies in: {id, dist_m, radius_m}, or {} on the open sea. A harbour is a circle round a
+## port (the port's harbor_m in the chart, or a default for its tier). Inside one, a ship with sails set creeps ahead
+## (ship_anchor.gd) and the wind is the port's land and sea breeze (world_weather.gd).
+func harbor_at(cx: float, cz: float) -> Dictionary:
+	var best := {}
+	var best_d := INF
+	for p in chart.ports:
+		var r := float(p.get("harbor_m", 0.0))
+		if r <= 0.0:
+			continue
+		var d := WorldChart.distance_m(cx, cz, p["x"], p["z"])
+		if d <= r and d < best_d:
+			best_d = d
+			best = {"id": String(p["id"]), "dist_m": d, "radius_m": r}
+	return best
+
+
+## Chart heading (degrees) from a port out toward open water: the way its harbour mouth faces.
+func port_mouth_heading(id: String) -> float:
+	return _mouth_angle(id)
+
+
+## Move along the ship's heading for up to `hours` of sleep at sleep_speed(). Held in place (anchored or moored), the
+## whole time passes and she goes nowhere.
+func _travel(hours: float, opts: Dictionary = {}) -> Dictionary:
+	var sp := sleep_speed()
+	if sp <= 0.0:
+		return {"dist_m": 0.0, "x": ship_cx(), "z": ship_cz(), "stop": "none", "port": "", "hours_slept": hours}
+	# land never wakes a sleeper: she sails on until her keel touches bottom, like she would if you were awake
+	var o := opts.duplicate()
+	o["aground_m"] = KEEL_CLEARANCE_M
+	o["standoff_m"] = shore_standoff_m
+	# the wheel she is lying down with bends the path into an arc (see sleep_turn_rate_deg)
+	o["curve_per_m"] = sleep_curve_per_m()
+	return chart.sleep_travel(ship_cx(), ship_cz(), ship_chart_heading(), hours, sp, o)
+
+
+# ------------------------------------------------------------------ moving the ship around the chart
+
+## Put the ship at a chart position and heading (chart degrees) and rebase the origin there.
+func place_ship(cx: float, cz: float, chart_heading_deg: float) -> void:
+	var old_yaw := deg_to_rad(float(_ship.get("heading_deg")))
+	var new_heading := fposmod(-chart_heading_deg, 360.0)
+	var dyaw := wrapf(deg_to_rad(new_heading) - old_yaw, -PI, PI)
+	if _player:
+		# turn the player with the ship, so whoever stands on the deck stays on the deck
+		var off := Basis(Vector3.UP, dyaw) * (_player.global_position - _ship.global_position)
+		_player.global_position = _ship.global_position + off
+		_player.rotate_y(dyaw)
+	_ship.set("heading_deg", new_heading)
+	_ship.rotation.y = deg_to_rad(new_heading)
+	relocate(cx, cz)
+
+
+## Move the ship to a chart position, snapping the origin to the grid around it.
+## The player rides along with the ship, with the same offset from it.
+func relocate(cx: float, cz: float) -> void:
+	# the world wraps: keep the origin on the chart's own copy of the world, and remember the laps for the waves
+	var c := WorldChart.canon(Vector2(cx, cz))
+	_lap += Vector2(cx - c.x, cz - c.y)
+	cx = c.x
+	cz = c.y
+	var ox := roundf(cx / rebase_step_m) * rebase_step_m
+	var oz := roundf(cz / rebase_step_m) * rebase_step_m
+	var old := _ship.global_position
+	var target := Vector3(cx - ox, old.y, cz - oz)
+	var delta := target - old
+	origin_x = ox
+	origin_z = oz
+	_ship.global_position = target
+	if _player:
+		_player.global_position += delta
+		_pause_player()
+		if helm_locked:
+			_pin_player()
+	_last_ok = target
+	_last_ok_shore = -1.0
+	_refresh_world()
+	rebased.emit(delta)
+
+
+func _pause_player() -> void:
+	if _player and pause_player_on_move:
+		_pause_ticks = PLAYER_PAUSE_TICKS
+		_player.set_physics_process(false)
+
+
+func _refresh_world() -> void:
+	if _ocean:
+		_ocean.set_world(chart, origin_x, origin_z, _lap)
+	if _terrain:
+		_terrain.set_world(chart, origin_x, origin_z)
+	for id in _ports:
+		_place_port(id)
+
+
+## Start the run: in the home port's berth if it has a scene, else in clear water facing the port.
+func go_home() -> void:
+	var p := chart.get_port(home_port_id)
+	if p.is_empty():
+		push_warning("WorldStreamer: no port %s" % home_port_id)
+		return
+	if port_scenes.has(home_port_id) and _start_in_port(home_port_id):
+		_update_ports()
+		return
+	# clear water, a little way off, facing the port: the heading whose approach line stays deepest
+	var best_a := -1
+	var best_min := -1.0
+	for a in range(0, 360, 15):
+		var dir := WorldChart.direction(float(a))
+		var m := INF
+		for i in range(1, 11):
+			var f := float(i) / 10.0 * start_distance_m
+			m = minf(m, chart.sea_depth_m(float(p["x"]) + dir.x * f, float(p["z"]) + dir.y * f))
+		if m > best_min:
+			best_min = m
+			best_a = a
+	if best_min < KEEL_CLEARANCE_M + 1.0:
+		push_warning("WorldStreamer: no clear water %.0f m from %s (best %.1f m)" % [start_distance_m, home_port_id, best_min])
+	var bd := WorldChart.direction(float(best_a))
+	var sx: float = p["x"] + bd.x * start_distance_m
+	var sz: float = p["z"] + bd.y * start_distance_m
+	place_ship(sx, sz, WorldChart.heading_to(sx, sz, p["x"], p["z"]))
+	_update_ports()
+
+
+## Load the port's scene now and put the ship at its start berth. False if that did not work.
+func _start_in_port(id: String) -> bool:
+	var p := chart.get_port(id)
+	var path := String(port_scenes[id])
+	if not ResourceLoader.exists(path):
+		push_warning("WorldStreamer: %s is missing" % path)
+		return false
+	var node: Node3D = _ports.get(id)
+	if node == null:
+		_loading.erase(id)
+		var scene := load(path) as PackedScene
+		node = scene.instantiate() as Node3D if scene else null
+		if node == null:
+			return false
+		# put the origin round the port first, so the port node sits near zero while we measure it
+		origin_x = roundf(float(p["x"]) / rebase_step_m) * rebase_step_m
+		origin_z = roundf(float(p["z"]) / rebase_step_m) * rebase_step_m
+		_add_port(id, node)
+	var berth := _find_berth(node, start_berth)
+	if berth == null:
+		push_warning("WorldStreamer: no berth '%s' in %s" % [start_berth, path])
+		return false
+	var gp := berth.global_position
+	var bow := _berth_bow_world(node, berth)
+	var heading := fposmod(rad_to_deg(atan2(bow.x, -bow.z)), 360.0)
+	# her class sizes the slot she lies in, and the spot astern of the light she starts at otherwise
+	var cls := ShipClasses.Size.MEDIUM
+	var sc = _ship.get("ship_class")
+	if sc != null:
+		cls = int(sc)
+	var dock := _find_dock(node, berth)
+	var harbor := get_tree().get_first_node_in_group("ship_harbor")
+	if start_moored and dock != null and harbor != null and harbor.has_method("start_moored_at"):
+		# lying in the berth: on her slot against the quay, bow the way the berth points, lines ashore
+		var slot := dock.slot_position(cls)
+		place_ship(origin_x + slot.x, origin_z + slot.z, -dock.berth_heading)
+		_ship.global_position.y = 0.0
+		harbor.start_moored_at(dock)
+		return true
+	if harbor != null and harbor.has_method("release_mooring"):
+		harbor.release_mooring()
+	# not in the berth but a little way astern of its light: the zone's half length, the hull's half length and a margin
+	var behind := ShipClasses.zone_size(cls).y * 0.5 + float(ShipClasses.data(cls).length) * 0.5 + start_behind_box_m
+	var start := gp - bow.normalized() * behind
+	place_ship(origin_x + start.x, origin_z + start.z, heading)
+	_ship.global_position.y = 0.0
+	return true
+
+
+## How far the Blender "Berth_NN" empty (the centre of a big ship) floats off the quay wall, metres (capital-harbor.md).
+const BERTH_WALL_OFFSET_M := 8.7
+
+## Each Blender "Berth_NN" empty of a real port scene becomes a DockBerth (dock_berth.gd) on the quay's face, so a ship
+## can moor there (ship_harbor.gd: the light on the water, E to moor). The empty's custom props say which way the bow
+## points (bow_dir), which way the wall lies (wall_dir), both Blender (x, y) in the port's own frame, and the biggest
+## ship it takes (ship_class). The DockBerths are children of the port, so they turn and move with it. Returns how many.
+func _make_berths(port: Node3D) -> int:
+	var rx := RegEx.new()
+	rx.compile("Berth_\\d+$")
+	var made := 0
+	var bollards := _make_bollards(port)
+	for c in port.find_children("*", "Node3D", true, false):
+		if c is DockBerth or rx.search(String(c.name)) == null:
+			continue
+		var ex: Dictionary = {}
+		if c.has_meta("extras") and c.get_meta("extras") is Dictionary:
+			ex = c.get_meta("extras")
+		if not ex.has("bow_dir") or not ex.has("wall_dir"):
+			push_warning("WorldStreamer: %s has no bow_dir / wall_dir, so no docking there" % c.name)
+			continue
+		var bow := _blender_dir(ex["bow_dir"])
+		var wall := _blender_dir(ex["wall_dir"])
+		var yaw := atan2(-bow.x, -bow.z)
+		var right := Vector3(cos(yaw), 0.0, -sin(yaw))
+		if wall.dot(right) > 0.0:
+			push_warning("WorldStreamer: %s has the wall on the starboard side; ships only lie port side to" % c.name)
+			continue
+		var cls := ShipClasses.NAMES.find(String(ex.get("ship_class", "large")))
+		if cls < 0:
+			cls = ShipClasses.Size.LARGE
+		var b := DockBerth.new()
+		b.name = "Dock_" + String(c.name)
+		b.follow_parent_yaw = true
+		b.max_ship_class = cls
+		b.position = port.to_local((c as Node3D).global_position) + wall * BERTH_WALL_OFFSET_M
+		b.position.y = 0.0
+		b.rotation.y = yaw
+		port.add_child(b)
+		for top in bollards:
+			var lp := b.to_local(top)
+			if absf(lp.z) < 16.0 and absf(lp.x) < 12.0:
+				b.real_bollards.append(lp)
+		made += 1
+	if made == 0:
+		push_warning("WorldStreamer: no berths found in %s" % port.name)
+	return made
+
+
+## The black mooring bollards of a port model ("*Bollard*" meshes): each gets a collider (they had none, so you walked
+## through them) and their tops are handed back, world space, so the berths can send the mooring lines to them.
+func _make_bollards(port: Node3D) -> Array[Vector3]:
+	var tops: Array[Vector3] = []
+	for c in port.find_children("*Bollard*", "MeshInstance3D", true, false):
+		var mi := c as MeshInstance3D
+		if mi.mesh == null:
+			continue
+		var ab := mi.mesh.get_aabb()
+		if mi.get_node_or_null("BollardBody") == null:
+			var body := StaticBody3D.new()
+			body.name = "BollardBody"
+			var cs := CollisionShape3D.new()
+			var cyl := CylinderShape3D.new()
+			cyl.radius = maxf(ab.size.x, ab.size.z) * 0.5
+			cyl.height = ab.size.y
+			cs.shape = cyl
+			cs.position = ab.get_center()
+			body.add_child(cs)
+			mi.add_child(body)
+		tops.append(mi.global_transform * (ab.get_center() + Vector3(0.0, ab.size.y * 0.5 - 0.08, 0.0)))
+	return tops
+
+
+## Small fixes to a port model that loaded (data/port_fixes.json, keyed by the .glb's name): colliders pulled back inside
+## a box, nodes moved. For mistakes found in play that are quicker to fix here than by re-exporting the port; each one can
+## go once the Blender file has the fix. Coordinates are the port's own frame. Names match with "." read as "_" (Godot
+## renames those) and with an import suffix such as "-convcolonly" left off.
+const PORT_FIXES := "res://data/port_fixes.json"
+var _port_fixes = null
+
+
+func _apply_port_fixes(port: Node3D, scene_path: String) -> void:
+	if _port_fixes == null:
+		_port_fixes = {}
+		if FileAccess.file_exists(PORT_FIXES):
+			var parsed = JSON.parse_string(FileAccess.get_file_as_string(PORT_FIXES))
+			if parsed is Dictionary:
+				_port_fixes = parsed
+	var fx: Dictionary = (_port_fixes as Dictionary).get(scene_path.get_file().get_basename(), {})
+	if fx.is_empty():
+		return
+	var by_name := {}
+	for n in port.find_children("*", "Node3D", true, false):
+		by_name[String(n.name)] = n
+	var find := func(key: String) -> Node3D:
+		var k := key.replace(".", "_")
+		if by_name.has(k):
+			return by_name[k]
+		for nm in by_name:
+			if String(nm).begins_with(k + "-") or String(nm) == k + "_col" or String(nm).begins_with(k + "_col"):
+				return by_name[nm]
+		return null
+	var clip: Dictionary = fx.get("clip_colliders", {})
+	for key in clip:
+		if String(key).begins_with("_"):
+			continue
+		var n: Node3D = find.call(String(key))
+		if n == null:
+			push_warning("WorldStreamer: port fix: no %s in %s" % [key, port.name])
+			continue
+		var r: Array = clip[key]
+		for cs in n.find_children("*", "CollisionShape3D", true, false):
+			_clip_shape(port, cs as CollisionShape3D, float(r[0]), float(r[1]), float(r[2]), float(r[3]))
+	var mv: Dictionary = fx.get("move", {})
+	for key in mv:
+		if String(key).begins_with("_"):
+			continue
+		var n2: Node3D = find.call(String(key))
+		if n2 == null:
+			push_warning("WorldStreamer: port fix: no %s in %s" % [key, port.name])
+			continue
+		var v: Array = mv[key]
+		n2.global_position = port.to_global(Vector3(float(v[0]), float(v[1]), float(v[2])))
+
+
+## Pull every point of a convex (or box) collision shape inside the port-frame box x_min..x_max, z_min..z_max.
+func _clip_shape(port: Node3D, cs: CollisionShape3D, x0: float, z0: float, x1: float, z1: float) -> void:
+	var to_port := port.global_transform.affine_inverse() * cs.global_transform
+	var from_port := to_port.affine_inverse()
+	var pts := PackedVector3Array()
+	if cs.shape is ConvexPolygonShape3D:
+		pts = (cs.shape as ConvexPolygonShape3D).points
+	elif cs.shape is BoxShape3D:
+		var h := (cs.shape as BoxShape3D).size * 0.5
+		for i in 8:
+			pts.append(Vector3(h.x if i & 1 else -h.x, h.y if i & 2 else -h.y, h.z if i & 4 else -h.z))
+	else:
+		push_warning("WorldStreamer: port fix: %s is not a convex or box shape" % cs.get_path())
+		return
+	var out := PackedVector3Array()
+	for p in pts:
+		var q := to_port * p
+		q.x = clampf(q.x, x0, x1)
+		q.z = clampf(q.z, z0, z1)
+		out.append(from_port * q)
+	var shape := ConvexPolygonShape3D.new()
+	shape.points = out
+	cs.shape = shape
+
+
+## Ladders down the quay and mole walls. The port models have them as plain meshes, so nothing happened when you swam up
+## to one. data/port_ladders.json lists them per port .glb (middle of the rails in the port's own frame, and which way the
+## water lies from the wall); each one becomes a ShipLadder zone (ship_ladder.gd) that player.gd already knows how to climb:
+## swim up to it, W climbs, Space lets go. Walking off the deck edge at a ladder takes hold of it from the top, so S climbs down.
+## The box runs from below the waterline to a little above the deck, a hand's width off the wall.
+const LADDER_DATA := "res://data/port_ladders.json"
+const LADDER_BOTTOM_M := -2.0          ## below the water, so a swimmer is always inside it
+const LADDER_TOP_ABOVE_DECK_M := 0.25  ## feet above this and you are out of the top: W steps you over onto the deck
+const LADDER_WIDTH_M := 1.0
+const LADDER_OFF_WALL_M := 0.4         ## middle of the zone, out from the wall (the rails are 0.08 out)
+const LADDER_DEPTH_M := 0.2
+var _ladder_data := {}
+var _ladder_data_loaded := false
+
+
+func _make_ladders(port: Node3D, scene_path: String) -> int:
+	if not _ladder_data_loaded:
+		_ladder_data_loaded = true
+		var f := FileAccess.open(LADDER_DATA, FileAccess.READ)
+		if f != null:
+			var parsed = JSON.parse_string(f.get_as_text())
+			if parsed is Dictionary:
+				_ladder_data = parsed
+		else:
+			push_warning("WorldStreamer: %s is missing, so no quay ladders" % LADDER_DATA)
+	var ports: Dictionary = _ladder_data.get("ports", {})
+	var list: Array = ports.get(scene_path.get_file().get_basename(), [])
+	if list.is_empty():
+		return 0
+	var deck_y := float(_ladder_data.get("deck_y", 1.85))
+	var top := deck_y + LADDER_TOP_ABOVE_DECK_M
+	var made := 0
+	for e in list:
+		var out := Vector3(float(e["out"][0]), 0.0, float(e["out"][1])).normalized()
+		var a := ShipLadder.new()
+		a.name = "QuayLadder_%02d" % made
+		a.fixed = true
+		a.snap_depth = true
+		a.center_on_grab = true
+		a.grab_slack = 0.3
+		a.transform = Transform3D(Basis(Vector3.UP.cross(out), Vector3.UP, out), Vector3(float(e["x"]), 0.0, float(e["z"])))
+		var cs := CollisionShape3D.new()
+		cs.name = "Box"
+		var box := BoxShape3D.new()
+		box.size = Vector3(LADDER_WIDTH_M, top - LADDER_BOTTOM_M, LADDER_DEPTH_M)
+		cs.shape = box
+		cs.position = Vector3(0.0, (top + LADDER_BOTTOM_M) * 0.5, LADDER_OFF_WALL_M)
+		a.add_child(cs)
+		port.add_child(a)
+		made += 1
+	return made
+
+
+## A Blender (x, y) direction in a port's own frame as a Godot ground direction.
+func _blender_dir(a: Array) -> Vector3:
+	return Vector3(float(a[0]), 0.0, -float(a[1])).normalized()
+
+
+func _find_berth(root: Node, berth_name: String) -> Node3D:
+	var loose: Node3D = null
+	for c in root.find_children("*", "Node3D", true, false):
+		if c is DockBerth:
+			continue
+		if String(c.name) == berth_name:
+			return c as Node3D
+		if loose == null and String(c.name).ends_with(berth_name):
+			loose = c as Node3D
+	return loose
+
+
+## The DockBerth that _make_berths built for a Blender "Berth_NN" empty (named "Dock_" + the empty's name), or null.
+func _find_dock(port: Node, empty: Node3D) -> DockBerth:
+	return port.get_node_or_null("Dock_" + String(empty.name)) as DockBerth
+
+
+## World direction the berth's bow points: the Blender bow_dir custom property, else the node's own -Z.
+func _berth_bow_world(port: Node3D, berth: Node3D) -> Vector3:
+	if berth.has_meta("extras"):
+		var ex = berth.get_meta("extras")
+		if ex is Dictionary and ex.has("bow_dir"):
+			var b: Array = ex["bow_dir"]
+			# Blender (x, y) -> Godot (x, -y)
+			return port.global_transform.basis * Vector3(float(b[0]), 0.0, -float(b[1]))
+	return -berth.global_transform.basis.z
+
+
+## Sleep: carry the ship along its heading. Returns the WorldChart.sleep_travel result.
+func sleep(hours: float = -1.0) -> Dictionary:
+	if hours <= 0.0:
+		hours = sleep_hours
+	hours = minf(hours, MAX_SLEEP_HOURS)
+	var wx := get_tree().get_first_node_in_group("weather")
+	# furled up with a storm on her: she lies a-hull (no movement) only while the storm is on her, then sails on
+	# for the rest of the sleep (before this she lay still for the whole sleep, even long after it had passed)
+	var lie_h := 0.0
+	var lie_storm_h := 0.0
+	if wx != null and riding_out_storm():
+		lie_h = minf(float(wx.storm_clear_in(ship_cx(), ship_cz(), hours)), hours)
+		if lie_h > 0.0:
+			var lie_info := {}
+			wx.sleep_advance(ship_cx(), ship_cz(), ship_chart_heading(), 0.0, lie_h, true, lie_info, 0.0)
+			lie_storm_h = float(lie_info.get("storm_hours", 0.0))
+			hours -= lie_h
+			_storm_over = true
+	var r := {"dist_m": 0.0, "x": ship_cx(), "z": ship_cz(), "stop": "none", "port": "", "hours_slept": 0.0}
+	if hours > 0.001:
+		r = _sleep_calc(hours)
+		# the weather moves for real while she sleeps; if a storm is about to reach her, the sleep ends there
+		if wx != null and float(r["hours_slept"]) > 0.0:
+			var asked := float(r["hours_slept"])
+			var riding := riding_out_storm()          # furled up with a storm on her: nothing wakes her
+			var storm_info := {}
+			var done := float(wx.sleep_advance(ship_cx(), ship_cz(), ship_chart_heading(), sleep_speed(), asked, riding, storm_info, sleep_curve_per_m()))
+			lie_storm_h += float(storm_info.get("storm_hours", 0.0))
+			if done < asked - 0.001:
+				r = _travel(done)
+				r["stop"] = "storm"
+	_storm_over = false
+	r["hours_slept"] = float(r["hours_slept"]) + lie_h
+	r["storm_hours"] = lie_storm_h
+	if float(r["dist_m"]) > 0.0:
+		if absf(wrapf(float(r.get("heading", ship_chart_heading())) - ship_chart_heading(), -180.0, 180.0)) > 0.001:
+			# she turned on the way: wake on the heading the arc has brought her to (the player turns with the ship)
+			place_ship(r["x"], r["z"], float(r["heading"]))
+		else:
+			relocate(r["x"], r["z"])
+	last_sleep = r
+	_after_sleep(r)
+	_say("Slept %.1f h. %s" % [r["hours_slept"], wake_reason(r)], 10.0)      # no distance: the player works that out from the log and the chart
+	slept.emit(r)
+	return r
+
+
+func _sleep_calc(hours: float) -> Dictionary:
+	var stops: Array = []
+	for i in range(route_i, route.size() - 1):
+		var w: Vector2 = route[i]
+		stops.append({"id": "WP%d" % (i + 1), "x": w.x, "z": w.y, "r": 3000.0, "pass_r": waypoint_radius_m})
+	var r := _travel(hours, {"stops": stops})
+	# a storm about to reach her ends the sleep short (looked at here with the storms as they are now; sleep() then
+	# checks again as the weather really moves)
+	var wx := get_tree().get_first_node_in_group("weather")
+	if wx != null and float(r["hours_slept"]) > 0.0:
+		var wake := float(wx.storm_wake_in(ship_cx(), ship_cz(), ship_chart_heading(), sleep_speed(), float(r["hours_slept"]), sleep_curve_per_m()))
+		if wake >= 0.0 and wake < float(r["hours_slept"]) and not riding_out_storm():
+			r = _travel(wake)
+			r["stop"] = "storm"
+	return r
+
+
+## Why she cannot be slept in right now ("" if she can): a storm's weather is on her or about to be.
+func sleep_block_reason() -> String:
+	var wx := get_tree().get_first_node_in_group("weather")
+	if wx == null:
+		return ""
+	if float(wx.storm_wake_in(ship_cx(), ship_cz(), ship_chart_heading(), sleep_speed(), SLEEP_STORM_GRACE_H, sleep_curve_per_m())) >= 0.0 and not sails_furled():
+		return "There is a storm on you. Haul every sail up and you can ride it out."
+	return ""
+
+
+func wake_reason(r: Dictionary) -> String:
+	if float(r.get("storm_hours", 0.0)) > 0.0:
+		if float(r.get("dist_m", 0.0)) > 0.0:
+			return "Woke: you rode out the storm, then sailed on."
+		return "Woke: you rode out the storm."
+	match String(r["stop"]):
+		"storm": return "Woke: a storm is closing in."
+		"land": return "Woke: land ahead."
+		"aground": return "Woke: the keel is scraping bottom."
+		"edge": return "Woke: the edge of the chart."
+		"port_ring": return "Woke: %s is close." % chart.port_name(String(r["port"]))
+		"waypoint": return "Woke at waypoint %s." % String(r["port"]).substr(2)
+	return "Rested the full time."
+
+
+func _after_sleep(r: Dictionary) -> void:
+	_update_ports()
+	if run_to == "":
+		return
+	var s := String(r["stop"])
+	if s == "none" or s == "land" or s == "edge" or s == "aground":
+		replot()          # she may be well off the route
+	else:
+		_advance_route(true)
+
+
+# ------------------------------------------------------------------ the run: destination, route, marker
+
+func set_destination(id: String) -> void:
+	destination = id
+	arrived_flag = false
+	replot()
+
+
+## Plan a fresh route from where the ship is now.
+func replot() -> void:
+	var d := chart.get_port(destination)
+	if d.is_empty():
+		route = []
+		return
+	var np := chart.nearest_port(ship_cx(), ship_cz())
+	var in_harbour := not np.is_empty() and float(np["dist_m"]) < WorldRoute.HARBOUR_ZONE_M
+	if plan_route:
+		route = WorldRoute.plan(chart, ship_cx(), ship_cz(), d["x"], d["z"], 1500.0, 6000.0, 1500.0, in_harbour)
+	else:
+		route = [Vector2(float(d["x"]), float(d["z"]))]
+	route_blind = route.is_empty()
+	if route_blind:
+		route = [Vector2(d["x"], d["z"])]
+	route_i = 0
+	_advance_route()
+	_say("Destination: %s." % chart.port_name(destination))      # no legs or distance: work that out from the chart
+
+
+func route_length_m() -> float:
+	var total := 0.0
+	var p := Vector2(ship_cx(), ship_cz())
+	for i in range(route_i, route.size()):
+		total += WorldChart.distance_m(p.x, p.y, route[i].x, route[i].y)
+		p = route[i]
+	return total
+
+
+## The waypoint to steer for (chart metres), or Vector2.INF if there is no run.
+func waypoint() -> Vector2:
+	if route.is_empty():
+		return Vector2.INF
+	return route[mini(route_i, route.size() - 1)]
+
+
+func waypoint_is_port() -> bool:
+	return not route.is_empty() and route_i >= route.size() - 1
+
+
+func waypoint_bearing() -> float:
+	var w := waypoint()
+	return WorldChart.heading_to(ship_cx(), ship_cz(), w.x, w.y)
+
+
+func waypoint_distance_m() -> float:
+	var w := waypoint()
+	return WorldChart.distance_m(ship_cx(), ship_cz(), w.x, w.y)
+
+
+## Move the marker on to the next waypoint once this one is reached (inside waypoint_radius_m, with a
+## clear line to the next one, or right on top of it). If a sleep woke us abeam a waypoint and the corner
+## we cut has land in the way of the next leg, plot a fresh route from here (allow_replot).
+func _advance_route(allow_replot: bool = false) -> void:
+	if route.is_empty():
+		return
+	var d := chart.get_port(destination)
+	if not d.is_empty() and WorldChart.distance_m(ship_cx(), ship_cz(), d["x"], d["z"]) <= WorldChart.PORT_SPAWN_M:
+		route_i = route.size() - 1
+	var here := Vector2(ship_cx(), ship_cz())
+	var was_i := route_i
+	while route_i < route.size() - 1:
+		var w: Vector2 = route[route_i]
+		var dw := WorldChart.distance_m(here.x, here.y, w.x, w.y)
+		if dw <= 1500.0:
+			route_i += 1
+		elif dw <= waypoint_radius_m:
+			if WorldRoute.line_clear(chart, here, route[route_i + 1], 1500.0):
+				route_i += 1
+			elif allow_replot and _replot_cool <= 0.0 and not arrived_flag:
+				_replot_cool = 5.0
+				replot()
+				return
+			else:
+				break
+		else:
+			break
+	if route_i > was_i and fast_forward_i > 0:
+		set_fast_forward(0)
+		_say("Waypoint reached. Steer for the next marker.", 6.0)
+	if not arrived_flag and route_i >= route.size() - 1 and waypoint_distance_m() <= WorldChart.PORT_SPAWN_M:
+		arrived_flag = true
+		_say("%s is close. Sail in." % chart.port_name(destination), 8.0)
+		set_fast_forward(0)
+		arrived.emit(destination)
+
+
+# ------------------------------------------------------------------ sleep prompt
+
+func open_prompt() -> void:
+	if sleep_busy:
+		return
+	var why := sleep_block_reason()
+	if why != "":
+		_say(why, 6.0)
+		return
+	set_fast_forward(0)
+	prompt_open = true
+	prompt_text = ""
+	_refresh_preview()
+
+
+func _refresh_preview() -> void:
+	var h := float(prompt_text) if prompt_text != "" else sleep_hours
+	h = clampf(h, 0.0, MAX_SLEEP_HOURS)
+	var r := _sleep_calc(h)
+	prompt_preview = "At %.1f m/s, heading %03d%s: you would wake after %.1f h (%.0f km). %s" % [
+		sleep_speed(), int(ship_chart_heading()), _turn_phrase(), r["hours_slept"], float(r["dist_m"]) / 1000.0, wake_reason(r)]
+
+
+## Hours from now until the next wake_hour on the weather's clock (the one after, if it is under an hour away).
+## -1 if there is no clock.
+func hours_until_morning() -> float:
+	var wx := get_tree().get_first_node_in_group("weather")
+	if wx == null or not wx.has_method("hour_of_day"):
+		return -1.0
+	var h := fposmod(wake_hour - float(wx.hour_of_day()), 24.0)
+	if h < 1.0:
+		h += 24.0
+	return h
+
+
+## The "Sleep until morning" button: types the hours to the morning into the sleep window (Enter then sleeps them).
+func fill_morning() -> void:
+	var h := hours_until_morning()
+	if not prompt_open or h <= 0.0:
+		return
+	prompt_text = String.num(minf(ceilf(h * 10.0) / 10.0, 99.9), 1)
+	_refresh_preview()
+
+
+var _mouse_before := Input.MOUSE_MODE_CAPTURED
+
+## The sleep window needs the mouse for its button: free it while the window is open, then put it back as it was.
+func _set_prompt_open(v: bool) -> void:
+	if v == prompt_open:
+		return
+	prompt_open = v
+	if v:
+		_mouse_before = Input.mouse_mode
+		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+		get_viewport().warp_mouse(get_viewport().get_visible_rect().size * 0.5)
+	else:
+		Input.mouse_mode = _mouse_before
+
+
+## Start a sleep: the bed plays its sequence if it is listening, otherwise it just happens.
+func _begin_sleep(hours: float) -> void:
+	set_fast_forward(0)
+	if sleep_requested.get_connections().is_empty():
+		sleep(hours)
+	else:
+		sleep_requested.emit(hours)
+
+
+# ------------------------------------------------------------------ fast time
+
+## Fast time runs the whole world faster (Engine.time_scale): the ship, the wind, the storms and the clock together,
+## so the sailing itself does not change, you just get there sooner. x1, x2, x4, x8 (keys 1-4, or . and ,); past about
+## x8 the physics steps get too big (see claude/fast-time-and-wrap.md). It only runs while you hold the wheel (Ben,
+## 2026-11-18): the keys do nothing otherwise, and letting go of the wheel puts time back to x1. The sleep window, a
+## sleep, coming into a harbour, arriving, a waypoint, land or a port ahead, a storm closing in and running aground also
+## put it back to x1.
+func time_speed() -> float:
+	return float(FAST_FORWARD_STEPS[fast_forward_i])
+
+
+func set_fast_forward(i: int) -> void:
+	i = clampi(i, 0, FAST_FORWARD_STEPS.size() - 1)
+	if i > 0 and (prompt_open or sleep_busy):
+		return
+	if i > 0 and not wheel_held():
+		_say("Take the wheel to speed up time (hold left click on it).", 3.0)
+		return
+	if i == fast_forward_i:
+		return
+	var was := fast_forward_i
+	fast_forward_i = i
+	Engine.time_scale = time_speed()
+	if i > 0:
+		_lock_to_helm()
+	else:
+		_unlock_helm()
+	if i == 0:
+		_say("Time back to normal", 2.0)
+	elif was == 0:
+		_say("Time x%d. Let go of the wheel for normal time." % int(time_speed()), 4.0)
+	else:
+		_say("Time x%d" % int(time_speed()), 2.0)
+
+
+## True while the player has hold of the wheel (or the tiller).
+func wheel_held() -> bool:
+	var w := _ship.get_node_or_null("ShipWheel") if _ship != null else null
+	return w != null and bool(w.get("held"))
+
+
+## Stick the player to the wheel where he stands: physics off, carried with the ship, turning with her (the mouse still
+## looks about). Letting go of the wheel ends fast time and frees him.
+func _lock_to_helm() -> void:
+	if _player == null or helm_locked:
+		return
+	if "velocity" in _player:
+		_player.set("velocity", Vector3.ZERO)
+	_player.set_physics_process(false)
+	_lock_local = _ship.global_transform.affine_inverse() * _player.global_position
+	_lock_yaw = deg_to_rad(float(_ship.get("heading_deg")))
+	helm_locked = true
+
+
+func _unlock_helm() -> void:
+	if not helm_locked:
+		return
+	helm_locked = false
+	if _player:
+		_pin_player()
+		if "velocity" in _player:
+			_player.set("velocity", Vector3.ZERO)
+		if _pause_ticks <= 0:
+			_player.set_physics_process(true)
+
+
+func _pin_player() -> void:
+	if _player == null or _ship == null:
+		return
+	var yaw := deg_to_rad(float(_ship.get("heading_deg")))
+	_player.rotate_y(wrapf(yaw - _lock_yaw, -PI, PI))
+	_lock_yaw = yaw
+	_player.global_position = _ship.global_transform * _lock_local
+
+
+func cycle_fast_forward() -> void:
+	set_fast_forward((fast_forward_i + 1) % FAST_FORWARD_STEPS.size())
+
+
+func step_fast_forward(d: int) -> void:
+	set_fast_forward(fast_forward_i + d)
+
+
+## Look ahead for anything that should stop fast time: land or a port on her heading, or a storm closing in, within
+## FF_LOOKAHEAD_S real seconds. A warning stops it once; turn it back up and it is not repeated while the same coast,
+## port or storm is the cause.
+func _fast_time_check() -> void:
+	var k := time_speed()
+	var cx := ship_cx()
+	var cz := ship_cz()
+	var hd := ship_chart_heading()
+	var sp := maxf(absf(float(_ship.get("speed"))), 1.0)
+	var look := maxf(3000.0, sp * k * FF_LOOKAHEAD_S)
+	var found := {}               # key -> [chart position, message]
+	var r := chart.march(cx, cz, hd, look, {"land_margin_m": 1500.0, "step_m": maxf(200.0, look / 60.0)})
+	match String(r["stop"]):
+		"land":
+			found["land"] = [Vector2(r["x"], r["z"]), "Land ahead. Back to normal time."]
+		"port_ring":
+			var pid := String(r["port"])
+			found["port:" + pid] = [Vector2(r["x"], r["z"]), "%s ahead. Back to normal time." % chart.port_name(pid)]
+	var wx := get_tree().get_first_node_in_group("weather")
+	if wx != null:
+		var hrs := maxf(0.25, k * FF_LOOKAHEAD_S / 3600.0)
+		if float(wx.storm_wake_in(cx, cz, hd, sp, hrs)) >= 0.0:
+			found["storm"] = [Vector2(cx, cz), "A storm is closing in. Back to normal time."]
+	var stop_msg := ""
+	var keep := {}
+	for key in found:
+		var at: Vector2 = found[key][0]
+		if _ff_alerts.has(key) and WorldChart.distance_m(at.x, at.y, _ff_alerts[key].x, _ff_alerts[key].y) < FF_SAME_ALERT_M:
+			keep[key] = _ff_alerts[key]          # the same warning as before: you turned it back up knowing
+			continue
+		keep[key] = at
+		if stop_msg == "":
+			stop_msg = String(found[key][1])
+	_ff_alerts = keep
+	if stop_msg != "":
+		set_fast_forward(0)
+		_say(stop_msg, 6.0)
+
+
+func _exit_tree() -> void:
+	Engine.time_scale = 1.0
+
+
+func _prompt_key(e: InputEventKey) -> void:
+	var k := e.physical_keycode
+	if k == KEY_ESCAPE:
+		prompt_open = false
+	elif k == KEY_ENTER or k == KEY_KP_ENTER:
+		var h := float(prompt_text) if prompt_text != "" else sleep_hours
+		prompt_open = false
+		if h > 0.0:
+			sleep_hours = clampf(h, 0.0, MAX_SLEEP_HOURS)
+			_begin_sleep(sleep_hours)
+	elif k == KEY_BACKSPACE:
+		prompt_text = prompt_text.substr(0, maxi(prompt_text.length() - 1, 0))
+		_refresh_preview()
+	elif (k >= KEY_0 and k <= KEY_9) or (k >= KEY_KP_0 and k <= KEY_KP_9):
+		if prompt_text.length() < 4:
+			var digit := (k - KEY_0) if k <= KEY_9 else (k - KEY_KP_0)
+			prompt_text += str(digit)
+			_refresh_preview()
+	elif k == KEY_PERIOD or k == KEY_KP_PERIOD:
+		if not prompt_text.contains(".") and prompt_text != "":
+			prompt_text += "."
+			_refresh_preview()
+
+
+# ------------------------------------------------------------------ ports
+
+func _update_ports() -> void:
+	var cx := ship_cx()
+	var cz := ship_cz()
+	for p in chart.ports:
+		var id: String = p["id"]
+		var d := WorldChart.distance_m(cx, cz, p["x"], p["z"])
+		if d <= WorldChart.PORT_SPAWN_M and not _ports.has(id) and not _loading.has(id):
+			_spawn_port(p)
+		elif d > WorldChart.PORT_DESPAWN_M:
+			_despawn_port(id)
+
+
+func _spawn_port(p: Dictionary) -> void:
+	var id: String = p["id"]
+	if port_scenes.has(id) and ResourceLoader.exists(port_scenes[id]):
+		_loading[id] = String(port_scenes[id])
+		ResourceLoader.load_threaded_request(_loading[id])
+		return
+	_add_port(id, _make_beacon(p))
+
+
+func _add_port(id: String, node: Node3D) -> void:
+	node.name = "Port_" + id
+	node.set_meta("port_id", id)
+	if port_scenes.has(id):
+		node.set_meta("own_grounding", PORT_OWN_GROUNDING_M)
+		node.set_meta("terrain_hole_m", PORT_TERRAIN_HOLE_M)
+	add_child(node)
+	FountainFX.attach(node)      # working water for the capital piazza fountain (no-op for other ports)
+	_ports[id] = node
+	_place_port(id)
+	if port_scenes.has(id):
+		_make_berths(node)
+		_make_ladders(node, String(port_scenes[id]))
+		_apply_port_fixes(node, String(port_scenes[id]))
+	port_spawned.emit(id)
+
+
+func _place_port(id: String) -> void:
+	var p := chart.get_port(id)
+	var node: Node3D = _ports[id]
+	var np := WorldChart.near(Vector2(float(p["x"]), float(p["z"])), Vector2(ship_cx(), ship_cz()))      # the copy nearest the ship
+	node.position = Vector3(np.x - origin_x, 0.0, np.y - origin_z)
+	if port_scenes.has(id):
+		node.rotation.y = port_yaw(id)
+	if _terrain and node.has_meta("terrain_hole_m"):
+		var c := node.position + node.basis * PORT_TERRAIN_HOLE_CENTER
+		_terrain.set_hole(c.x, c.z, float(node.get_meta("terrain_hole_m")))
+
+
+## Turn a real port scene so its harbour mouth (+Z in the port scene) faces the best open water.
+func port_yaw(id: String) -> float:
+	var a := _mouth_angle(id)
+	var d := WorldChart.direction(a)
+	return atan2(d.x, d.y)
+
+
+## Chart heading (degrees) from the port out to the deepest, clearest water.
+func _mouth_angle(id: String) -> float:
+	if _mouth_cache.has(id):
+		return _mouth_cache[id]
+	var p := chart.get_port(id)
+	var best_a := 0.0
+	var best := -1.0
+	for a in range(0, 360, 5):
+		var d := WorldChart.direction(float(a))
+		var m := INF
+		var f := 300.0
+		while f <= 8000.0:
+			m = minf(m, chart.sea_depth_m(float(p["x"]) + d.x * f, float(p["z"]) + d.y * f))
+			f += 300.0
+		# a clear 8 km line wins; among equals prefer the way toward the destination
+		var score := minf(m, 40.0)
+		if destination != "" and id != destination:
+			var dp := chart.get_port(destination)
+			score -= absf(wrapf(float(a) - WorldChart.heading_to(p["x"], p["z"], dp["x"], dp["z"]), -180.0, 180.0)) * 0.01
+		if score > best:
+			best = score
+			best_a = float(a)
+	_mouth_cache[id] = best_a
+	return best_a
+
+
+func _despawn_port(id: String) -> void:
+	_loading.erase(id)
+	if not _ports.has(id):
+		return
+	var node: Node3D = _ports[id]
+	if _terrain and node.has_meta("terrain_hole_m"):
+		_terrain.set_hole(0.0, 0.0, -1.0)
+	_ports.erase(id)
+	node.queue_free()
+	port_despawned.emit(id)
+
+
+func port_ids() -> Array:
+	return _ports.keys()
+
+
+func _poll_loading() -> void:
+	for id in _loading.keys():
+		var path: String = _loading[id]
+		var st := ResourceLoader.load_threaded_get_status(path)
+		if st == ResourceLoader.THREAD_LOAD_LOADED:
+			var res := ResourceLoader.load_threaded_get(path) as PackedScene
+			_loading.erase(id)
+			if res:
+				_add_port(id, res.instantiate() as Node3D)
+		elif st == ResourceLoader.THREAD_LOAD_FAILED or st == ResourceLoader.THREAD_LOAD_INVALID_RESOURCE:
+			push_warning("WorldStreamer: could not load %s" % path)
+			_loading.erase(id)
+			_add_port(id, _make_beacon(chart.get_port(id)))
+
+
+## Placeholder port: a stone tower with a lamp, and a few huts round it.
+func _make_beacon(p: Dictionary) -> Node3D:
+	var root := Node3D.new()
+	var rng := RandomNumberGenerator.new()
+	rng.seed = hash(String(p["id"]))
+	var stone := StandardMaterial3D.new()
+	stone.albedo_color = Color(0.62, 0.58, 0.5)
+	stone.roughness = 0.95
+	var roof := StandardMaterial3D.new()
+	roof.albedo_color = Color(0.45, 0.2, 0.14)
+	var glow := StandardMaterial3D.new()
+	glow.albedo_color = Color(1.0, 0.85, 0.5)
+	glow.emission_enabled = true
+	glow.emission = Color(1.0, 0.8, 0.4)
+	glow.emission_energy_multiplier = 4.0
+	var tower := MeshInstance3D.new()
+	var cyl := CylinderMesh.new()
+	cyl.top_radius = 2.2
+	cyl.bottom_radius = 3.4
+	cyl.height = 27.0
+	tower.mesh = cyl
+	tower.material_override = stone
+	tower.position = Vector3(0, 8.5, 0)
+	root.add_child(tower)
+	var lamp := MeshInstance3D.new()
+	var sph := SphereMesh.new()
+	sph.radius = 1.6
+	sph.height = 3.2
+	lamp.mesh = sph
+	lamp.material_override = glow
+	lamp.position = Vector3(0, 23.5, 0)
+	root.add_child(lamp)
+	for i in 7:
+		var hut := MeshInstance3D.new()
+		var box := BoxMesh.new()
+		box.size = Vector3(rng.randf_range(6, 11), rng.randf_range(3, 5), rng.randf_range(6, 10))
+		hut.mesh = box
+		hut.material_override = stone if i % 2 == 0 else roof
+		var a := rng.randf() * TAU
+		var r := rng.randf_range(25.0, 120.0)
+		hut.position = Vector3(cos(a) * r, box.size.y * 0.5 - 0.5, sin(a) * r)
+		hut.rotation.y = rng.randf() * TAU
+		root.add_child(hut)
+	return root
+
+
+# ------------------------------------------------------------------ per frame
+
+func _unhandled_input(e: InputEvent) -> void:
+	if chart == null:
+		return
+	if e is InputEventKey and e.pressed and not e.echo:
+		if prompt_open:
+			_prompt_key(e)
+			get_viewport().set_input_as_handled()
+			return
+		var kc: int = e.physical_keycode
+		if kc >= KEY_1 and kc <= KEY_4 and not e.shift_pressed:
+			set_fast_forward(kc - KEY_1)          # 1 = x1, 2 = x2, 3 = x4, 4 = x8
+			get_viewport().set_input_as_handled()
+		elif e.physical_keycode == key_fast_forward:
+			cycle_fast_forward()
+			get_viewport().set_input_as_handled()
+		elif e.physical_keycode == key_slower:
+			step_fast_forward(-1)
+			get_viewport().set_input_as_handled()
+		elif e.physical_keycode == key_sleep:
+			open_prompt()
+			get_viewport().set_input_as_handled()
+		elif e.physical_keycode == key_home:
+			go_home()
+			if run_to != "":
+				set_destination(run_to)
+		elif e.physical_keycode == key_replot and run_to != "":
+			replot()
+
+
+func _physics_process(delta: float) -> void:
+	if chart == null or _ship == null:
+		return
+	if _pause_ticks > 0:
+		_pause_ticks -= 1
+		if _pause_ticks == 0 and _player and not helm_locked:
+			_player.set_physics_process(true)
+	if macro_grounding:
+		_ground_check()
+	var g := _ship.global_position
+	if Vector2(g.x, g.z).length() > rebase_awake_m:
+		relocate(ship_cx(), ship_cz())
+	_port_timer -= delta
+	if _port_timer <= 0.0:
+		_port_timer = 0.25
+		_update_ports()
+		_advance_route()
+	_poll_loading()
+	_replot_cool = maxf(_replot_cool - delta, 0.0)
+	# coming into a harbour drops fast forward back to normal (it can be turned up again inside)
+	var in_harbour_now := not harbor_at(ship_cx(), ship_cz()).is_empty()
+	if in_harbour_now and not _ff_was_in_harbour:
+		set_fast_forward(0)
+	_ff_was_in_harbour = in_harbour_now
+	# fast time: keep the ship's speed and the helm in step (dropping the anchor or mooring frees you), and look ahead
+	if fast_forward_i > 0 and not wheel_held():
+		set_fast_forward(0)                       # let go of the wheel: time is back to normal
+	if fast_forward_i > 0:
+		_ff_check_t -= delta / maxf(Engine.time_scale, 0.01)      # every half real second
+		if _ff_check_t <= 0.0:
+			_ff_check_t = 0.5
+			_fast_time_check()
+	_line_timer -= delta
+	if _line_timer <= 0.0:
+		_line_timer = 1.0
+		_check_line()
+
+
+func _process(delta: float) -> void:
+	if chart == null or _ship == null:
+		return
+	if not _cam_set:
+		var cam := get_viewport().get_camera_3d()
+		if cam:
+			cam.far = far_plane_m
+			_cam_set = true
+	message_t = maxf(message_t - delta, 0.0)
+	if helm_locked:
+		_pin_player()
+	# a click on the world would recapture the mouse (player.gd); the sleep window's button needs it free
+	if prompt_open and Input.mouse_mode != Input.MOUSE_MODE_VISIBLE:
+		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+
+
+## Is there land between the ship and the marker? (Shown on the HUD.)
+func _check_line() -> void:
+	line_blocked_m = -1.0
+	var w := waypoint()
+	if w == Vector2.INF:
+		return
+	var d := waypoint_distance_m()
+	var r := chart.march(ship_cx(), ship_cz(), waypoint_bearing(), minf(d, 60000.0), {"stop_at_ports": false, "land_margin_m": 1500.0, "step_m": 300.0})
+	if String(r["stop"]) == "land" and float(r["dist_m"]) < d - 100.0:
+		line_blocked_m = float(r["dist_m"])
+
+
+func _in_own_grounding_port() -> bool:
+	for id in _ports:
+		var node: Node3D = _ports[id]
+		if node.has_meta("own_grounding"):
+			var p := chart.get_port(id)
+			if WorldChart.distance_m(ship_cx(), ship_cz(), p["x"], p["z"]) <= float(node.get_meta("own_grounding")):
+				return true
+	return false
+
+
+## Inside this distance (m) of a coast the keel is tested against the exact ground (WorldGround), not the chart's shelf.
+const EXACT_GROUND_M := 2500.0
+## A port scene's own ground: hull points this far inside the terrain hole are left to the port.
+const HOLE_MARGIN_M := 15.0
+
+## Depth of water (m) over the ground the terrain draws at a chart point; negative on land.
+func _exact_depth(x: float, z: float) -> float:
+	return -ground.terrain_y(x, z)
+
+## Hull points (chart xz) of the ship: the same three along her keel as always.
+func _hull_points(cx: float, cz: float, fwd: Vector2) -> Array:
+	var pts := []
+	for off in [-8.5, 0.0, 9.0]:
+		pts.append(Vector2(cx + fwd.x * off, cz + fwd.y * off))
+	return pts
+
+## In a port with its own ground: is any hull point outside the port's terrain hole touching the drawn terrain?
+## (Beyond the hole the world's terrain is what you see, so it must stop her there too.)
+func _port_edge_grounded(pts: Array) -> bool:
+	if not exact_shore_grounding or _terrain == null:
+		return false
+	var h: Vector3 = _terrain.get("hole_world")
+	for p: Vector2 in pts:
+		var g := Vector2(p.x - origin_x, p.y - origin_z)
+		if h.z > 0.0 and g.distance_to(Vector2(h.x, h.y)) < h.z - HOLE_MARGIN_M:
+			continue
+		if _exact_depth(p.x, p.y) < KEEL_CLEARANCE_M:
+			return true
+	return false
+
+## The keel against the ground. Near a coast that is the exact ground the terrain draws (WorldGround), out at sea the
+## chart's shelf. Touching bottom kills the ship's speed and holds it where it was.
+func _ground_check() -> void:
+	var g := _ship.global_position
+	var yaw := deg_to_rad(float(_ship.get("heading_deg")))
+	var fwd := Vector2(-sin(yaw), -cos(yaw))
+	var cx := origin_x + g.x
+	var cz := origin_z + g.z
+	var pts := _hull_points(cx, cz, fwd)
+	if _in_own_grounding_port():
+		if _port_edge_grounded(pts):
+			_hold_ship(g, "Aground")
+		else:
+			aground = false
+			_last_ok = g
+			_last_ok_shore = -1.0
+			_stuck_t = 0.0
+		return
+	var exact := exact_shore_grounding and ground != null and chart.shore_distance_m(cx, cz) < EXACT_GROUND_M
+	var shallow := INF
+	for p: Vector2 in pts:
+		shallow = minf(shallow, _exact_depth(p.x, p.y) if exact else chart.sea_depth_m(p.x, p.y))
+	# rocks (rock_field.gd) stand out of the shallows
+	var on_rock := false
+	if _rocks:
+		for p: Vector2 in pts:
+			if _rocks.blocks(p.x, p.y, ROCK_HULL_HALF_BEAM_M):
+				on_rock = true
+				break
+	# how far she is from land: exact = the water over the ground (0 or less = on land); otherwise the invisible wall
+	# off the chart's coast
+	var shore_d := INF
+	var too_close := false
+	if exact:
+		shore_d = shallow
+	else:
+		for p: Vector2 in pts:
+			shore_d = minf(shore_d, chart.shore_distance_m(p.x, p.y))
+		too_close = shore_d < shore_standoff_m
+	if (shallow < KEEL_CLEARANCE_M or too_close) and not on_rock and shore_d > 0.0 \
+			and (_last_ok_shore < 0.0 or shore_d >= _last_ok_shore - 0.01):
+		# already inside the margin (a sleep, a save put her there): she may sail OUT of it, only moves that bring her
+		# closer to the shore are held
+		aground = false
+		_last_ok = g
+		_last_ok_shore = shore_d
+		_stuck_t = 0.0
+		return
+	if shallow < KEEL_CLEARANCE_M or on_rock or too_close:
+		var msg := "Aground"
+		if on_rock and shallow >= KEEL_CLEARANCE_M:
+			msg = "Aground on the rocks"
+		elif shallow >= KEEL_CLEARANCE_M:
+			msg = "Shoal water: she will not go closer to the shore"
+		if shore_d <= 0.0 and not on_rock:
+			_stuck_t += get_physics_process_delta_time()
+			if _stuck_t > 1.5:
+				_rescue_from_land(cx, cz)
+				return
+		else:
+			_stuck_t = 0.0
+		_hold_ship(g, msg)
+	else:
+		aground = false
+		_last_ok = g
+		_last_ok_shore = shore_d
+		_stuck_t = 0.0
+
+
+## Put her back where she last floated, stop her, and carry whoever stands on the deck with her (before, the deck
+## jumped out from under the player every tick she was held, which knocked them overboard).
+func _hold_ship(g: Vector3, msg: String) -> void:
+	if not aground:
+		if not message.begins_with("Slept") or message_t <= 0.0:      # the wake-up message after a sleep says it already
+			_say(msg)
+	aground = true
+	set_fast_forward(0)
+	var back := Vector3(_last_ok.x, g.y, _last_ok.z)
+	if _player:
+		_player.global_position += back - g
+	_ship.global_position = back
+	var sails = _ship.get("sails")
+	if sails and sails.get("model"):
+		sails.model.v_f = 0.0
+		sails.model.v_s = 0.0
+
+
+## She is inside the land (the chart's coast is rough, or a sleep put her there): float her to the nearest clear water.
+func _rescue_from_land(cx: float, cz: float) -> void:
+	for ring in range(1, 61):
+		var r := float(ring) * 250.0
+		for a in 16:
+			var ang := TAU * float(a) / 16.0
+			var x := cx + cos(ang) * r
+			var z := cz + sin(ang) * r
+			if not chart.is_inside(x, z, WorldChart.EDGE_MARGIN_M):
+				continue
+			if chart.shore_distance_m(x, z) >= shore_standoff_m + 100.0:
+				_stuck_t = 0.0
+				aground = false
+				relocate(x, z)
+				_say("Pulled clear of the shore.")
+				return
+	_stuck_t = 0.0
+
+
+func _say(t: String, secs: float = 6.0) -> void:
+	message = t
+	message_t = secs
+
+
+func sleep_turn_rate_deg() -> float:
+	## How fast she turns while asleep, chart degrees per second, + = clockwise (to starboard). It is what the wheel
+	## would turn her at the speed she sleeps at, worked out like the awake rudder (sail_model.gd): the rudder times
+	## max_turn_rate_deg, scaled by the water flow over it (full at rudder_full_speed, never below min_rudder_authority).
+	## Radius of the circle = speed / turn rate in radians a second, e.g. 3.5 m/s at full lock (4 deg/s) is about 50 m.
+	## Weather helm is left out on purpose, so the arc depends on the wheel and the speed alone and can be worked out.
+	## Zero when she is held in place, when the helmsman has the course (Z: hold course keeps her heading while you
+	## sleep), and for a wheel within sleep_wheel_deadband_deg of amidships (a hand-centred wheel sleeps straight).
+	var sp := sleep_speed()
+	if sp <= 0.0 or _ship == null:
+		return 0.0
+	var helm := _ship.get_node_or_null("ShipHelm")
+	if helm != null and bool(helm.get("hold")):
+		return 0.0
+	var rud := clampf(float(_ship.get("rudder")), -1.0, 1.0)
+	var lim := 1080.0
+	var wheel := _ship.get_node_or_null("ShipWheel")
+	if wheel != null and wheel.get("max_turn_deg") != null:
+		lim = maxf(float(wheel.get("max_turn_deg")), 1.0)
+	var db := clampf(sleep_wheel_deadband_deg / lim, 0.0, 0.5)
+	rud = signf(rud) * maxf(absf(rud) - db, 0.0) / (1.0 - db)
+	var max_turn := 4.0
+	var full := 2.5
+	var floor_a := 0.35
+	var sl = _ship.get("sails")
+	var m = sl.get("model") if sl != null else null
+	if m != null:
+		max_turn = float(m.max_turn_rate_deg)
+		full = float(m.rudder_full_speed)
+		floor_a = float(m.min_rudder_authority)
+	elif _ship.get("max_turn_rate_deg") != null:
+		max_turn = float(_ship.get("max_turn_rate_deg"))
+	var authority := maxf(clampf(sp / maxf(full, 0.1), 0.0, 1.0), floor_a)
+	return rud * max_turn * authority * sleep_turn_scale
+
+
+func sleep_curve_per_m() -> float:
+	## Radians of turn per metre run while asleep (+ = to starboard): the turn rate over the locked-in sleep speed.
+	var sp := sleep_speed()
+	if sp <= 0.0:
+		return 0.0
+	return deg_to_rad(sleep_turn_rate_deg()) / sp
+
+
+func _turn_phrase() -> String:
+	## For the sleep window's preview: just says which way the wheel will bend the path, no numbers (work those out).
+	var r := sleep_turn_rate_deg()
+	if absf(r) < 0.0005:
+		return ""
+	return ", wheel over to %s" % ("starboard" if r > 0.0 else "port")

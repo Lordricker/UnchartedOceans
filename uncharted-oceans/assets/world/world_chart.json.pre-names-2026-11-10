@@ -1,0 +1,242 @@
+{
+ "version": 1,
+ "width_m": 1200000.0,
+ "px_width": 1536,
+ "px_height": 1024,
+ "meters_per_px": 781.25,
+ "note": "Proposed layout, machine-placed. x east, z south (north is -Z), origin top-left of the chart. Width is adjustable: change width_m.",
+ "regions": {
+  "A": "northern",
+  "B": "caribbean",
+  "C": "swahili",
+  "D": "canton",
+  "F": "free port"
+ },
+ "ports": [
+  {
+   "id": "AC00",
+   "region": "A",
+   "tier": "capital",
+   "type": "bay",
+   "px": 373,
+   "py": 188,
+   "host_landmass_px": 107596
+  },
+  {
+   "id": "BC01",
+   "region": "B",
+   "tier": "capital",
+   "type": "bay",
+   "px": 428,
+   "py": 598,
+   "host_landmass_px": 147291
+  },
+  {
+   "id": "CC02",
+   "region": "C",
+   "tier": "capital",
+   "type": "bay",
+   "px": 1300,
+   "py": 772,
+   "host_landmass_px": 86256
+  },
+  {
+   "id": "DC03",
+   "region": "D",
+   "tier": "capital",
+   "type": "bay",
+   "px": 1330,
+   "py": 140,
+   "host_landmass_px": 208674
+  },
+  {
+   "id": "AS04",
+   "region": "A",
+   "tier": "small",
+   "type": "harbor",
+   "px": 62,
+   "py": 178,
+   "host_landmass_px": 107596
+  },
+  {
+   "id": "AS05",
+   "region": "A",
+   "tier": "small",
+   "type": "harbor",
+   "px": 295,
+   "py": 449,
+   "host_landmass_px": 107596
+  },
+  {
+   "id": "AS06",
+   "region": "A",
+   "tier": "small",
+   "type": "harbor",
+   "px": 610,
+   "py": 314,
+   "host_landmass_px": 107596
+  },
+  {
+   "id": "AS07",
+   "region": "A",
+   "tier": "small",
+   "type": "lagoon_or_light",
+   "px": 52,
+   "py": 434,
+   "host_landmass_px": 2378
+  },
+  {
+   "id": "AS08",
+   "region": "A",
+   "tier": "small",
+   "type": "lagoon_or_light",
+   "px": 148,
+   "py": 310,
+   "host_landmass_px": 306
+  },
+  {
+   "id": "BS09",
+   "region": "B",
+   "tier": "small",
+   "type": "harbor",
+   "px": 66,
+   "py": 744,
+   "host_landmass_px": 147291
+  },
+  {
+   "id": "BS10",
+   "region": "B",
+   "tier": "small",
+   "type": "harbor",
+   "px": 728,
+   "py": 798,
+   "host_landmass_px": 147291
+  },
+  {
+   "id": "BS11",
+   "region": "B",
+   "tier": "small",
+   "type": "harbor",
+   "px": 409,
+   "py": 941,
+   "host_landmass_px": 147291
+  },
+  {
+   "id": "BS12",
+   "region": "B",
+   "tier": "small",
+   "type": "lagoon_or_light",
+   "px": 186,
+   "py": 528,
+   "host_landmass_px": 651
+  },
+  {
+   "id": "BS13",
+   "region": "B",
+   "tier": "small",
+   "type": "lagoon_or_light",
+   "px": 198,
+   "py": 909,
+   "host_landmass_px": 915
+  },
+  {
+   "id": "CS14",
+   "region": "C",
+   "tier": "small",
+   "type": "harbor",
+   "px": 978,
+   "py": 678,
+   "host_landmass_px": 86256
+  },
+  {
+   "id": "CS15",
+   "region": "C",
+   "tier": "small",
+   "type": "harbor",
+   "px": 1065,
+   "py": 980,
+   "host_landmass_px": 86256
+  },
+  {
+   "id": "CS16",
+   "region": "C",
+   "tier": "small",
+   "type": "harbor",
+   "px": 1178,
+   "py": 595,
+   "host_landmass_px": 86256
+  },
+  {
+   "id": "CS17",
+   "region": "C",
+   "tier": "small",
+   "type": "lagoon_or_light",
+   "px": 1439,
+   "py": 668,
+   "host_landmass_px": 2880
+  },
+  {
+   "id": "CS18",
+   "region": "C",
+   "tier": "small",
+   "type": "lagoon_or_light",
+   "px": 1438,
+   "py": 889,
+   "host_landmass_px": 33
+  },
+  {
+   "id": "DS19",
+   "region": "D",
+   "tier": "small",
+   "type": "harbor",
+   "px": 711,
+   "py": 221,
+   "host_landmass_px": 208674
+  },
+  {
+   "id": "DS20",
+   "region": "D",
+   "tier": "small",
+   "type": "harbor",
+   "px": 1378,
+   "py": 570,
+   "host_landmass_px": 208674
+  },
+  {
+   "id": "DS21",
+   "region": "D",
+   "tier": "small",
+   "type": "harbor",
+   "px": 1049,
+   "py": 393,
+   "host_landmass_px": 208674
+  },
+  {
+   "id": "DS22",
+   "region": "D",
+   "tier": "small",
+   "type": "lagoon_or_light",
+   "px": 910,
+   "py": 46,
+   "host_landmass_px": 215
+  },
+  {
+   "id": "DS23",
+   "region": "D",
+   "tier": "small",
+   "type": "lagoon_or_light",
+   "px": 1183,
+   "py": 534,
+   "host_landmass_px": 34
+  },
+  {
+   "id": "FF24",
+   "region": "F",
+   "tier": "free_port",
+   "type": "lagoon",
+   "px": 715,
+   "py": 478,
+   "host_landmass_px": 6086
+  }
+ ]
+}

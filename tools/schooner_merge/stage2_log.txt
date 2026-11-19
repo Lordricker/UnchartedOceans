@@ -1,11 +1,11 @@
-waterline half beam: [0.0, 0.257, 0.621, 0.845, 1.015, 1.166, 1.305, 1.425, 1.529, 1.624, 1.683, 1.737, 1.77, 1.8, 1.81, 1.817, 1.81, 1.798, 1.778, 1.753, 1.718, 1.68, 1.632, 1.581, 1.513, 1.441, 1.344, 1.233, 1.112, 0.992, 0.992]
-READ done: {'Hull': 1859, 'MainDeck': 950, 'DeckFittings': 2600, 'Rig_Spars': 360, 'Rig_Ropes': 831, 'Interiors': 354, 'Glass': 14}
+waterline half beam: [0.0, 0.147, 0.553, 0.798, 0.979, 1.135, 1.278, 1.397, 1.509, 1.603, 1.672, 1.725, 1.764, 1.793, 1.809, 1.815, 1.812, 1.801, 1.783, 1.759, 1.727, 1.689, 1.643, 1.592, 1.529, 1.457, 1.369, 1.259, 1.139, 1.02, 0.886]
+READ done: {'Hull': 1859, 'MainDeck': 950, 'DeckFittings': 2706, 'Rig_Spars': 360, 'Rig_Ropes': 831, 'Interiors': 344, 'Glass': 14}
 GROUP Hull: 1859 faces, 8 materials
 GROUP MainDeck: 950 faces, 3 materials
-GROUP DeckFittings: 2600 faces, 6 materials
+GROUP DeckFittings: 2706 faces, 6 materials
 GROUP Rig_Spars: 360 faces, 3 materials
 GROUP Rig_Ropes: 831 faces, 2 materials
-GROUP Interiors: 354 faces, 2 materials
+GROUP Interiors: 344 faces, 2 materials
 GROUP Glass: 14 faces, 1 materials
 sails done
 markers: ['CamPos_Compass', 'CamTarget_Compass', 'HammockSlot_00', 'HammockSlot_01', 'HammockSlot_02', 'HammockSlot_03', 'HoldBounds', 'LogLine', 'LogLine_P0', 'LogLine_P1', 'LogLine_P2', 'LogLine_P3', 'LogLine_P4', 'SinkCheck_Port_Aft', 'SinkCheck_Port_Fore', 'SinkCheck_Port_Mid', 'SinkCheck_Stbd_Aft', 'SinkCheck_Stbd_Fore', 'SinkCheck_Stbd_Mid', 'Station_Bed', 'Station_Gun_0', 'Station_Gun_1', 'Station_Gun_2', 'Station_Gun_3', 'Station_Halyard_Fore', 'Station_Halyard_Jib', 'Station_Halyard_Main', 'Station_LogLine', 'Station_Mooring', 'Station_Pump_01', 'Station_Sheet_Fore', 'Station_Sheet_Jib_Port', 'Station_Sheet_Jib_Stbd', 'Station_Sheet_Main', 'Station_Sheet_Staysail_Port', 'Station_Sheet_Staysail_Stbd', 'Station_Wheel', 'Windsock']

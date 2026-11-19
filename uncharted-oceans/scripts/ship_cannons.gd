@@ -5,6 +5,7 @@ extends Node
 ## Hold the wheel and the keys at the foot of the screen (ship_helm.gd) gain two more:
 ##   Left   fire the port guns
 ##   Right  fire the starboard guns
+##   Up / Down  raise or lower the guns (elevation_min_deg to elevation_max_deg); tap for a step, hold to keep going
 ## Every gun that is loaded on that side goes off, one after another from the bow aft with a little random
 ## jitter, so a broadside ripples instead of banging once. A gun then needs reload_s seconds before it can fire
 ## again: there is no loading by hand, the crew does it.
@@ -19,8 +20,8 @@ extends Node
 ## straight out to the side, a few degrees up. A gun on the centre line (a swivel gun) is left out for now.
 ##
 ## Each shot: a flash of light, a burst of fire, a cloud of smoke that drifts with the wind (they live in world
-## space, so they stay behind as the ship sails on), a short recoil of the gun, and a sound if there is one in
-## sound_dir (any .ogg / .wav / .mp3 there; none is shipped yet). The shot itself is a real round shot in flight
+## space, so they stay behind as the ship sails on), a short recoil of the gun, and a sound from
+## sound_dir (any .ogg / .wav / .mp3 there; one is picked at random per shot, pitch varied a little; on the SFX bus). The shot itself is a real round shot in flight
 ## (cannonball.gd): it arcs under gravity, splashes in the sea, and a hit on a hull punches a hole and floods her.
 ## `fired` is emitted for every shot as well.
 
@@ -28,6 +29,8 @@ signal fired(gun: Node3D, from: Vector3, dir: Vector3)
 
 @export var key_port := KEY_LEFT
 @export var key_starboard := KEY_RIGHT
+@export var key_up := KEY_UP
+@export var key_down := KEY_DOWN
 @export var group_name := "guns"
 
 @export_group("Reload and ammo")
@@ -41,8 +44,14 @@ signal fired(gun: Node3D, from: Vector3, dir: Vector3)
 @export var shots_per_crate := 10
 
 @export_group("Shot")
-## The shot leaves this many degrees above level.
+## The shot leaves this many degrees above level. Up / Down at the wheel change it, between the two limits below.
 @export var elevation_deg := 3.0
+## The most the guns can be depressed and raised (degrees above level; negative is below). A broadside gun was limited by
+## its port and its carriage: a few degrees down at most, and a wedge (quoin) under the breech could lift it ten or so.
+@export var elevation_min_deg := -2.0
+@export var elevation_max_deg := 10.0
+## One tap of the key changes the elevation by this much.
+@export var elevation_step_deg := 1.0
 ## How far the gun kicks back (m), how fast, and how slowly it runs out again.
 @export var recoil_m := 0.25
 @export var recoil_out_s := 0.05
@@ -56,8 +65,17 @@ signal fired(gun: Node3D, from: Vector3, dir: Vector3)
 @export var muzzle_speed := 140.0
 ## Random scatter (degrees) around the aim.
 @export var spread_deg := 0.5
-## A faint smoke trail so the ball can be followed.
+## A smoke trail so the ball can be followed.
 @export var ball_trail := true
+## How big the ball is drawn (radius, m). It is oversize on purpose: a real ball at this speed would be an invisible speck.
+@export var ball_size := 0.3
+## Scale of the trail's smoke puffs.
+@export var trail_size := 1.0
+## Print where each ball lands to the Output panel (to see whether balls fly and how far).
+@export var ball_debug := true
+## Size of the sea splash, and of the shower of wood when a ball hits a ship (1 = normal; 2 = twice as much).
+@export var splash_scale := 1.0
+@export var wood_scale := 1.0
 
 @export_group("Flash and smoke")
 @export var smoke_amount := 26
@@ -86,6 +104,8 @@ var _dry_t := 0.0
 var _count_t := 0.0
 var _shots_cache := -1
 var _cargo: Node
+var _elev_dir := 0
+var _elev_t := 0.0
 var _ocean: Node
 var _own_rids: Array[RID] = []
 var _sounds: Array[AudioStream] = []
@@ -109,6 +129,9 @@ func _ready() -> void:
 		return
 	_make_fx_resources()
 	_load_sounds()
+	elevation_deg = clampf(elevation_deg, elevation_min_deg, elevation_max_deg)
+	Cannonball.splash_scale = splash_scale
+	Cannonball.wood_scale = wood_scale
 	_ocean = _rig.get_node_or_null(^"../Ocean")
 	# the ship's own nodes exist by now, but look them up after everything has settled
 	call_deferred("_collect")
@@ -191,6 +214,11 @@ func _unhandled_input(e: InputEvent) -> void:
 		_volley(-1)
 	elif k == key_starboard:
 		_volley(1)
+	elif k == key_up or k == key_down:
+		var dir := 1 if k == key_up else -1
+		_nudge_elevation(dir)
+		_elev_dir = dir
+		_elev_t = 0.4          # a held key starts repeating after this
 
 
 ## Tell every loaded gun on a side to fire, bow to stern.
@@ -207,8 +235,22 @@ func _volley(side: int) -> void:
 		order += 1
 
 
+## One step up (+1) or down (-1), kept between the limits.
+func _nudge_elevation(dir: int) -> void:
+	elevation_deg = clampf(elevation_deg + float(dir) * elevation_step_deg, elevation_min_deg, elevation_max_deg)
+
+
 func _process(delta: float) -> void:
 	_time += delta
+	if _elev_dir != 0:
+		var held_key := key_up if _elev_dir > 0 else key_down
+		if not _held() or not Input.is_physical_key_pressed(held_key):
+			_elev_dir = 0
+		else:
+			_elev_t -= delta
+			if _elev_t <= 0.0:
+				_elev_t = 0.1
+				_nudge_elevation(_elev_dir)
 	_dry_t = maxf(_dry_t - delta, 0.0)
 	_count_t -= delta
 	for g in _guns:
@@ -268,6 +310,7 @@ func hint_text() -> String:
 	var t := "[%s] port guns %d/%d     [%s] starboard guns %d/%d" % [
 		OS.get_keycode_string(key_port), count[1], count[0],
 		OS.get_keycode_string(key_starboard), count[3], count[2]]
+	t += "     [%s/%s] guns %d°" % [OS.get_keycode_string(key_up), OS.get_keycode_string(key_down), roundi(elevation_deg)]
 	if _dry_t > 0.0 or shots_left() == 0:
 		t += "     (no shot in the hold)"
 	return t
@@ -306,7 +349,10 @@ func _launch_ball(pos: Vector3, dir: Vector3) -> void:
 	if _rig.has_method("velocity_at"):
 		var carry: Vector3 = _rig.call("velocity_at", pos)
 		v += carry
-	Cannonball.launch(_world(), pos, v, _ocean, _own_rids, _rig, ball_trail)
+	var ball := Cannonball.launch(_world(), pos, v, _ocean, _own_rids, _rig, ball_trail,
+		{"visual_radius": ball_size, "trail_size": trail_size, "debug": ball_debug})
+	if ball_debug:
+		print("cannons: fired a ball from %s at %.0f m/s%s" % [str(pos.snapped(Vector3(0.1, 0.1, 0.1))), v.length(), "" if ball != null else " (NOT LAUNCHED)"])
 
 
 func _recoil(g: Gun, back_world: Vector3) -> void:
@@ -363,6 +409,7 @@ func _spawn_fx(pos: Vector3, dir: Vector3) -> void:
 		a.stream = _sounds[randi() % _sounds.size()]
 		a.volume_db = sound_volume_db
 		a.pitch_scale = randf_range(0.92, 1.08)
+		a.bus = "SFX" if AudioServer.get_bus_index("SFX") >= 0 else "Master"
 		a.unit_size = 25.0
 		a.max_distance = 700.0
 		root.add_child(a)

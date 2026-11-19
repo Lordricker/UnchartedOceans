@@ -243,6 +243,27 @@ func _load_surf() -> void:
 
 # ------------------------------------------------------------------ looking round
 
+## A scene change (loading a save) frees the nodes this autoload holds; forget them at once, before anything touches
+## them, and say so, so they are looked up again this frame.
+func _drop_freed() -> bool:
+	var gone := false
+	if _wind != null and not is_instance_valid(_wind):
+		_wind = null; gone = true
+	if _weather != null and not is_instance_valid(_weather):
+		_weather = null; gone = true
+	if _streamer != null and not is_instance_valid(_streamer):
+		_streamer = null; gone = true
+	if _ship != null and not is_instance_valid(_ship):
+		_ship = null; gone = true
+	if _player != null and not is_instance_valid(_player):
+		_player = null; gone = true
+	if _sky != null and not is_instance_valid(_sky):
+		_sky = null; gone = true
+	if _ocean != null and not is_instance_valid(_ocean):
+		_ocean = null; gone = true
+	return gone
+
+
 func _find_nodes() -> void:
 	if _wind == null or not is_instance_valid(_wind):
 		_wind = get_tree().get_first_node_in_group("wind")
@@ -314,6 +335,7 @@ func _sample() -> void:
 
 
 func _physics_process(delta: float) -> void:
+	_drop_freed()                  # a save being loaded may have freed the player since the last frame
 	# a ray straight up from the camera: a deck, a cabin roof or an awning overhead means "under cover" (as RainEffect does)
 	_cover_t -= delta
 	if _cover_t > 0.0:
@@ -326,7 +348,7 @@ func _physics_process(delta: float) -> void:
 	var from := cam.global_position
 	var q := PhysicsRayQueryParameters3D.create(from, from + Vector3.UP * 12.0)
 	q.collide_with_areas = false
-	if _player is CollisionObject3D:
+	if is_instance_valid(_player) and _player is CollisionObject3D:
 		var ex: Array[RID] = [(_player as CollisionObject3D).get_rid()]
 		q.exclude = ex
 	_covered = not cam.get_world_3d().direct_space_state.intersect_ray(q).is_empty()
@@ -426,7 +448,7 @@ func _process(delta: float) -> void:
 	_t += delta
 	_update_thunder()
 	_find_t -= delta
-	if _find_t <= 0.0:
+	if _find_t <= 0.0 or _drop_freed():
 		_find_t = 1.0
 		_find_nodes()
 	_sample_t -= delta

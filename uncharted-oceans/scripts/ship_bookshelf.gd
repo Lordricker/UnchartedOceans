@@ -39,6 +39,9 @@ var _state := S.IDLE
 var _shelf: Node3D
 var _frame: MeshInstance3D
 var _books: Array[MeshInstance3D] = []
+## A book was opened (its id, e.g. "tutorial_01"). The tutorial director listens.
+signal book_opened(id: String)
+
 var _ids: Array[String] = []
 var _base: Array[Vector3] = []
 var _data := {}
@@ -48,6 +51,9 @@ var _frame_outlined := false
 ## A model with no CabinBookshelf_Frame mesh (the cutter's shelf is part of its cabin) is aimed at through a box
 ## round its books instead, and the books themselves take the white outline.
 var _no_frame := false
+## The schooner's and fluyt's shelves are turned 180 degrees in their models: the books sit on the +Z side of the shelf and
+## the open front faces +Z, not -Z. The camera spot is then mirrored in Z so you stand in front of the books, not behind the wall.
+var _front_plus_z := false
 var _aim_box := AABB()
 var _player: Node
 var _cam: Camera3D
@@ -82,6 +88,11 @@ func _ready() -> void:
 	if _frame == null and not _books.is_empty():
 		_no_frame = true
 		_aim_box = _books_box().grow(0.06)
+	if _frame != null and not _books.is_empty():
+		var zsum := 0.0
+		for b in _books:
+			zsum += b.position.z
+		_front_plus_z = zsum / float(_books.size()) > 0.0
 	_add_missing_books()
 	_make_ui()
 
@@ -187,6 +198,8 @@ func _entry(i: int) -> Dictionary:
 ## the accounts will each be a source of their own. A scene with no sources just shows the owners' orders.
 func _book_text(i: int, entry: Dictionary) -> String:
 	var text := String(entry.get("text", ""))
+	if _ids[i] == "side_quests":
+		text = preload("res://scripts/courier_quests.gd").book_markdown()      # the courier jobs, as they stand now
 	if _ids[i] == "logbook":
 		var sources := get_tree().get_nodes_in_group("logbook_source")
 		sources.sort_custom(func(a: Node, b: Node) -> bool: return _log_order(a) < _log_order(b))
@@ -243,9 +256,14 @@ func _camera() -> Camera3D:
 	return _cam
 
 func _shelf_view() -> Transform3D:
-	var d := (view_target - view_offset).normalized()
+	var off := view_offset
+	var tgt := view_target
+	if _front_plus_z:
+		off.z = -off.z
+		tgt.z = -tgt.z
+	var d := (tgt - off).normalized()
 	var up := Vector3.UP if absf(d.y) < 0.98 else Vector3.BACK
-	return _shelf.global_transform * Transform3D(Basis.looking_at(d, up), view_offset)
+	return _shelf.global_transform * Transform3D(Basis.looking_at(d, up), off)
 
 func _move_camera(delta: float) -> void:
 	var at_shelf := _state != S.IDLE
@@ -285,6 +303,10 @@ func _process(delta: float) -> void:
 	if aimed != _frame_outlined:
 		_frame_outlined = aimed
 		_outline_shelf(aimed)
+		if aimed:
+			Outline.show_name(self, "Bookshelf")
+		else:
+			Outline.hide_name(self)
 	var want_book := _hover if _state == S.SHELF else -1
 	if want_book != _outlined_book:
 		if _outlined_book >= 0:
@@ -296,7 +318,7 @@ func _process(delta: float) -> void:
 	var k := 1.0 - exp(-delta * 14.0)
 	for i in _books.size():
 		if _books[i].visible:
-			var target := _base[i] + Vector3(0.0, 0.0, -pull_out if (i == _hover and _state == S.SHELF) else 0.0)
+			var target := _base[i] + Vector3(0.0, 0.0, (pull_out if _front_plus_z else -pull_out) if (i == _hover and _state == S.SHELF) else 0.0)
 			_books[i].position = _books[i].position.lerp(target, k)
 	var show_title := _state == S.SHELF and _hover >= 0
 	_title.visible = show_title
@@ -387,6 +409,7 @@ func _leave() -> void:
 func _open_book(i: int) -> void:
 	_state = S.BUSY
 	_reading = i
+	book_opened.emit(_ids[i])
 	_hover = -1
 	var entry := _entry(i)
 	var book := _books[i]

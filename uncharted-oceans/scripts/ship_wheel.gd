@@ -243,6 +243,11 @@ func _process(_delta: float) -> void:
 	if want_outline != _outlined:
 		_outlined = want_outline
 		Outline.set_on(_wheel, want_outline)
+	# its name along the bottom while you look at it (not while you're steering: the helm hints are there)
+	if want_outline and not held:
+		Outline.show_name(self, "Ship's wheel")
+	else:
+		Outline.hide_name(self)
 
 
 func _eye_pos(cam: Camera3D) -> Vector3:

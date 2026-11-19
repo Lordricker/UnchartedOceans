@@ -87,6 +87,9 @@ func _process(_delta: float) -> void:
 		_current = best
 		if _current != null:
 			Outline.set_on(_current.root, true)
+			Outline.show_name(self, String(_current.root.name).capitalize())
+		else:
+			Outline.hide_name(self)
 
 func _input(e: InputEvent) -> void:
 	if _peeking:

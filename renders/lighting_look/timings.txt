@@ -1,0 +1,10 @@
+hour 9.5 look old: gpu 11.30 ms
+hour 9.5 look new: gpu 18.76 ms
+hour 17.5 look old: gpu 11.31 ms
+hour 17.5 look new: gpu 18.71 ms
+all on: 18.77 ms
+without ssao_enabled: 18.31 ms (saves 0.46)
+without ssil_enabled: 17.72 ms (saves 1.06)
+without volumetric_fog_enabled: 18.32 ms (saves 0.45)
+without glow_enabled: 18.00 ms (saves 0.78)
+without soft_shadow: 18.42 ms (saves 0.35)

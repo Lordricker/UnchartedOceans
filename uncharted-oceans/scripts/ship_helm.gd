@@ -9,6 +9,7 @@ extends Node
 ##      course after you let go of the wheel, so you can walk off to work the ropes (hold_survives_letting_go).
 ##   V  look at the compass (the camera moves over it; V again to look back).
 ##   X  look aft over the stern rail at the log line (ship_log_line.gd shows it only from here).
+##   1-4  fast time x1 / x2 / x4 / x8 (world scenes only, WorldStreamer); only while you hold the wheel.
 ## Letting go of the wheel puts the camera back.
 ##
 ## Sail work is never done from here: sails and braces are hauled by hand at their ropes
@@ -282,6 +283,10 @@ func _update_label(held: bool) -> void:
 		parts.append("[%s] amidships" % OS.get_keycode_string(key_amidships))
 		parts.append("[%s] %s" % [OS.get_keycode_string(key_hold_course), "let go of the course" if hold else "hold course"])
 		parts.append("[%s] %s" % [OS.get_keycode_string(key_compass), "look ahead" if view == 1 else "compass"])
+		# fast time (WorldStreamer): only while you hold the wheel, so the keys show here
+		var st := get_tree().get_first_node_in_group("world_streamer")
+		if st != null and st.has_method("time_speed"):
+			parts.append("[1-4] time x%d" % int(st.time_speed()))
 		var cannons = _ship.get_node_or_null("ShipCannons")
 		if cannons != null and cannons.has_method("hint_text"):
 			var gun_hint: String = cannons.hint_text()

@@ -1,0 +1,417 @@
+extends CharacterBody3D
+## First-person walker for testing the ship.
+## WASD move, Shift run, Space jump, mouse look. Esc frees the mouse, click to recapture.
+## Steps up small ledges (coamings, thresholds) automatically up to step_height.
+## Jumping off a moving ship keeps the ship's speed, so you land back where you jumped.
+##
+## Water (the sea, and flood water in the hold via ShipFlooding.water_surface_at):
+##   Wading: deeper water slows you down.
+##   Swimming: you float with your head just above the surface and bob with the waves.
+##   WASD swims along the surface (slower), Shift swims faster.
+##   Space jumps up out of the water; Shift+Space kicks you down under it.
+##   Swim into a ledge or step up to climb_height above your feet to pull yourself out.
+##   A blue tint shows when your eyes are under water.
+##
+## Ladders (ShipLadder trigger boxes): while you're inside one, W climbs up and S climbs down
+## instead of walking, A/D shift sideways, Space jumps off. Climbing past the top of the box
+## leans you over the rail onto the deck.
+##
+## Hands: floating gloves under the camera (scenes/player_hands.tscn, scripts/player_hands.gd).
+## This script feeds them what you're doing each physics frame (_feed_hands).
+
+@export var walk_speed := 3.0
+@export var run_speed := 5.5
+@export var jump_velocity := 3.6
+@export var mouse_sensitivity := 0.0025
+@export var accel := 12.0
+## How much you can steer in the air (relative to accel on the ground).
+@export_range(0.0, 1.0, 0.05) var air_control := 0.25
+@export var step_height := 0.35
+## Standing height in metres. The capsule and eye height follow it (eyes at 93%).
+@export_range(0.8, 2.0, 0.01) var player_height := 1.32
+@export_range(0.15, 0.4, 0.01) var player_radius := 0.22
+## Which way you look when the game starts, in degrees (negative = down). world_test.tscn puts you at the wheel looking down at it.
+@export_range(-85.0, 85.0, 0.5) var start_pitch_deg := 0.0
+
+## Physics layer of the ships' outer hull skin (ship_motion.gd hull_skin_layer).
+@export_range(1, 32) var hull_skin_layer := 3
+
+@export_group("Water")
+@export var ocean_path: NodePath = ^"../Ocean"
+@export var swim_speed := 1.4
+@export var swim_run_speed := 2.2
+## Fraction of your height under water when floating still (eyes are at 93%, so 0.78
+## keeps the head just out).
+@export_range(0.5, 0.95, 0.01) var float_level := 0.78
+## How hard the water pushes you back to floating height (x gravity). Higher = you pop up
+## faster after a kick or a fall and follow the waves more closely.
+@export var buoyancy_gain := 2.5
+@export var water_drag := 4.0            ## per second, vertical
+@export var kick_speed := 4.0            ## m/s downward per kick (Shift+Space)
+@export var kick_cooldown := 0.5
+@export var water_jump_velocity := 4.6   ## m/s upward when jumping out of the water (Space)
+@export var climb_height := 0.9          ## how high a ledge you can pull yourself onto from the water
+@export var underwater_tint := Color(0.03, 0.16, 0.18, 0.55)
+
+@export_group("Ladders")
+@export var ladder_regrab_delay := 0.5   ## after jumping off, before a ladder box catches you again
+
+@export_group("Hands")
+## First-person gloves. Clear this to play without hands.
+@export var hands_scene: PackedScene = preload("res://scenes/player_hands.tscn")
+
+@onready var head: Node3D = $Head
+var gravity: float = ProjectSettings.get_setting("physics/3d/default_gravity")
+var spawn: Transform3D
+## Optional scripted input for automated tests: Vector2(x, y) like WASD.
+var auto_input := Vector2.ZERO
+var use_auto := false
+## Set by ship_bookshelf.gd while you're at the shelf: no walking, jumping or mouse look.
+var input_locked := false
+## Scripted tests: set true to kick / jump once.
+var kick_requested := false
+var jump_requested := false
+
+## 0 = dry, 1 = completely under water (read by the HUD and tests).
+var submersion := 0.0
+var swimming := false
+var head_under := false
+## The ladder box you're in (and climbing), or null.
+var ladder: ShipLadder
+
+## The first-person gloves under the camera (null if hands_scene is empty).
+var hands: PlayerHands
+
+## Carrying cargo boxes (scripts/cargo_system.gd), made in _make_hands. While you carry a box, Space snaps it to
+## the hold grid instead of jumping.
+var cargo: CargoSystem
+
+var _ocean: Ocean
+var _flood: Node
+var _ship: Node
+var _kick_timer := 0.0
+var _water_jump_timer := 0.0
+var _space_was_down := false
+var _tint: ColorRect
+## Horizontal velocity you carry through the air (the deck's speed when you left it).
+var _air_base := Vector3.ZERO
+var _was_on_floor := false
+var _ground_vel := Vector3.ZERO
+var _regrab_timer := 0.0
+var _base_mask := 1
+var _ladder_entry_z := 0.0
+var _step_over := 0.0
+var _climb_rate := 0.0
+
+func _ready() -> void:
+	add_to_group("player")
+	_apply_height()
+	head.rotation.x = deg_to_rad(start_pitch_deg)
+	spawn = global_transform
+	floor_max_angle = deg_to_rad(55.0)   # stair ramps are ~42-49 degrees
+	floor_snap_length = 0.4
+	floor_constant_speed = true
+	floor_stop_on_slope = true
+	# we hand over the deck's velocity ourselves when leaving it
+	platform_on_leave = PLATFORM_ON_LEAVE_DO_NOTHING
+	collision_mask |= 1 << (hull_skin_layer - 1)   # the ship's outside hull (ship_motion.gd)
+	collision_mask |= Island.LAYER_BIT              # island ground, pier and gangway (island.gd, ship_harbor.gd)
+	_base_mask = collision_mask
+	_ocean = get_node_or_null(ocean_path) as Ocean
+	_make_tint()
+	_make_hands()
+	if not use_auto:
+		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+
+func _apply_height() -> void:
+	var cs := get_node_or_null("CollisionShape3D") as CollisionShape3D
+	if cs and cs.shape is CapsuleShape3D:
+		var cap := (cs.shape as CapsuleShape3D).duplicate() as CapsuleShape3D
+		cap.radius = player_radius
+		cap.height = player_height
+		cs.shape = cap
+		cs.position = Vector3(0.0, player_height * 0.5, 0.0)
+	head.position = Vector3(0.0, player_height * 0.93, 0.0)
+
+func _make_cargo() -> void:
+	cargo = CargoSystem.new()
+	cargo.name = "CargoSystem"
+	add_child(cargo)
+
+func _make_hands() -> void:
+	if cargo == null:
+		_make_cargo()           # the box you carry rides along with the hands
+	var cam := head.get_node_or_null("Camera3D") as Camera3D
+	if hands_scene == null or cam == null:
+		return
+	hands = hands_scene.instantiate() as PlayerHands
+	cam.add_child(hands)
+
+## Tell the gloves what the player is doing (they animate themselves from this).
+func _feed_hands(input: Vector2, shift_down: bool) -> void:
+	if hands == null:
+		return
+	var grounded := is_on_floor() and ladder == null and not swimming
+	hands.on_floor = is_on_floor()
+	hands.ground_speed = Vector2(velocity.x, velocity.z).length() if grounded else 0.0
+	hands.sprinting = shift_down and input.length() > 0.1
+	hands.vertical_speed = velocity.y
+	hands.climbing = ladder != null
+	if ladder != null:
+		hands.climb_face = ladder.global_transform.basis.orthonormalized()
+		hands.climb_face_set = true
+	hands.climb_rate = _climb_rate if ladder != null else 0.0
+	hands.swimming = swimming
+	hands.swim_effort = clampf(input.length(), 0.0, 1.0)
+
+func _make_tint() -> void:
+	var layer := CanvasLayer.new()
+	layer.layer = -1                     # under the HUD
+	_tint = ColorRect.new()
+	_tint.color = underwater_tint
+	_tint.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_tint.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_tint.visible = false
+	layer.add_child(_tint)
+	add_child(layer)
+
+func _unhandled_input(e: InputEvent) -> void:
+	if input_locked:
+		return
+	if e is InputEventMouseMotion and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
+		rotate_y(-e.relative.x * mouse_sensitivity)
+		head.rotate_x(-e.relative.y * mouse_sensitivity)
+		head.rotation.x = clamp(head.rotation.x, deg_to_rad(-85.0), deg_to_rad(85.0))
+	elif e is InputEventKey and e.pressed and e.physical_keycode == KEY_ESCAPE:
+		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+	elif e is InputEventMouseButton and e.pressed:
+		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+
+## One line for the HUD: what the player is doing and which keys apply.
+func state_text() -> String:
+	if ladder:
+		return ("on ladder: W up, S down, Space jump off" if ladder.center_on_grab else "on ladder: W up, S down, A/D sideways, Space jump off")
+	return "swimming: Space jump out, Shift+Space dive" if swimming else ("wading" if submersion > 0.15 else "on foot")
+
+func _key(k: Key) -> float:
+	return 1.0 if Input.is_physical_key_pressed(k) else 0.0
+
+## World height of the water surface relevant to point p (sea outside the hull, flood
+## water inside it), or -INF if there's no water there.
+func water_surface(p: Vector3) -> float:
+	if _flood == null:
+		_flood = get_tree().get_first_node_in_group("ship_flooding")
+	if _flood and _flood.has_method("water_surface_at"):
+		return _flood.water_surface_at(p)
+	if _ocean:
+		return _ocean.get_height(p.x, p.z)
+	return -INF
+
+## Velocity of the ship at p, if p is on/in a ship (zero in the open sea).
+func _ship_velocity(p: Vector3) -> Vector3:
+	if _ship == null:
+		_ship = get_tree().get_first_node_in_group("ships")
+	return _ship.velocity_at(p) if _ship else Vector3.ZERO
+
+func _inside_ship(p: Vector3) -> bool:
+	return _flood != null and _flood.has_method("is_inside_hull") and _flood.is_inside_hull(p)
+
+func _physics_process(delta: float) -> void:
+	var space_down := Input.is_physical_key_pressed(KEY_SPACE) and not use_auto
+	var space_pressed := (space_down and not _space_was_down) or jump_requested
+	_space_was_down = space_down
+	if cargo != null and cargo.blocks_jump():
+		space_down = false          # carrying a box: Space snaps it to the hold grid
+		space_pressed = false
+	var shift_down := Input.is_physical_key_pressed(KEY_SHIFT) and not use_auto
+	var input := auto_input if use_auto else Vector2(_key(KEY_D) - _key(KEY_A), _key(KEY_S) - _key(KEY_W))
+	jump_requested = false
+	if input_locked:
+		input = Vector2.ZERO
+		space_down = false
+		space_pressed = false
+		shift_down = false
+	_regrab_timer -= delta
+	_kick_timer -= delta
+	_water_jump_timer -= delta
+	_step_over -= delta
+	_climb_rate = 0.0
+
+	# standing on a ship that's turning: turn with it, or the view would slide round
+	if is_on_floor() and ladder == null and not swimming:
+		rotate_y(get_platform_angular_velocity().y * delta)
+
+	var center := global_position + up_direction * player_height * 0.5
+	var feet := global_position
+	var top := global_position + up_direction * player_height
+	var prev := ladder
+	ladder = null
+	if _regrab_timer <= 0.0:
+		if prev and prev.body_in_box(feet, top, prev.depth_slack):
+			ladder = prev                      # stay on it while the hull pushes you about
+		else:
+			ladder = _ladder_at(feet, top)
+	if ladder:
+		if ladder != prev:
+			_ladder_entry_z = ladder.local_point(center).z
+		_climb(delta, input, space_pressed)
+	else:
+		if prev:
+			var v := _ship_velocity(global_position)
+			_air_base = Vector3(v.x, 0.0, v.z)
+			if prev.local_point(feet).y >= prev.half_size().y - 0.05 and input.y < 0.0:
+				# out the top holding W: W walks forward again; a little lift and full control
+				# for a moment so you step over the rail instead of dropping back
+				velocity.y = maxf(velocity.y, 1.2)
+				_step_over = 0.4
+		_move(delta, input, space_down, space_pressed, shift_down)
+	# rung and hull-skin bumps would shove you off the ladder, so ignore the skin while climbing
+	var skin_bit := 1 << (hull_skin_layer - 1)
+	collision_mask = (_base_mask & ~skin_bit) if ladder else _base_mask
+	kick_requested = false
+
+	if global_position.y < -40.0:
+		global_transform = spawn
+		velocity = Vector3.ZERO
+		ladder = null
+	var cam_pos := head.global_position
+	head_under = water_surface(cam_pos) > cam_pos.y
+	_tint.visible = head_under
+	_feed_hands(input, shift_down)
+
+func _move(delta: float, input: Vector2, space_down: bool, space_pressed: bool, shift_down: bool) -> void:
+	var feet := global_position
+	var surf := water_surface(feet + Vector3.UP * 0.1)
+	submersion = clampf((surf - feet.y) / player_height, 0.0, 1.0) if surf > -1e9 else 0.0
+	var on_floor_before := is_on_floor()
+	# float once the water is chest deep, or deeper still while standing
+	swimming = submersion > 0.6 and not (on_floor_before and submersion < 0.75) and _water_jump_timer <= 0.0
+
+	var speed: float
+	var base := Vector3.ZERO           # velocity the surroundings carry you at
+	var steer := accel
+	if swimming:
+		floor_snap_length = 0.0
+		# buoyancy: balanced at float_level, pushes up when deeper, never pulls down harder
+		# than gravity when you're higher
+		var a := maxf(-gravity, buoyancy_gain * gravity * (submersion / float_level - 1.0))
+		velocity.y += a * delta
+		velocity.y *= exp(-water_drag * delta)
+		if (shift_down and space_pressed) or kick_requested:
+			if _kick_timer <= 0.0:
+				velocity.y = -kick_speed
+				_kick_timer = kick_cooldown
+		elif space_pressed and submersion < float_level + 0.12:
+			# jump up out of the water: no buoyancy or drag until you're on the way down
+			velocity.y = water_jump_velocity
+			_water_jump_timer = 0.35
+			swimming = false
+		speed = swim_run_speed if shift_down else swim_speed
+		if _inside_ship(feet):
+			base = _ship_velocity(feet)  # the water in the hold moves with the ship
+		_air_base = base
+	else:
+		floor_snap_length = 0.4 if _water_jump_timer <= 0.0 else 0.0
+		if not on_floor_before:
+			velocity.y -= gravity * delta
+			base = _air_base
+			steer = accel if _step_over > 0.0 else accel * air_control
+		elif (space_down or space_pressed) and submersion < 0.5:
+			velocity.y = jump_velocity
+		speed = run_speed if shift_down else walk_speed
+		# wading: knee to chest deep water slows you down
+		speed *= lerpf(1.0, 0.5, smoothstep(0.15, 0.6, submersion))
+
+	var dir := global_transform.basis * Vector3(input.x, 0.0, input.y)
+	dir.y = 0.0
+	if dir.length() > 0.0:
+		dir = dir.normalized()
+	var target := base + dir * speed
+	velocity.x = move_toward(velocity.x, target.x, steer * maxf(speed, 1.0) * delta)
+	velocity.z = move_toward(velocity.z, target.z, steer * maxf(speed, 1.0) * delta)
+
+	var floor_vel := get_platform_velocity() if on_floor_before else Vector3.ZERO
+	move_and_slide()
+	var on_floor_now := is_on_floor()
+	if on_floor_before and not on_floor_now:
+		# leaving the deck (jump or walking off the edge): keep the deck's speed
+		var v := floor_vel
+		_air_base = Vector3(v.x, 0.0, v.z)
+		velocity.x += _air_base.x
+		velocity.z += _air_base.z
+	elif on_floor_now and not on_floor_before:
+		# landing on a moving deck: the deck carries you from here, keep only your own motion
+		var pv := get_platform_velocity()
+		velocity.x -= pv.x
+		velocity.z -= pv.z
+		_air_base = Vector3.ZERO
+
+	if dir != Vector3.ZERO and is_on_wall():
+		if swimming:
+			_try_step_up(dir, speed, delta, climb_height)   # pull yourself out
+		elif on_floor_before:
+			_try_step_up(dir, speed, delta, step_height)
+
+func _try_step_up(dir: Vector3, speed: float, delta: float, height: float) -> void:
+	var start := global_transform
+	var up := up_direction * height
+	if test_move(start, up):
+		return                                   # no headroom
+	var raised := start.translated(up)
+	var probe: Vector3 = dir * maxf(0.12, speed * delta)
+	if test_move(raised, probe):
+		return                                   # still blocked: it's a wall, not a step
+	var ahead := raised.translated(probe)
+	var col := KinematicCollision3D.new()
+	if not test_move(ahead, -up * 1.05, col):
+		return                                   # nothing to stand on
+	if col.get_normal().angle_to(up_direction) > floor_max_angle:
+		return
+	global_position = ahead.origin + col.get_travel()
+	velocity.y = 0.0
+	apply_floor_snap()
+
+# ---------------------------------------------------------------- ladders
+
+func _ladder_at(feet: Vector3, head: Vector3) -> ShipLadder:
+	for n in get_tree().get_nodes_in_group("ship_ladders"):
+		var l := n as ShipLadder
+		if l and l.body_in_box(feet, head, l.grab_slack):
+			return l
+	return null
+
+func _climb(delta: float, input: Vector2, space_pressed: bool) -> void:
+	var b := ladder.global_transform.basis
+	var up := b.y.normalized()
+	var out := b.z.normalized()
+	var side := b.x.normalized()
+	var carry := _ship_velocity(global_position)
+	swimming = false
+	submersion = 0.0
+	floor_snap_length = 0.0
+	if space_pressed:
+		# jump off, away from the ship
+		velocity = carry + out * 2.5 + Vector3.UP * 2.0
+		_air_base = Vector3(carry.x, 0.0, carry.z)
+		ladder = null
+		_regrab_timer = ladder_regrab_delay
+		move_and_slide()
+		return
+	var sp := ladder.climb_speed
+	var climb := -input.y * sp                 # W = up, S = down
+	_climb_rate = climb
+	var lp := ladder.local_point(global_position + up_direction * player_height * 0.5)
+	# hold the depth you grabbed it at (the hull can still push you out where it bulges),
+	# plus a small rock in and out per rung
+	var k := TAU / maxf(ladder.rung_spacing, 0.05)
+	var depth_target := 0.0 if ladder.snap_depth else _ladder_entry_z     # rope ladders draw you in to the middle of the box
+	var depth_v := clampf((depth_target - lp.z) * 4.0, -0.6, 0.6)
+	depth_v += ladder.rung_bob * k * cos(lp.y * k) * climb
+	var side_v := input.x * sp * ladder.side_speed
+	if ladder.center_on_grab:
+		# slide onto the middle of the ladder and stay there, so grabbing it at the edge of the box
+		# no longer bounces you in and out of it
+		var mid := global_position + up_direction * player_height * 0.5
+		side_v = clampf((ladder.center_world() - mid).dot(side) * 10.0, -2.0, 2.0)
+	velocity = carry + up * climb + side * side_v + out * depth_v
+	move_and_slide()

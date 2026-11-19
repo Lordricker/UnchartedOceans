@@ -94,8 +94,8 @@ func _variable(cx: float, cz: float, speed: float) -> Vector2:
 
 ## The prevailing wind at a chart position and year phase, before the coastal breeze and any storm.
 func prevailing(cx: float, cz: float, phase: float) -> Vector2:
-	var f := clampf(cz / height_m, 0.0, 1.0)         # 0 north .. 1 south
-	var g := clampf(cx / width_m, 0.0, 1.0)          # 0 west .. 1 east
+	var f := (fposmod(cz, height_m) / height_m)         # 0 north .. 1 south
+	var g := (fposmod(cx, width_m) / width_m)          # 0 west .. 1 east
 	var winter := winter_amount(phase)
 
 	var westerly := vec(lerpf(westerly_speed.x, westerly_speed.y, winter), WESTERLY_TOWARD_DEG)
@@ -132,8 +132,8 @@ func coastal(chart: WorldChart, cx: float, cz: float, hour: float) -> Vector2:
 
 ## Which wind belt a position is in, for the almanac and the debug readout.
 func region_name(cx: float, cz: float, phase: float) -> String:
-	var f := clampf(cz / height_m, 0.0, 1.0)
-	var g := clampf(cx / width_m, 0.0, 1.0)
+	var f := (fposmod(cz, height_m) / height_m)
+	var g := (fposmod(cx, width_m) / width_m)
 	if g > 0.62:
 		var m := monsoon_sign(phase)
 		if absf(m) < 0.35:

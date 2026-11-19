@@ -1,0 +1,64 @@
+DeckFittings (default): BelayPins
+DeckFittings (default): Binnacle
+DeckFittings (default): BinnacleBrass
+DeckFittings (default): BinnacleGilt
+DeckFittings (default): BinnacleLamps
+DeckFittings (default): BowspritBitts
+DeckFittings (default): Capstan
+DeckFittings (default): HatchBattens
+DeckFittings (default): HatchCoaming
+DeckFittings (default): HatchCoamingCap
+DeckFittings (default): HatchCornerIrons
+DeckFittings (default): HoldLadder
+DeckFittings (default): MastPartners
+DeckFittings (default): MizzenPinRail
+DeckFittings (default): PinRails
+DeckFittings (default): WheelStand
+DeckFittings (default): Windlass
+DeckFittings (default): WindlassBrass
+DeckFittings (default): WindlassHardware
+DeckFittings (default): WindlassRope
+mast box Foremast: x -0.30..0.30 y -7.42..-6.83 (8 verts)
+mast box Mainmast: x -0.33..0.33 y -1.63..-0.96 (8 verts)
+mast box Mizzenmast: x -0.22..0.22 y 9.73..10.17 (8 verts)
+yard Yard_Fore_0 origin (0.0, -6.783, 8.2) (was (0.0, -6.783, 8.2))
+yard Yard_Fore_1 origin (0.0, -6.574, 14.2) (was (0.0, -6.574, 14.2))
+yard Yard_Main_0 origin (0.0, -1.001, 9.6) (was (0.0, -1.001, 9.6))
+yard Yard_Main_1 origin (0.0, -0.828, 16.2) (was (0.0, -0.828, 16.2))
+yard Yard_Mizzen origin (0.0, 10.567, 11.0) (was (0.0, 10.567, 11.0))
+yard Yard_Sprit origin (0.0, -15.2, 4.737) (was (0.0, -15.2, 4.737))
+sail Sail_Fore_0: 545 verts 412 faces, mats ['M_Fluyt_Sail', 'M_Rope_Hemp', 'M_Fluyt_Iron']
+sail Sail_Fore_1: 545 verts 412 faces, mats ['M_Fluyt_Sail', 'M_Rope_Hemp', 'M_Fluyt_Iron']
+sail Sail_Main_0: 545 verts 412 faces, mats ['M_Fluyt_Sail', 'M_Rope_Hemp', 'M_Fluyt_Iron']
+sail Sail_Main_1: 545 verts 412 faces, mats ['M_Fluyt_Sail', 'M_Rope_Hemp', 'M_Fluyt_Iron']
+sail Sail_Mizzen: 261 verts 198 faces, mats ['M_Fluyt_Sail', 'M_Rope_Hemp', 'M_Fluyt_Iron']
+sail Sail_Sprit: 545 verts 412 faces, mats ['M_Fluyt_Sail', 'M_Rope_Hemp', 'M_Fluyt_Iron']
+waterline half beam: [0.0, 0.0, 0.0, 0.332, 0.761, 1.161, 1.537, 1.869, 2.172, 2.424, 2.649, 2.815, 2.953, 3.085, 3.17, 3.259, 3.321, 3.367, 3.409, 3.42, 3.432, 3.437, 3.437, 3.437, 3.437, 3.437, 3.437, 3.437, 3.437, 3.437, 3.437, 3.428, 3.415, 3.397, 3.344, 3.291, 3.224, 3.145, 3.065, 2.967, 2.867, 2.759, 2.642, 2.523, 2.392, 2.257, 2.117, 1.969, 1.818, 1.66, 1.496, 0.0]
+READ done: {'Hull': 8985, 'MainDeck': 1227, 'Interiors': 12652, 'Rig_Spars': 1582, 'Rig_Ropes': 4456, 'Glass': 84, 'DeckFittings': 2368}
+GROUP Hull: 8985 faces, 11 materials
+GROUP MainDeck: 1227 faces, 5 materials
+GROUP Interiors: 12652 faces, 14 materials
+GROUP Rig_Spars: 1582 faces, 8 materials
+GROUP Rig_Ropes: 4456 faces, 4 materials
+GROUP Glass: 84 faces, 1 materials
+GROUP DeckFittings: 2368 faces, 7 materials
+rope part Rope_Brace_Fore_0_Port: parent None not exported, put on the root
+rope part Rope_Brace_Fore_0_Stbd: parent None not exported, put on the root
+rope part Rope_Brace_Main_0_Port: parent None not exported, put on the root
+rope part Rope_Brace_Main_0_Stbd: parent None not exported, put on the root
+rope part Rope_Lift_Fore_0_Port: parent None not exported, put on the root
+rope part Rope_Lift_Fore_0_Stbd: parent None not exported, put on the root
+rope part Rope_Lift_Fore_1_Port: parent None not exported, put on the root
+rope part Rope_Lift_Fore_1_Stbd: parent None not exported, put on the root
+rope part Rope_Lift_Main_0_Port: parent None not exported, put on the root
+rope part Rope_Lift_Main_0_Stbd: parent None not exported, put on the root
+rope part Rope_Lift_Main_1_Port: parent None not exported, put on the root
+rope part Rope_Lift_Main_1_Stbd: parent None not exported, put on the root
+rope part Rope_Sheet_Fore_0_Port: parent None not exported, put on the root
+rope part Rope_Sheet_Fore_0_Stbd: parent None not exported, put on the root
+rope part Rope_Sheet_Main_0_Port: parent None not exported, put on the root
+rope part Rope_Sheet_Main_0_Stbd: parent None not exported, put on the root
+rope part Rope_Sheet_Mizzen: parent None not exported, put on the root
+name collisions after rename: []
+markers: ['CamPos_Compass', 'CamPos_LogLine', 'CamTarget_Compass', 'CamTarget_LogLine', 'HammockSlot_00', 'HammockSlot_01', 'HammockSlot_02', 'HoldBounds', 'LT_Lamp_Cabin_0', 'LT_Lamp_Hall_0', 'LT_Lamp_Hall_1', 'LT_Lamp_Room_Port_0', 'LT_Lamp_Room_Port_1', 'LT_Lamp_Room_Stbd_0', 'LT_Lamp_Room_Stbd_1', 'LT_Lamp_Stern_0', 'LT_Lamp_Stern_1', 'LogLine', 'LogLine_P0', 'LogLine_P1', 'LogLine_P2', 'LogLine_P3', 'LogLine_P4', 'SinkCheck_Port_Aft', 'SinkCheck_Port_Fore', 'SinkCheck_Port_Mid', 'SinkCheck_Stbd_Aft', 'SinkCheck_Stbd_Fore', 'SinkCheck_Stbd_Mid', 'Station_Bed', 'Station_Brace_Fore_Port', 'Station_Brace_Fore_Stbd', 'Station_Brace_Main_Port', 'Station_Brace_Main_Stbd', 'Station_Cabin_Bed_Port_0', 'Station_Cabin_Bed_Port_1', 'Station_Cabin_Bed_Stbd_0', 'Station_Cabin_Bed_Stbd_1', 'Station_Capstan_01', 'Station_Capstan_02', 'Station_Capstan_03', 'Station_Capstan_04', 'Station_Halyard_Fore_Course', 'Station_Halyard_Fore_Topsail', 'Station_Halyard_Main_Course', 'Station_Halyard_Main_Topsail', 'Station_Halyard_Mizzen', 'Station_Halyard_Sprit', 'Station_LogLine', 'Station_Mooring', 'Station_Pump_01', 'Station_Pump_02', 'Station_Sheet_Mizzen', 'Station_Wheel', 'Station_Windlass', 'Windsock']
+saved C:\Users\Victus\Documents\GitHub\UnchartedOceans\tools\fluyt_merge\out\c2_game.blend

@@ -122,8 +122,15 @@ var _scroll_z := 0.0
 var _foam_run := 0.0
 ## World mode: the chart and where the Godot origin sits on it (chart metres, 64-bit floats).
 var chart: WorldChart
+## The terrain's ground on the CPU (world_ground.gd, set by WorldStreamer).
+var ground
 var _ox := 0.0
 var _oz := 0.0
+## The origin the waves are laid out from. It is _ox, _oz plus whole laps of the wrapped world (WorldStreamer passes
+## them as `lap`), so when the ship crosses the chart's seam and the origin jumps back by the chart's width, the waves,
+## foam and ripples carry on unbroken.
+var _phx := 0.0
+var _phz := 0.0
 
 func _ready() -> void:
 	# grab the material first: replacing the mesh drops surface override materials
@@ -182,14 +189,16 @@ func register_island(isl: Island) -> void:
 ## defined in chart coordinates, so when the origin is rebased the wave phases are shifted by the
 ## difference (computed in 64-bit here), and the sea looks and floats exactly as it did. Also turns on
 ## macro shoaling from the chart's shelf. Call again after every rebase.
-func set_world(c: WorldChart, ox: float, oz: float) -> void:
+func set_world(c: WorldChart, ox: float, oz: float, lap := Vector2.ZERO) -> void:
 	var first := chart == null
+	var phx := ox + lap.x
+	var phz := oz + lap.y
 	if not first:
 		# a rebase moves everything in the scene by the change of origin: move the patterns' frame with it, so the foam
 		# and ripples stay on the same water (unless the totals have grown so big that float precision would suffer: then
 		# they start again from zero, a single jump)
-		var mx := ox - _ox
-		var mz := oz - _oz
+		var mx := phx - _phx
+		var mz := phz - _phz
 		_flow_ox -= mx
 		_flow_oz -= mz
 		_scroll_x -= mx
@@ -202,6 +211,8 @@ func set_world(c: WorldChart, ox: float, oz: float) -> void:
 	chart = c
 	_ox = ox
 	_oz = oz
+	_phx = phx
+	_phz = phz
 	_refresh_phase()
 	if _mat == null or c == null:
 		return
@@ -221,9 +232,9 @@ func set_world(c: WorldChart, ox: float, oz: float) -> void:
 			_mat.set_shader_parameter("coast_surf", 0.0)
 	_mat.set_shader_parameter("w_p", _p)
 	# the foam textures repeat every 1/scale metres, so shifting them by the fractional part keeps them put
-	var f1 := Vector2(fposmod(ox * 0.071, 1.0), fposmod(oz * 0.071, 1.0))
-	var f2x := (0.8 * ox - 0.6 * oz) * 0.193
-	var f2y := (0.6 * ox + 0.8 * oz) * 0.193
+	var f1 := Vector2(fposmod(phx * 0.071, 1.0), fposmod(phz * 0.071, 1.0))
+	var f2x := (0.8 * phx - 0.6 * phz) * 0.193
+	var f2y := (0.6 * phx + 0.8 * phz) * 0.193
 	_mat.set_shader_parameter("foam_off1", f1)
 	_mat.set_shader_parameter("foam_off2", Vector2(fposmod(f2x, 1.0), fposmod(f2y, 1.0)))
 
@@ -231,13 +242,19 @@ func _refresh_phase() -> void:
 	if _p_base.size() != _p.size():
 		return
 	for i in _p.size():
-		_p[i] = fposmod(_p_base[i] + (_dx[i] * _ox + _dz[i] * _oz) * _k[i], TAU)
+		_p[i] = fposmod(_p_base[i] + (_dx[i] * _phx + _dz[i] * _phz) * _k[i], TAU)
 
 ## Scale on the wave height at world (x, z): 1 in open water, smaller toward shore and in harbour.
 func wave_scale(x: float, z: float) -> float:
 	var s := _island.wave_scale(x, z) if _island else 1.0
 	if chart:
-		s *= chart.wave_scale(x + _ox, z + _oz)
+		var cx := x + _ox
+		var cz := z + _oz
+		if ground and chart.shore_distance_m(cx, cz) < 1500.0:
+			# near a coast: the beach profile, as chart_scale() in ocean.gdshader
+			s *= pow(clampf(ground.depth_m(cx, cz) / 12.0, 0.0, 1.0), 0.6)
+		else:
+			s *= chart.wave_scale(cx, cz)
 	return s
 
 func _unhandled_input(e: InputEvent) -> void:

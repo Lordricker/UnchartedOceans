@@ -1,0 +1,163 @@
+[gd_scene format=3]
+
+[ext_resource type="PackedScene" path="res://scenes/ships/schooner.tscn" id="1_schooner"]
+[ext_resource type="Script" uid="uid://da07cl2ygaab4" path="res://scripts/player.gd" id="2_player"]
+[ext_resource type="Script" uid="uid://cvusuacxmt4to" path="res://scripts/ship_motion.gd" id="3_motion"]
+[ext_resource type="Shader" path="res://shaders/ocean.gdshader" id="4_sea"]
+[ext_resource type="Script" uid="uid://cn6td7xdkyfbs" path="res://scripts/ocean.gd" id="5_ocean"]
+[ext_resource type="Script" uid="uid://b212s1egyu5j0" path="res://scripts/debug_hud.gd" id="6_hud"]
+[ext_resource type="Script" uid="uid://ljjt35tv7him" path="res://scripts/ship_flooding.gd" id="7_flood"]
+[ext_resource type="Script" path="res://scripts/world_streamer.gd" id="9_world"]
+[ext_resource type="Script" path="res://scripts/sky_system.gd" id="10_sky"]
+[ext_resource type="Script" path="res://scripts/ship_fleet.gd" id="11_fleet"]
+
+[sub_resource type="ProceduralSkyMaterial" id="SkyMat"]
+sky_top_color = Color(0.29, 0.34, 0.42, 1)
+sky_horizon_color = Color(0.58, 0.6, 0.62, 1)
+ground_bottom_color = Color(0.1, 0.14, 0.18, 1)
+ground_horizon_color = Color(0.58, 0.6, 0.62, 1)
+
+[sub_resource type="Sky" id="Sky"]
+sky_material = SubResource("SkyMat")
+
+[sub_resource type="Environment" id="Env"]
+background_mode = 2
+sky = SubResource("Sky")
+ambient_light_source = 3
+ambient_light_energy = 0.8
+tonemap_mode = 2
+fog_enabled = true
+fog_light_color = Color(0.52, 0.56, 0.6, 1)
+fog_density = 0.0004
+
+[sub_resource type="FastNoiseLite" id="FoamNoise"]
+frequency = 0.02
+fractal_octaves = 4
+
+[sub_resource type="NoiseTexture2D" id="FoamTex"]
+width = 256
+height = 256
+seamless = true
+generate_mipmaps = true
+noise = SubResource("FoamNoise")
+
+[sub_resource type="ShaderMaterial" id="SeaMat"]
+shader = ExtResource("4_sea")
+shader_parameter/foam_noise = SubResource("FoamTex")
+
+[sub_resource type="CapsuleShape3D" id="PlayerShape"]
+radius = 0.22
+height = 1.02
+
+[node name="WorldCapitalStart" type="Node3D"]
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="." unique_id=1432920503]
+environment = SubResource("Env")
+
+[node name="Sun" type="DirectionalLight3D" parent="." unique_id=651201207]
+transform = Transform3D(0.8253356, -0.42420486, 0.3726545, 0, 0.6599831, 0.7512804, -0.5646425, -0.6200585, 0.54470754, 0, 0, 0)
+light_color = Color(1, 0.93, 0.82, 1)
+shadow_enabled = true
+
+[node name="SkySystem" type="Node" parent="."]
+script = ExtResource("10_sky")
+debug_overlay = false
+
+[node name="Ocean" type="MeshInstance3D" parent="." unique_id=806461368]
+material_override = SubResource("SeaMat")
+script = ExtResource("5_ocean")
+curvature_radius_m = 6370000.0
+radius = 24000.0
+
+[node name="ShipRig" type="Node3D" parent="." unique_id=2100207574]
+script = ExtResource("3_motion")
+ship_path = NodePath("SchoonerShip/Schooner")
+ship_class = 3
+sample_points = PackedVector2Array(0, -6.5, 0, 6.5, -1.8, -3.5, 1.8, -3.5, -2, 0.5, 2, 0.5, -1.8, 4.5, 1.8, 4.5)
+test_rock = false
+test_island = false
+harbor_enabled = true
+max_turn_rate_deg = 7.0
+turn_lag = 1.6
+wheel_enabled = true
+helm_enabled = true
+windsock_enabled = true
+log_line_enabled = true
+interact_enabled = true
+rigging_enabled = true
+map_enabled = true
+bed_enabled = true
+pump_enabled = true
+bookshelf_enabled = true
+glass_enabled = true
+deck_patch_enabled = true
+deck_water_enabled = true
+anchor_enabled = true
+sails_enabled = true
+
+[node name="SchoonerShip" parent="ShipRig" instance=ExtResource("1_schooner")]
+
+[node name="Flooding" type="Node3D" parent="ShipRig"]
+script = ExtResource("7_flood")
+
+[node name="Player" type="CharacterBody3D" parent="." unique_id=638429936]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.5, 4.5)
+script = ExtResource("2_player")
+start_pitch_deg = -30.0
+start_cargo = {
+"cannon_shot": 6
+}
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="Player" unique_id=1045953852]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.51, 0)
+shape = SubResource("PlayerShape")
+
+[node name="Head" type="Node3D" parent="Player" unique_id=1462948450]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.95, 0)
+
+[node name="Camera3D" type="Camera3D" parent="Player/Head" unique_id=1404548818]
+near = 0.03
+
+[node name="HUD" type="CanvasLayer" parent="." unique_id=1209233760]
+
+[node name="Label" type="Label" parent="HUD" unique_id=142949267]
+offset_left = 12.0
+offset_top = 8.0
+script = ExtResource("6_hud")
+
+[node name="ShipFleet" type="Node" parent="."]
+script = ExtResource("11_fleet")
+berth_fill_chance = 0.2
+spawn_out_of_view_only = false
+
+[node name="WorldStreamer" type="Node3D" parent="."]
+script = ExtResource("9_world")
+home_port_id = "AC00"
+start_berth = "Berth_02"
+port_scenes = {
+"AC00": "res://assets/port/PortCapital.glb",
+"CC02": "res://assets/port/PortCapital_Ottoman.glb",
+"AS04": "res://assets/port/PortSmall_AS04.glb",
+"AS05": "res://assets/port/PortSmall_AS05.glb",
+"AS06": "res://assets/port/PortSmall_AS06.glb",
+"AS07": "res://assets/port/PortSmall_AS07.glb",
+"BS09": "res://assets/port/PortSmall_BS09.glb",
+"BS10": "res://assets/port/PortSmall_BS10.glb",
+"BS11": "res://assets/port/PortSmall_BS11.glb",
+"BS12": "res://assets/port/PortSmall_BS12.glb",
+"BS13": "res://assets/port/PortSmall_BS13.glb",
+"CS14": "res://assets/port/PortSmall_CS14.glb",
+"CS15": "res://assets/port/PortSmall_CS15.glb",
+"CS16": "res://assets/port/PortSmall_CS16.glb",
+"CS17": "res://assets/port/PortSmall_CS17.glb",
+"DS19": "res://assets/port/PortSmall_DS19.glb",
+"DS20": "res://assets/port/PortSmall_DS20.glb",
+"DS21": "res://assets/port/PortSmall_DS21.glb",
+"DS22": "res://assets/port/PortSmall_DS22.glb",
+"AS08": "res://assets/port/PortSmall_AS08.glb",
+"CS18": "res://assets/port/PortSmall_CS18.glb",
+"DS23": "res://assets/port/PortSmall_DS23.glb",
+"BC01": "res://assets/port/PortCapital_Asian.glb",
+"DC03": "res://assets/port/PortCapital_African.glb",
+"FF24": "res://assets/port/PortSmall_FF24.glb"
+}

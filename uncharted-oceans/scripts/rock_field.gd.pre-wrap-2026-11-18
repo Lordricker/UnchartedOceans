@@ -1,0 +1,345 @@
+class_name RockField
+extends Node3D
+## Rocks along the world chart's shores: reef rocks and skerries just off the beaches, shingle slabs, and now and then a
+## big rock shelf or headland standing out of the sea. The models are Poly Haven scans (CC0) cut down to game weight
+## by tools/rocks/build_rock_kit.py and kept in res://assets/world/rocks/.
+##
+## Where the rocks are comes from the chart alone (a seeded hash per cell plus a slow noise for rocky stretches), so a
+## rock is always in the same place and the ship's hull test (blocks()) needs no scene: WorldStreamer asks it from
+## _ground_check, the same way it asks the chart for the shelf. The drawn rocks are MultiMeshes rebuilt around the ship
+## whenever it has moved a little, with the same world curvature drop as the terrain and the sea so they sit on the water.
+##
+## Nothing is placed on land (the land height only exists on the GPU) or near a port (PORT_CLEAR_M), and the ship's own
+## grounding already stops her about 100 m off the real shore, so the scatter band starts inside that line and ends
+## about 500 m out. The quality setting thins the scatter and shortens how far the small rocks show.
+
+const ROCK_DIR := "res://assets/world/rocks/"
+const SCATTER_CELL_M := 160.0
+const HERO_CELL_M := 1500.0
+const REBUILD_M := 60.0
+const PORT_CLEAR_M := 1300.0
+const WORLD_SEED := 4417
+const MAX_CACHE := 6000
+
+## layer 0 = scatter (small rocks, dense), layer 1 = hero (big pieces, sparse).
+## w: pick weight inside the layer. smin/smax: scale range. vis: share of the rock's height standing out of the water.
+## range: how far away it is drawn.
+const KIT: Array = [
+	{"name": "Rock_Boulder_S", "layer": 0, "w": 3.0, "smin": 1.7, "smax": 4.8, "vis": [0.45, 0.85], "range": 1500.0},
+	{"name": "Rock_Reef_S", "layer": 0, "w": 3.0, "smin": 1.4, "smax": 4.2, "vis": [0.25, 0.6], "range": 2200.0},
+	{"name": "Rock_Boulder_M", "layer": 0, "w": 2.0, "smin": 2.1, "smax": 6.2, "vis": [0.4, 0.8], "range": 2600.0},
+	{"name": "Rock_Boulder_L", "layer": 0, "w": 1.2, "smin": 2.8, "smax": 8.0, "vis": [0.4, 0.8], "range": 3000.0},
+	{"name": "Rock_Shingle_M", "layer": 0, "w": 1.5, "smin": 1.4, "smax": 3.6, "vis": [0.5, 0.9], "range": 2600.0},
+	{"name": "Rock_Shelf_XL", "layer": 1, "w": 3.0, "smin": 0.6, "smax": 1.3, "vis": [0.5, 0.9], "range": 9000.0},
+	{"name": "Rock_Headland_XL", "layer": 1, "w": 1.0, "smin": 0.4, "smax": 0.8, "vis": [0.5, 0.85], "range": 9000.0},
+]
+
+var streamer: Node
+
+## Small rocks only sit where the surf reaches: the thin strip of beach the waves run up and back over (EDGE_KIT). Only the
+## bigger boulders (and the shelves and headlands) may stand further out or further up the shore.
+const EDGE_KIT: Array = ["Rock_Boulder_S", "Rock_Reef_S", "Rock_Shingle_M"]
+## The terrain's waterline is where the chart's land mask is about 0.45 (it starts rising from 0.42 and the sea floor is just
+## under the surface there), so edge rocks live in the mask band round that: mostly awash or just up the sand.
+const EDGE_V := 0.47
+const EDGE_V_HALF := 0.08
+
+## The activation circle: rocks only exist inside it, around the ship, and are built and dropped as it moves, so the whole
+## map is never populated. Far from any coast (nearer than this to none) nothing is built at all.
+@export var scatter_radius_m := 1000.0     ## small rocks, reefs and shingle
+@export var hero_radius_m := 3000.0        ## big shelves and headlands (seen from further, and there are few)
+
+var _kit: Array = []                 # per KIT entry: {mm: MultiMesh, size: Vector3, ok: bool}
+var _cache := {}                     # Vector3i(layer, ci, cj) -> Array of rock Dictionaries
+var _noise := FastNoiseLite.new()
+var _group := FastNoiseLite.new()      # clumps rocks into groups
+var _t := 0.0
+var _last_c := Vector2(INF, INF)
+var _last_origin := Vector2(INF, INF)
+var _last_q := -1.0
+var _curve_k := 0.5 / 6370000.0
+var _reported := false
+
+
+func _ready() -> void:
+	_noise.seed = WORLD_SEED
+	_noise.noise_type = FastNoiseLite.TYPE_SIMPLEX_SMOOTH
+	_noise.frequency = 1.0 / 4500.0
+	_group.seed = WORLD_SEED + 91
+	_group.noise_type = FastNoiseLite.TYPE_SIMPLEX_SMOOTH
+	_group.frequency = 1.0 / 140.0
+	for e in KIT:
+		var entry := {"ok": false, "size": Vector3.ONE, "mm": null}
+		var path: String = ROCK_DIR + String(e["name"]) + ".glb"
+		if ResourceLoader.exists(path):
+			var ps := load(path) as PackedScene
+			if ps:
+				var inst := ps.instantiate()
+				var mi := _find_mesh(inst)
+				if mi and mi.mesh:
+					var mesh := mi.mesh
+					var mm := MultiMesh.new()
+					mm.transform_format = MultiMesh.TRANSFORM_3D
+					mm.use_colors = true
+					mm.mesh = mesh
+					var mmi := MultiMeshInstance3D.new()
+					mmi.name = String(e["name"])
+					mmi.multimesh = mm
+					mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+					mmi.custom_aabb = AABB(Vector3(-15000.0, -200.0, -15000.0), Vector3(30000.0, 600.0, 30000.0))
+					var src := mesh.surface_get_material(0)
+					if src is StandardMaterial3D and (src as StandardMaterial3D).albedo_texture != null:
+						# the scans are desert brown: take most of the colour out, then the instance colour (a grey-blue in the
+						# north, warm in the south) gives the regional tint
+						var sh := Shader.new()
+						sh.code = """shader_type spatial;
+uniform sampler2D tex : source_color, filter_linear_mipmap, repeat_enable;
+uniform float keep_colour = 0.3;
+uniform float lift = 1.18;
+void fragment() {
+	vec3 c = texture(tex, UV).rgb;
+	float l = dot(c, vec3(0.299, 0.587, 0.114));
+	ALBEDO = mix(vec3(l), c, keep_colour) * lift * COLOR.rgb;
+	ROUGHNESS = 0.92;
+}
+"""
+						var sm := ShaderMaterial.new()
+						sm.shader = sh
+						sm.set_shader_parameter("tex", (src as StandardMaterial3D).albedo_texture)
+						mmi.material_override = sm
+					elif src is StandardMaterial3D:
+						var mat := (src as StandardMaterial3D).duplicate() as StandardMaterial3D
+						mat.vertex_color_use_as_albedo = true
+						mmi.material_override = mat
+					add_child(mmi)
+					entry["ok"] = true
+					entry["size"] = mesh.get_aabb().size
+					entry["mm"] = mm
+				inst.queue_free()
+		if not entry["ok"]:
+			push_warning("RockField: missing or unreadable " + path)
+		_kit.append(entry)
+	var oc = streamer.get("_ocean") if streamer else null
+	if oc and float(oc.get("curvature_radius_m")) > 0.0:
+		_curve_k = 0.5 / float(oc.get("curvature_radius_m"))
+
+
+func _find_mesh(n: Node) -> MeshInstance3D:
+	if n is MeshInstance3D:
+		return n
+	for c in n.get_children():
+		var r := _find_mesh(c)
+		if r:
+			return r
+	return null
+
+
+func _quality_scale() -> float:
+	var gs := get_node_or_null("/root/GameSettings")
+	if gs and int(gs.get("quality_level")) == 0:
+		return 0.5
+	return 1.0
+
+
+# ------------------------------------------------------------------ placement (chart only, deterministic)
+
+func _cell_size(layer: int) -> float:
+	return SCATTER_CELL_M if layer == 0 else HERO_CELL_M
+
+
+func _cell(layer: int, ci: int, cj: int) -> Array:
+	var key := Vector3i(layer, ci, cj)
+	if _cache.has(key):
+		return _cache[key]
+	if _cache.size() > MAX_CACHE:
+		_cache.clear()
+	var out := _gen_cell(layer, ci, cj)
+	_cache[key] = out
+	return out
+
+
+func _pick_kit(rng: RandomNumberGenerator, layer: int) -> int:
+	var total := 0.0
+	for i in KIT.size():
+		if int(KIT[i]["layer"]) == layer and _kit[i]["ok"]:
+			total += float(KIT[i]["w"])
+	if total <= 0.0:
+		return -1
+	var r := rng.randf() * total
+	for i in KIT.size():
+		if int(KIT[i]["layer"]) == layer and _kit[i]["ok"]:
+			r -= float(KIT[i]["w"])
+			if r <= 0.0:
+				return i
+	return -1
+
+
+func _gen_cell(layer: int, ci: int, cj: int) -> Array:
+	var out: Array = []
+	var chart: WorldChart = streamer.chart
+	var cell := _cell_size(layer)
+	var rng := RandomNumberGenerator.new()
+	rng.seed = hash(Vector3i(ci, cj, layer * 977 + WORLD_SEED))
+	var x0 := float(ci) * cell
+	var z0 := float(cj) * cell
+	var attempts := 7 if layer == 0 else 3
+	for _a in attempts:
+		var x := x0 + rng.randf() * cell
+		var z := z0 + rng.randf() * cell
+		var pick := rng.randf()          # always drawn, so a cell's rocks do not shift when an earlier test changes
+		var rk := rng.randf()
+		if not chart.is_inside(x, z, 500.0):
+			continue
+		var k := _pick_kit(rng, layer)
+		if k < 0:
+			continue
+		var edge := layer == 0 and EDGE_KIT.has(String(KIT[k]["name"]))
+		var v := chart.land_value(x, z)
+		if v >= (EDGE_V + EDGE_V_HALF if edge else 0.5):
+			continue
+		if edge and v <= EDGE_V - EDGE_V_HALF:
+			continue
+		var d: float
+		if v > 0.01:
+			d = (0.5 - v) * chart.mpp            # sub-pixel: the land mask is feathered about one pixel
+		else:
+			d = chart.shore_distance_m(x, z)
+		var depth := chart.sea_depth_m(x, z)
+		var lat := clampf(z / chart.height_m, 0.0, 1.0)
+		var rocky := smoothstep(-0.12, 0.3, _noise.get_noise_2d(x, z) + (0.5 - lat) * 0.25)
+		var p: float
+		if layer == 0:
+			# where the water meets the shore: thickest in the first ~60 m, gone by ~220 m, in groups. Rocky stretches have
+			# many more than beaches (which get a few at the points).
+			if depth > 30.0:
+				continue
+			var grp := smoothstep(-0.15, 0.35, _group.get_noise_2d(x, z))
+			if edge:
+				# small rocks: right at the waterline, thickest where the wave runs up and back, in groups
+				var w := 1.0 - smoothstep(0.0, EDGE_V_HALF, absf(v - EDGE_V))
+				p = (0.25 + 0.75 * rocky) * (0.12 + 0.88 * grp) * w * 1.3
+			else:
+				# bigger boulders may stand further out, thinning away by ~170 m
+				p = (0.1 + 0.6 * rocky) * (0.12 + 0.88 * grp) * (1.0 - smoothstep(40.0, 170.0, d))
+		else:
+			# the big shelves and stacks stand just off the shore, on the rocky stretches
+			if d < 15.0 or d > 300.0 or depth > 45.0:
+				continue
+			p = 0.8 * rocky * (1.0 - smoothstep(150.0, 300.0, d))
+		if pick > p:
+			continue
+		if not chart.ports_within(x, z, PORT_CLEAR_M).is_empty():
+			continue
+		var e: Dictionary = KIT[k]
+		var size: Vector3 = _kit[k]["size"]
+		var s := lerpf(float(e["smin"]), float(e["smax"]), pow(rng.randf(), 1.7))
+		var sy := s * rng.randf_range(0.8, 1.25)
+		var vis: Array = e["vis"]
+		var vf := rng.randf_range(float(vis[0]), float(vis[1]))
+		# colder, greyer rock in the north, paler warm rock in the south
+		var tint := Color(0.78, 0.82, 0.88).lerp(Color(1.0, 0.96, 0.88), clampf((lat - 0.35) * 2.0, 0.0, 1.0))
+		tint = tint * rng.randf_range(0.8, 1.0)
+		tint.a = 1.0
+		out.append({
+			"k": k, "x": x, "z": z, "yaw": rng.randf() * TAU, "s": s, "sy": sy,
+			"r": 0.42 * maxf(size.x, size.z) * s, "sink": size.y * sy * (1.0 - vf),
+			"thin": rk, "tint": tint,
+		})
+	return out
+
+
+## Does a hull point at chart (cx, cz) with this clearance touch a rock? (Used by WorldStreamer._ground_check.)
+func blocks(cx: float, cz: float, margin_m: float) -> bool:
+	if streamer == null or streamer.chart == null or _kit.is_empty():
+		return false
+	for layer in 2:
+		var cell := _cell_size(layer)
+		var ci := int(floor(cx / cell))
+		var cj := int(floor(cz / cell))
+		for di in range(-1, 2):
+			for dj in range(-1, 2):
+				for rk in _cell(layer, ci + di, cj + dj):
+					var rr: float = float(rk["r"]) * 0.85 + margin_m
+					var dx: float = cx - float(rk["x"])
+					var dz: float = cz - float(rk["z"])
+					if dx * dx + dz * dz < rr * rr:
+						return true
+	return false
+
+
+# ------------------------------------------------------------------ drawing
+
+func _process(delta: float) -> void:
+	_t -= delta
+	if _t > 0.0:
+		return
+	_t = 0.25
+	if streamer == null or streamer.chart == null or _kit.is_empty():
+		return
+	var cam := get_viewport().get_camera_3d()
+	if cam == null:
+		return
+	var c := Vector2(float(streamer.ship_cx()), float(streamer.ship_cz()))
+	var o := Vector2(float(streamer.origin_x), float(streamer.origin_z))
+	var q := _quality_scale()
+	if c.distance_to(_last_c) < REBUILD_M and o == _last_origin and is_equal_approx(q, _last_q):
+		return
+	_last_c = c
+	_last_origin = o
+	_last_q = q
+	_rebuild(c, o, cam.global_position, q)
+
+
+func _rebuild(c: Vector2, o: Vector2, cam: Vector3, q: float) -> void:
+	var lists: Array = []
+	for _i in KIT.size():
+		lists.append([])
+	# no coast inside the circle: build nothing (the shore distance is 0 on land, so a ship on a beach still builds)
+	var chart: WorldChart = streamer.chart
+	var reach_all := maxf(scatter_radius_m, hero_radius_m)
+	if chart.shore_distance_m(c.x, c.y) > reach_all + 400.0:
+		for k in KIT.size():
+			if _kit[k]["ok"]:
+				(_kit[k]["mm"] as MultiMesh).instance_count = 0
+		return
+	for layer in 2:
+		var cell := _cell_size(layer)
+		var reach := hero_radius_m if layer == 1 else scatter_radius_m * (0.6 if q < 1.0 else 1.0)
+		var cr := int(ceil(reach / cell))
+		var ci0 := int(floor(c.x / cell))
+		var cj0 := int(floor(c.y / cell))
+		for di in range(-cr, cr + 1):
+			for dj in range(-cr, cr + 1):
+				for rk in _cell(layer, ci0 + di, cj0 + dj):
+					var k: int = rk["k"]
+					if not _kit[k]["ok"]:
+						continue
+					if layer == 0 and float(rk["thin"]) > q:
+						continue
+					var rng_m: float = minf(float(KIT[k]["range"]), reach)
+					var dx: float = float(rk["x"]) - c.x
+					var dz: float = float(rk["z"]) - c.y
+					if dx * dx + dz * dz > rng_m * rng_m:
+						continue
+					lists[k].append(rk)
+	var total := 0
+	for k in KIT.size():
+		if not _kit[k]["ok"]:
+			continue
+		var mm: MultiMesh = _kit[k]["mm"]
+		var arr: Array = lists[k]
+		mm.instance_count = arr.size()
+		total += arr.size()
+		for j in arr.size():
+			var rk: Dictionary = arr[j]
+			var wx: float = float(rk["x"]) - o.x
+			var wz: float = float(rk["z"]) - o.y
+			var dcam := (wx - cam.x) * (wx - cam.x) + (wz - cam.z) * (wz - cam.z)
+			var y: float = -float(rk["sink"]) - dcam * _curve_k
+			var s: float = rk["s"]
+			var b := Basis(Vector3.UP, float(rk["yaw"])).scaled(Vector3(s, float(rk["sy"]), s))
+			mm.set_instance_transform(j, Transform3D(b, Vector3(wx, y, wz)))
+			mm.set_instance_color(j, rk["tint"])
+	if not _reported:
+		_reported = true
+		print("RockField: ", total, " rocks around the ship")

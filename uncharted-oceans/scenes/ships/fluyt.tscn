@@ -1,0 +1,158 @@
+[gd_scene format=3]
+
+[ext_resource type="PackedScene" path="res://assets/ships/fluyt/Fluyt.glb" id="1_c8x83"]
+[ext_resource type="Script" path="res://scripts/ship_rope_rigs.gd" id="2_v7jxg"]
+[ext_resource type="Script" path="res://scripts/ship_ladder.gd" id="3_b1rm7"]
+[ext_resource type="Script" path="res://scripts/ship_climb_point.gd" id="4_lkxsm"]
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_hgn2f"]
+size = Vector3(1.5, 8.927066, 0.175)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_uxer0"]
+size = Vector3(1.6, 11.074407, 0.175)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_bsnc1"]
+size = Vector3(1.4, 4.492215, 0.175)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_n4qns"]
+size = Vector3(1.5, 8.927066, 0.175)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_25kxl"]
+size = Vector3(1.6, 11.074407, 0.175)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_0xnad"]
+size = Vector3(1.4, 4.492215, 0.175)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_8jiyt"]
+size = Vector3(0.8, 4.2, 0.1)
+
+[node name="FluytShip" type="Node3D" unique_id=550583862]
+
+[node name="Fluyt" parent="." unique_id=1688208491 instance=ExtResource("1_c8x83")]
+transform = Transform3D(-1, 0, -8.742278e-08, 0, 1, 0, 8.742278e-08, 0, -1, 0, 0, 0)
+
+[node name="RopeRigs" type="Node" parent="." unique_id=551741765]
+script = ExtResource("2_v7jxg")
+
+[node name="Climbing" type="Node3D" parent="." unique_id=1668862885]
+
+[node name="Shroud_Fore_Port" type="Area3D" parent="Climbing" unique_id=1934688191]
+transform = Transform3D(-2.3283064e-10, 0.22403778, -0.97458047, 0.0057470533, 0.97456443, 0.2240341, 0.99998355, -0.005600966, -0.0012875573, -1.9000001, 6.95, -6.275)
+script = ExtResource("3_b1rm7")
+grab_slack = 0.5
+snap_depth = true
+center_on_grab = false
+rigging_id = "shroud_a"
+rigging_mast = "fore"
+
+[node name="Box" type="CollisionShape3D" parent="Climbing/Shroud_Fore_Port" unique_id=1611122324]
+shape = SubResource("BoxShape3D_hgn2f")
+
+[node name="Shroud_Main_Port" type="Area3D" parent="Climbing" unique_id=872852070]
+transform = Transform3D(0, 0.2212308, -0.97522146, 0, 0.97522146, 0.22123079, 1, 0, 0, -2.075, 8, -0.45)
+script = ExtResource("3_b1rm7")
+grab_slack = 0.5
+snap_depth = true
+center_on_grab = false
+rigging_id = "shroud_a"
+
+[node name="Box" type="CollisionShape3D" parent="Climbing/Shroud_Main_Port" unique_id=546101254]
+shape = SubResource("BoxShape3D_uxer0")
+
+[node name="Shroud_Mizzen_Port" type="Area3D" parent="Climbing" unique_id=1819107046]
+transform = Transform3D(0, 0.2671288, -0.96366084, -0.11550087, 0.95721143, 0.265341, 0.9933074, 0.111303665, 0.030853609, -1.3, 6.75, 10.05)
+script = ExtResource("3_b1rm7")
+grab_slack = 0.5
+snap_depth = true
+center_on_grab = false
+rigging_id = "shroud_a"
+rigging_mast = "mizzen"
+
+[node name="Box" type="CollisionShape3D" parent="Climbing/Shroud_Mizzen_Port" unique_id=1869431605]
+shape = SubResource("BoxShape3D_bsnc1")
+
+[node name="Shroud_Fore_Stbd" type="Area3D" parent="Climbing" unique_id=1998111533]
+transform = Transform3D(-2.3283064e-10, -0.22403778, 0.97458047, -0.0057470533, 0.97456443, 0.2240341, -0.99998355, -0.005600966, -0.0012875573, 1.9000001, 6.95, -6.275)
+script = ExtResource("3_b1rm7")
+grab_slack = 0.5
+snap_depth = true
+center_on_grab = false
+rigging_id = "shroud_b"
+rigging_mast = "fore"
+
+[node name="Box" type="CollisionShape3D" parent="Climbing/Shroud_Fore_Stbd" unique_id=801060762]
+shape = SubResource("BoxShape3D_n4qns")
+
+[node name="Shroud_Main_Stbd" type="Area3D" parent="Climbing" unique_id=1298703155]
+transform = Transform3D(0, -0.2212308, 0.97522146, 0, 0.97522146, 0.22123079, -1, 0, 0, 2.075, 8, -0.45)
+script = ExtResource("3_b1rm7")
+grab_slack = 0.5
+snap_depth = true
+center_on_grab = false
+rigging_id = "shroud_b"
+
+[node name="Box" type="CollisionShape3D" parent="Climbing/Shroud_Main_Stbd" unique_id=985785053]
+shape = SubResource("BoxShape3D_25kxl")
+
+[node name="Shroud_Mizzen_Stbd" type="Area3D" parent="Climbing" unique_id=200294357]
+transform = Transform3D(0, -0.2671288, 0.96366084, 0.11550087, 0.95721143, 0.265341, -0.9933074, 0.111303665, 0.030853609, 1.3, 6.75, 10.05)
+script = ExtResource("3_b1rm7")
+grab_slack = 0.5
+snap_depth = true
+center_on_grab = false
+rigging_id = "shroud_b"
+rigging_mast = "mizzen"
+
+[node name="Box" type="CollisionShape3D" parent="Climbing/Shroud_Mizzen_Stbd" unique_id=998623003]
+shape = SubResource("BoxShape3D_0xnad")
+
+[node name="HoldLadder" type="Area3D" parent="Climbing" unique_id=107469642]
+transform = Transform3D(-1, 0, -8.742278e-08, 0, 1, 0, 8.742278e-08, 0, -1, 0, 0.32, 1.9)
+script = ExtResource("3_b1rm7")
+
+[node name="Box" type="CollisionShape3D" parent="Climbing/HoldLadder" unique_id=1651879008]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0.15)
+shape = SubResource("BoxShape3D_8jiyt")
+
+[node name="Perch_Fore" type="Marker3D" parent="Climbing" unique_id=1445003936]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 13.2, -6.61)
+script = ExtResource("4_lkxsm")
+mast = "fore"
+
+[node name="Perch_Main" type="Marker3D" parent="Climbing" unique_id=913368763]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 15.2, -0.85)
+script = ExtResource("4_lkxsm")
+
+[node name="ShroudTop_Fore_Port" type="Marker3D" parent="Climbing" unique_id=417391718]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.7, 11.4, -6.67)
+script = ExtResource("4_lkxsm")
+point_id = "shroud_top_a"
+mast = "fore"
+
+[node name="ShroudTop_Fore_Stbd" type="Marker3D" parent="Climbing" unique_id=1683957427]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.7, 11.4, -6.67)
+script = ExtResource("4_lkxsm")
+point_id = "shroud_top_b"
+mast = "fore"
+
+[node name="ShroudTop_Main_Port" type="Marker3D" parent="Climbing" unique_id=1977518758]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.7, 13.4, -0.9)
+script = ExtResource("4_lkxsm")
+point_id = "shroud_top_a"
+
+[node name="ShroudTop_Main_Stbd" type="Marker3D" parent="Climbing" unique_id=1927086316]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.7, 13.4, -0.9)
+script = ExtResource("4_lkxsm")
+point_id = "shroud_top_b"
+
+[node name="ShroudTop_Mizzen_Port" type="Marker3D" parent="Climbing" unique_id=622579212]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.64, 8.9, 10.32)
+script = ExtResource("4_lkxsm")
+point_id = "shroud_top_a"
+mast = "mizzen"
+
+[node name="ShroudTop_Mizzen_Stbd" type="Marker3D" parent="Climbing" unique_id=689063595]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.64, 8.9, 10.32)
+script = ExtResource("4_lkxsm")
+point_id = "shroud_top_b"
+mast = "mizzen"

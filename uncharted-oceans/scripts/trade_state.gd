@@ -112,3 +112,14 @@ static func box_stock(key: String) -> Array:
 	if not _stock.has(key):
 		_stock[key] = []
 	return _stock[key]
+
+
+## Back to a fresh purse and empty markets (a new run from the main menu, the tutorial). Keeps the statics from leaking
+## from one session into the next.
+static func reset() -> void:
+	gold = 5000
+	markets.clear()
+	_stock.clear()
+	cost_basis.clear()
+	_pool.clear()
+	_last_day = -1

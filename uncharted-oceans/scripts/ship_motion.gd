@@ -35,6 +35,9 @@ extends Node3D
 @export var roll_gain := 1.25
 @export var draft_offset := 0.0
 @export var ahead_speed := 2.6   ## m/s when F is on (~5 knots)
+## F toggles the test engine, which overrides the sails with a steady ahead_speed whatever the wind does. Off in the real game
+## (pressing F made every ship do exactly 5.1 kn, even straight into the wind); turn it on in a test scene.
+@export var test_engine_key := false
 @export_range(0.0, 360.0) var heading_deg := 0.0
 
 ## Steering: the wheel (ship_wheel.gd) sets rudder, -1 = hard to port .. +1 = hard to starboard.
@@ -45,6 +48,10 @@ extends Node3D
 @export var helm_enabled := true
 ## Broadside guns fired from the wheel with the Left / Right arrow keys, ammunition from the hold's shot crates (ship_cannons.gd).
 @export var cannons_enabled := true
+## Cannon settings kept with the scene, by name: {"muzzle_speed": 100.0, "ball_size": 0.4, "reload_s": 4.0}. Any exported setting of
+## ship_cannons.gd works (muzzle_speed, elevation_deg, spread_deg, ball_size, trail_size, ball_trail, ball_debug, reload_s,
+## smoke_size, smoke_amount, shots_per_crate, use_ammo, recoil_m ...). The ShipCannons node only exists while the game runs.
+@export var cannon_settings: Dictionary = {}
 @export var windsock_enabled := true
 ## The white puffs thrown up at the bow while she is under way (the wake itself is in the water shader).
 @export var bow_spray := true
@@ -87,7 +94,7 @@ extends Node3D
 ## Fills small holes in the fore deck's collision (ship_deck_patch.gd), e.g. the gap by the anchor spools.
 @export var deck_patch_enabled := true
 ## Size class for docking (ShipClasses.Size): sets the light rectangle at a berth and how gently she must arrive.
-@export_enum("Small", "Medium", "Large", "Schooner") var ship_class := 1
+@export_enum("Small", "Medium", "Large", "Schooner", "Fluyt") var ship_class := 1
 @export var max_turn_rate_deg := 4.0
 @export var turn_lag := 2.5
 var rudder := 0.0
@@ -99,6 +106,9 @@ var side_speed := 0.0        ## m/s sideways (leeway), + starboard
 var sail_roll := 0.0         ## radians, + raises the starboard side (the sails' heel, negative = leaning starboard)
 ## Current turn, degrees per second (+ = to port, the way heading_deg grows).
 var yaw_rate_deg := 0.0
+## Emitted at the end of every physics tick, once she has moved. WorldStreamer keeps the player stuck to the wheel in
+## fast time from here (so he moves with her before anything else looks at where he is).
+signal moved
 
 ## Build an outside collision skin from the visible hull mesh (see _build_hull_skin).
 @export var hull_skin := true
@@ -125,9 +135,17 @@ var _hull_bow := 10.0
 var _hull_stern := -10.0
 var _spray: GPUParticles3D
 var _spray_pm: ParticleProcessMaterial
-var _spray_mat: StandardMaterial3D
-var _spray_drop_mat: StandardMaterial3D
+var _spray_mat: ShaderMaterial
+var _spray_drop_mat: ShaderMaterial
 var _spray_blobs: GPUParticles3D
+## The hull's waterline table (see _compute_waterline), the same cut MASK_HI_Y higher, and the top of the hull: the sea
+## mask and the bow spray (spray_hull_cull.gdshader) both use them so nothing wet is drawn inside the hull.
+const MASK_HI_Y := 0.6
+var _mask_hb := PackedFloat32Array()
+var _mask_hi := PackedFloat32Array()
+var _mask_y0 := 0.0
+var _mask_step := 1.0
+var _mask_top := 3.0
 var _spray_t := 0.0
 
 func _ready() -> void:
@@ -149,10 +167,21 @@ func _ready() -> void:
 			push_warning("ship_motion: no waterline data on the ship; sea will show inside the hull")
 		else:
 			var hb := PackedFloat32Array(ex["waterline_half_beam"])
+			_mask_hb = hb
+			_mask_y0 = float(ex["waterline_y_min"])
+			_mask_step = float(ex["waterline_y_step"])
+			_mask_hi = _cut_table(_ship, MASK_HI_Y, _mask_y0, _mask_step, hb.size())
+			for i in mini(_mask_hi.size(), hb.size()):
+				_mask_hi[i] = maxf(_mask_hi[i], hb[i])      # a station the cut missed keeps the waterline width
+			if _mask_hi.size() < hb.size():
+				_mask_hi = hb.duplicate()
+			_mask_top = _hull_top(_ship)
 			mat.set_shader_parameter("half_beam", hb)
+			mat.set_shader_parameter("half_beam_hi", _mask_hi)
+			mat.set_shader_parameter("hi_y", MASK_HI_Y)
 			mat.set_shader_parameter("sample_count", hb.size())
-			mat.set_shader_parameter("y_min", float(ex["waterline_y_min"]))
-			mat.set_shader_parameter("y_step", float(ex["waterline_y_step"]))
+			mat.set_shader_parameter("y_min", _mask_y0)
+			mat.set_shader_parameter("y_step", _mask_step)
 			_setup_wake(mat, ex)
 	if _ocean:
 		_heave = _ocean.get_height(global_position.x, global_position.z)
@@ -203,6 +232,8 @@ func _ready() -> void:
 	if wheel_enabled and cannons_enabled and get_node_or_null("ShipCannons") == null:
 		var cannons = load("res://scripts/ship_cannons.gd").new()
 		cannons.name = "ShipCannons"
+		for k in cannon_settings:
+			cannons.set(k, cannon_settings[k])
 		add_child(cannons)
 	if log_line_enabled and get_node_or_null("ShipLogLine") == null:
 		var ll = load("res://scripts/ship_log_line.gd").new()
@@ -319,11 +350,41 @@ func _unsync_bodies(n: Node) -> void:
 ## The waterline table (half the hull's width at the water, every y_step metres along the model's own -Z) cut from the hull mesh where
 ## it crosses the model's y = 0 (the water line), for a model that came without waterline_* extras. Same table the extras hold.
 func _compute_waterline(ship: Node3D) -> Dictionary:
+	var pts := _cut_points(ship, 0.0)
+	return _table_from(pts)
+
+
+## The same half-beam table cut at plane_y (model space), binned like an existing table.
+func _cut_table(ship: Node3D, plane_y: float, y0: float, step: float, count: int) -> PackedFloat32Array:
+	var hb := PackedFloat32Array()
+	hb.resize(count)
+	for p in _cut_points(ship, plane_y):
+		var i := roundi((p.x - y0) / step)
+		if i >= 0 and i < count:
+			hb[i] = maxf(hb[i], p.y)
+	return hb
+
+
+## Highest point of the hull mesh, model space (the bulwark tops).
+func _hull_top(ship: Node3D) -> float:
 	var mi := ship.find_child(hull_mesh_name, true, false) as MeshInstance3D
 	if mi == null or mi.mesh == null:
-		return {}
+		return 3.0
 	var to_model := ship.global_transform.affine_inverse() * mi.global_transform
-	var pts: Array[Vector2] = []      # (t = -z along the model, |x|) where a hull edge crosses y = 0
+	var top := -1.0e9
+	var ab := mi.mesh.get_aabb()
+	for k in 8:
+		top = maxf(top, (to_model * ab.get_endpoint(k)).y)
+	return top
+
+
+## Where the hull's edges cross the plane y = plane_y (model space): (t = -z along the model, |x|).
+func _cut_points(ship: Node3D, plane_y: float) -> Array[Vector2]:
+	var pts: Array[Vector2] = []
+	var mi := ship.find_child(hull_mesh_name, true, false) as MeshInstance3D
+	if mi == null or mi.mesh == null:
+		return pts
+	var to_model := ship.global_transform.affine_inverse() * mi.global_transform
 	for s in mi.mesh.get_surface_count():
 		var arr := mi.mesh.surface_get_arrays(s)
 		var v: PackedVector3Array = arr[Mesh.ARRAY_VERTEX]
@@ -336,10 +397,14 @@ func _compute_waterline(ship: Node3D) -> Dictionary:
 			for k in 3:
 				var a: Vector3 = tri[k]
 				var b: Vector3 = tri[(k + 1) % 3]
-				if (a.y < 0.0) != (b.y < 0.0):
-					var f := a.y / (a.y - b.y)
+				if (a.y < plane_y) != (b.y < plane_y):
+					var f := (a.y - plane_y) / (a.y - b.y)
 					var p := a.lerp(b, f)
 					pts.append(Vector2(-p.z, absf(p.x)))
+	return pts
+
+
+func _table_from(pts: Array[Vector2]) -> Dictionary:
 	if pts.size() < 8:
 		return {}
 	var lo := 1.0e9
@@ -371,12 +436,25 @@ func _find_waterline(n: Node) -> Dictionary:
 
 func _unhandled_input(e: InputEvent) -> void:
 	if e is InputEventKey and e.pressed and not e.echo:
-		if e.physical_keycode == KEY_R:
+		if e.physical_keycode == KEY_R and test_engine_key:      # debug only: R is also the cargo-rotate and map key, and used to drop the ship out of the waves
 			floating = not floating
-		elif e.physical_keycode == KEY_F:
+		elif e.physical_keycode == KEY_F and test_engine_key:
 			underway = not underway
 
 ## Target heave, pitch, roll from the water under the sample points (least-squares plane).
+## After the ship has been moved a long way (sleep, wrap, rebase): put her heave straight on the sea at the new spot, so she does not
+## rise through (or drop out from under) whoever is standing on her deck while the spring catches up. Returns how far she moved up.
+func snap_to_water() -> float:
+	if _ocean == null:
+		return 0.0
+	var t := water_pose() * _amount + load_offset
+	var old_y := position.y
+	_heave = t.x
+	_heave_v = 0.0
+	position.y = _heave + draft_offset
+	return position.y - old_y
+
+
 func water_pose() -> Vector3:
 	var yaw := deg_to_rad(heading_deg)
 	var fwd := Vector2(-sin(yaw), -cos(yaw))    # world xz of ship -Z
@@ -437,6 +515,7 @@ func _physics_process(delta: float) -> void:
 	position.y = _heave + draft_offset
 	basis = Basis(Vector3.UP, deg_to_rad(heading_deg)) \
 		* Basis(Vector3.RIGHT, _pitch) * Basis(Vector3.BACK, _roll)
+	moved.emit()
 
 ## World velocity of a point riding on the ship this physics frame (deck, ladder, hold water).
 ## Used to hand the ship's motion to a player who jumps, swims or climbs off it.
@@ -535,12 +614,8 @@ func _make_spray(beam: float) -> void:
 	# A fine mist, like the wave spray (wave_spray.gd): lots of thin see-through drops stretched along their flight, with
 	# small translucent blobs of whitewater among them (a child system sharing the same process material), softly edged
 	# but not the fluff of a plain gradient puff.
-	_spray_drop_mat = StandardMaterial3D.new()
-	_spray_drop_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	_spray_drop_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	_spray_drop_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
-	_spray_drop_mat.vertex_color_use_as_albedo = true
-	_spray_drop_mat.albedo_color = Color(1, 1, 1, 0.6)
+	_spray_drop_mat = _spray_cull_mat(false)
+	_spray_drop_mat.set_shader_parameter("albedo", Color(1, 1, 1, 0.6))
 	_spray.draw_pass_1 = _bow_drop_mesh()
 	var blob := Gradient.new()
 	blob.offsets = PackedFloat32Array([0.0, 0.5, 1.0])
@@ -552,14 +627,9 @@ func _make_spray(beam: float) -> void:
 	blob_tex.fill_to = Vector2(1.0, 0.5)
 	blob_tex.width = 64
 	blob_tex.height = 64
-	_spray_mat = StandardMaterial3D.new()
-	_spray_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	_spray_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	_spray_mat.billboard_mode = BaseMaterial3D.BILLBOARD_PARTICLES
-	_spray_mat.billboard_keep_scale = true
-	_spray_mat.vertex_color_use_as_albedo = true
-	_spray_mat.albedo_texture = blob_tex
-	_spray_mat.albedo_color = Color(1, 1, 1, 0.5)
+	_spray_mat = _spray_cull_mat(true)
+	_spray_mat.set_shader_parameter("albedo_tex", blob_tex)
+	_spray_mat.set_shader_parameter("albedo", Color(1, 1, 1, 0.5))
 	var quad := QuadMesh.new()
 	quad.size = Vector2(0.22, 0.22)        # with the particle scale: blobs about 13-30 cm (they were 30-70 cm)
 	quad.material = _spray_mat
@@ -578,6 +648,20 @@ func _make_spray(beam: float) -> void:
 	_spray_blobs.draw_pass_1 = quad
 	_spray.add_child(_spray_blobs)
 	add_child(_spray)
+
+## The bow spray's material: unshaded and see-through, and never drawn inside the hull (spray_hull_cull.gdshader).
+func _spray_cull_mat(billboard: bool) -> ShaderMaterial:
+	var m := ShaderMaterial.new()
+	m.shader = load("res://shaders/spray_hull_cull.gdshader") as Shader
+	m.set_shader_parameter("billboard", billboard)
+	m.set_shader_parameter("half_beam", _mask_hb)
+	m.set_shader_parameter("half_beam_hi", _mask_hi)
+	m.set_shader_parameter("hi_y", MASK_HI_Y)
+	m.set_shader_parameter("sample_count", _mask_hb.size())
+	m.set_shader_parameter("y_min", _mask_y0)
+	m.set_shader_parameter("y_step", _mask_step)
+	m.set_shader_parameter("top_y", _mask_top + 0.3)
+	return m
 
 ## A crossed pair of thin quads, +Y along the flight (the head), the tail end fading: a drop of water in motion.
 func _bow_drop_mesh() -> ArrayMesh:
@@ -627,13 +711,16 @@ func _update_spray(delta: float) -> void:
 			var sun := _ocean.get_node_or_null(_ocean.sun_path) as DirectionalLight3D
 			if sun:
 				lit = (0.2 + 0.8 * clampf(sun.light_energy, 0.0, 1.0)) if sun.visible else 0.2
-		_spray_mat.albedo_color = Color(lit, lit, lit, 0.5)
-		_spray_drop_mat.albedo_color = Color(lit, lit, lit, 0.6)
+		_spray_mat.set_shader_parameter("albedo", Color(lit, lit, lit, 0.5))
+		_spray_drop_mat.set_shader_parameter("albedo", Color(lit, lit, lit, 0.6))
 
 func _process(delta: float) -> void:
 	if _ocean and _ship and _ocean.get_ocean_material():
 		var m := _ocean.get_ocean_material()
 		m.set_shader_parameter("ship_inv", Projection(_ship.global_transform.affine_inverse()))
+		if _spray_mat != null:
+			_spray_mat.set_shader_parameter("ship_inv", Projection(_ship.global_transform.affine_inverse()))
+			_spray_drop_mat.set_shader_parameter("ship_inv", Projection(_ship.global_transform.affine_inverse()))
 		# the wake follows the speed through the water, smoothed so it builds up and dies away rather than snapping
 		_wake_speed = lerpf(_wake_speed, absf(speed), 1.0 - exp(-delta / 1.2))
 		m.set_shader_parameter("wake_speed", _wake_speed)

@@ -24,6 +24,7 @@ const KINDS := {
 	"drink_market": {"title": "Wine and Spirits", "goods": "tavern", "model": "Sailor"},
 	"armory": {"title": "Armoury", "goods": "armory", "model": "Smith"},
 	"dock_office": {"title": "Harbor Master", "goods": "", "model": "Sailor", "note": "Harbour business. Nothing here yet."},
+	"sails_rope": {"title": "Sailmaker", "goods": "", "model": "Chandler", "note": "Sailcloth and cordage. Nothing for sale yet."},
 }
 
 var kind := ""

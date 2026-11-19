@@ -1,0 +1,220 @@
+class_name WorldGround
+extends RefCounted
+## The ground of the world chart on the CPU: the very same numbers the terrain shader draws (chart_ground_y() in
+## world_ground.gdshaderinc plus the cliffs of terrain_y() in world_terrain.gdshader). The shore collider
+## (shore_collider.gd) and the ship's keel test (WorldStreamer._ground_check) use it, so what you bump into is exactly
+## the beach you see.
+##
+## Keep it in step with the shaders: the constants below are their uniforms' values (relief_m, coast_level, detail_m,
+## cliff_m) and BEACH_DROP_M is the shader's const. Chart coordinates: metres, x east, z south.
+## Read-only after _init, so it is safe to call from worker threads.
+
+const RELIEF_M := 1100.0
+const COAST_LEVEL := 0.2431
+const DETAIL_M := 55.0
+const CLIFF_M := 26.0
+const WATERLINE_L := 0.45
+const SHORE_BAND_M := 900.0
+
+var _w := 0
+var _h := 0
+var _mpp := 1.0
+var _size := Vector2.ONE
+var _land := PackedByteArray()
+var _shore := PackedByteArray()
+var _h16 := PackedByteArray()      # RGB8: R = high byte, G = low byte
+var _h16_w := 0
+var _h16_h := 0
+## The loaded small port's pad (port_pad.gd) that joins its land plate to the chart's land, or null. Set by
+## WorldStreamer; swapped whole (never edited), so worker threads reading it are safe.
+var pad = null
+
+
+func _init(c: WorldChart) -> void:
+	_w = c.px_w
+	_h = c.px_h
+	_mpp = c.mpp
+	_size = Vector2(c.width_m, c.height_m)
+	_land = c._land
+	_shore = c._shore
+	var img: Image = c._img.get("height16")
+	if img != null:
+		_h16 = img.get_data()
+		_h16_w = img.get_width()
+		_h16_h = img.get_height()
+
+
+## Ground height (m, 0 = still water) at chart x, z as the terrain draws it, cliffs included.
+func terrain_y(x: float, z: float) -> float:
+	var ps := pad_sample(x, z)
+	var y := PortPadScript.blend(_ground_y0(x, z), ps)
+	if y <= 0.0:
+		return y
+	var cp := Vector2(x, z)
+	var rock := coast_kind(cp).y * (1.0 - maxf(ps.y, ps.z))      # no cliffs round a port's plate
+	if rock > 0.0:
+		y += rock * cliff_height(cp) * smoothstep(5.0, 38.0, shore_d(x, z))
+	return y
+
+
+const PortPadScript := preload("res://scripts/port_pad.gd")
+
+## (height, land weight, basin weight) of the port pad at chart x, z; zeros where there is none.
+func pad_sample(x: float, z: float) -> Vector3:
+	var pd = pad
+	if pd == null:
+		return Vector3.ZERO
+	var l: Vector2 = pd.to_local(x, z, _size.x, _size.y)
+	return pd.sample_local(l.x, l.y)
+
+
+## Signed distance (m) from chart x, z to the waterline: + on land, - at sea (shore_d in world_ground.gdshaderinc).
+func shore_d(x: float, z: float) -> float:
+	var u := x / _mpp - 0.5
+	var v := z / _mpp - 0.5
+	var x0 := int(floor(u))
+	var y0 := int(floor(v))
+	var fx := u - float(x0)
+	var fy := v - float(y0)
+	var a := _texel(_land, x0, y0) / 255.0
+	var b := _texel(_land, x0 + 1, y0) / 255.0
+	var c := _texel(_land, x0, y0 + 1) / 255.0
+	var e := _texel(_land, x0 + 1, y0 + 1) / 255.0
+	var l := lerpf(lerpf(a, b, fx), lerpf(c, e, fx), fy)
+	var g := Vector2(lerpf(b - a, e - c, fy), lerpf(c - a, e - b, fx)) / _mpp
+	var gl := maxf(g.length(), 0.12 / _mpp)
+	var d := (l - WATERLINE_L) / gl
+	var cp := Vector2(x, z)
+	d += (fbm(cp / 90.0 + Vector2(7.7, 3.1)) - 0.47) * 28.0 + (fbm(cp / 23.0 + Vector2(1.9, 5.3)) - 0.47) * 6.0
+	return d
+
+
+## (gradient under the water, gradient of the beach, beach width m) by coast kind (shore_slopes in the shader).
+func shore_slopes(k: Vector3) -> Vector3:
+	return k.x * Vector3(1.0 / 32.0, 1.0 / 16.0, 55.0) + k.y * Vector3(1.0 / 6.0, 1.0 / 2.5, 6.0) + k.z * Vector3(1.0 / 16.0, 1.0 / 9.0, 18.0)
+
+
+## Water depth (m) at chart x, z over the ground the terrain draws (0 on land).
+func depth_m(x: float, z: float) -> float:
+	return maxf(-ground_y(x, z), 0.0)
+
+
+## The ground without the cliffs (chart_ground_y in world_ground.gdshaderinc): the near-shore profile within
+## SHORE_BAND_M of the waterline, the chart's own ground beyond.
+func ground_y(x: float, z: float) -> float:
+	return PortPadScript.blend(_ground_y0(x, z), pad_sample(x, z))
+
+
+## ground_y without any port pad (chart_ground_y0 in the shader).
+func _ground_y0(x: float, z: float) -> float:
+	var land := _bilinear(_land, x, z) / 255.0
+	var t := smoothstep(0.42, 0.58, land)
+	var shore := _bilinear(_shore, x, z)
+	var sea_y := -(_shelf_depth(shore * _mpp / 1000.0) - 2.0)
+	var lh := maxf(0.0, (_h16_at(x, z) - COAST_LEVEL) / (1.0 - COAST_LEVEL))
+	var rough := 0.0
+	if lh > 0.0:
+		rough = (fbm(Vector2(x, z) / 900.0) - 0.45) * DETAIL_M * smoothstep(0.0, 0.08, lh)
+	var land_y := lh * RELIEF_M + rough * 0.5 + 1.0
+	var raw := lerpf(sea_y, land_y, t)
+	var d := shore_d(x, z)
+	if absf(d) >= SHORE_BAND_M:
+		return raw
+	var sl := shore_slopes(coast_kind(Vector2(x, z)))
+	if d < 0.0:
+		var xx := -d
+		var cap := 12.0 * (1.0 - smoothstep(550.0, SHORE_BAND_M, xx))
+		return -maxf(minf(xx * sl.x, cap), maxf(-raw, 0.0) * smoothstep(300.0, SHORE_BAND_M, xx))
+	var beach := d * sl.y
+	var k := smoothstep(sl.z, sl.z + 220.0, d)
+	return maxf(lerpf(beach, maxf(land_y, beach), k), 0.0)
+
+
+## (beach, rocky, green) weights of the coast here (coast_kind in world_ground.gdshaderinc).
+func coast_kind(cp: Vector2) -> Vector3:
+	var lat := clampf(cp.y / _size.y, 0.0, 1.0)
+	var a := fbm(cp / 2600.0 + Vector2(41.3, 7.9)) + (lat - 0.5) * 0.12
+	var b := fbm(cp / 1700.0 + Vector2(-13.7, 88.1))
+	var rock := 1.0 - smoothstep(0.38, 0.46, a)
+	var beach := (1.0 - rock) * smoothstep(0.42, 0.5, b)
+	return Vector3(beach, rock, 1.0 - rock - beach)
+
+
+func cliff_height(cp: Vector2) -> float:
+	return CLIFF_M * (0.4 + 1.2 * fbm(cp / 650.0 + Vector2(3.1, 9.7)))
+
+
+# ---------------------------------------------------------------- sampling (as the GPU does it)
+
+func _bilinear(data: PackedByteArray, x: float, z: float) -> float:
+	var u := x / _mpp - 0.5
+	var v := z / _mpp - 0.5
+	var x0 := int(floor(u))
+	var y0 := int(floor(v))
+	var fx := u - float(x0)
+	var fy := v - float(y0)
+	return lerpf(lerpf(_texel(data, x0, y0), _texel(data, x0 + 1, y0), fx),
+			lerpf(_texel(data, x0, y0 + 1), _texel(data, x0 + 1, y0 + 1), fx), fy)
+
+
+func _texel(data: PackedByteArray, x: int, y: int) -> float:
+	return float(data[posmod(y, _h) * _w + posmod(x, _w)])      # the world wraps
+
+
+func _h16_texel(x: int, y: int) -> float:
+	var i := (posmod(y, _h16_h) * _h16_w + posmod(x, _h16_w)) * 3
+	return (float(_h16[i]) * 256.0 + float(_h16[i + 1])) / 65535.0
+
+
+func _h16_at(x: float, z: float) -> float:
+	if _h16.is_empty():
+		return 0.0
+	var u := x / _size.x * float(_h16_w) - 0.5
+	var v := z / _size.y * float(_h16_h) - 0.5
+	var x0 := int(floor(u))
+	var y0 := int(floor(v))
+	var fx := u - float(x0)
+	var fy := v - float(y0)
+	return lerpf(lerpf(_h16_texel(x0, y0), _h16_texel(x0 + 1, y0), fx),
+			lerpf(_h16_texel(x0, y0 + 1), _h16_texel(x0 + 1, y0 + 1), fx), fy)
+
+
+static func _shelf_depth(d_km: float) -> float:
+	if d_km < 12.0:
+		return lerpf(2.0, 40.0, pow(d_km / 12.0, 0.8))
+	return lerpf(40.0, 2500.0, pow(clampf((d_km - 12.0) / 30.0, 0.0, 1.0), 1.5))
+
+
+# ---------------------------------------------------------------- noise (hash12 / vnoise / fbm of the shaders)
+
+static func _fr(v: float) -> float:
+	return v - floor(v)
+
+
+static func _hash12(p: Vector2) -> float:
+	var x := _fr(p.x * 0.1031)
+	var y := _fr(p.y * 0.1031)
+	var z := x
+	var d := x * (y + 33.33) + y * (z + 33.33) + z * (x + 33.33)
+	x += d
+	y += d
+	z += d
+	return _fr((x + y) * z)
+
+
+static func _vnoise(p: Vector2) -> float:
+	var i := p.floor()
+	var f := p - i
+	var u := f * f * (Vector2(3.0, 3.0) - 2.0 * f)
+	return lerpf(lerpf(_hash12(i), _hash12(i + Vector2(1, 0)), u.x),
+			lerpf(_hash12(i + Vector2(0, 1)), _hash12(i + Vector2(1, 1)), u.x), u.y)
+
+
+static func fbm(p: Vector2) -> float:
+	var a := 0.5
+	var s := 0.0
+	for i in 4:
+		s += a * _vnoise(p)
+		p = p * 2.03 + Vector2(17.3, 17.3)
+		a *= 0.5
+	return s

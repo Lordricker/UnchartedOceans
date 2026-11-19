@@ -21,19 +21,22 @@ enum Phase { IDLE, LIE, FADE_OUT, BLACK, FADE_IN, WAKE }
 
 @export_group("Sleep sequence (seconds)")
 ## The camera lies back onto the bed.
-@export var lie_down_time := 0.65
-@export var fade_out_time := 0.6
-## Minimum time on the black screen (the message is read here). It also waits for a port that is still loading.
-@export var black_hold := 1.3
+## Kept short (Ben, 2026-11-18): the sequence lasts only about as long as it takes to read the wake-up message.
+@export var lie_down_time := 0.0
+@export var fade_out_time := 0.2
+## Time the message is held on the black screen (Ben, 2026-11-19: fade out 0.2, text 0.8, fade in 0.2). Reading time is
+## no longer added (read_chars_per_s is unused). It still waits for a port that is still loading.
+@export var black_hold := 0.8
+@export var read_chars_per_s := 28.0
 @export var loading_wait_max := 6.0
-@export var message_pop_time := 0.2
-@export var fade_in_time := 0.9
+@export var message_pop_time := 0.0
+@export var fade_in_time := 0.2
 ## After the screen is fully clear, the message stays this long, then fades out.
-@export var message_linger := 0.6
-@export var message_fade_time := 0.5
+@export var message_linger := 0.0
+@export var message_fade_time := 0.0
 ## After the screen is fully clear, you get up (camera back to eye height) after this delay.
-@export var get_up_delay := 0.3
-@export var get_up_time := 0.7
+@export var get_up_delay := 0.0
+@export var get_up_time := 0.0
 
 @export_group("Lying in bed")
 ## Eye height above the top of the bed (m).
@@ -154,6 +157,10 @@ func _process(delta: float) -> void:
 		_outlined = want
 		for m in _parts:
 			Outline.set_on(m, want)
+		if want:
+			Outline.show_name(self, "Captain's bed")
+		else:
+			Outline.hide_name(self)
 
 # ---------------------------------------------------------------- the sleep sequence
 
@@ -212,27 +219,34 @@ func _run(delta: float) -> void:
 	_t += delta
 	match _phase:
 		Phase.LIE:
-			_blend = clampf(_t / lie_down_time, 0.0, 1.0)
+			_blend = clampf(_t / maxf(lie_down_time, 0.001), 0.0, 1.0)
 			if _t >= lie_down_time:
 				_begin(Phase.FADE_OUT)
 		Phase.FADE_OUT:
-			_fade = clampf(_t / fade_out_time, 0.0, 1.0)
+			_fade = clampf(_t / maxf(fade_out_time, 0.001), 0.0, 1.0)
+			_blend = _fade      # the camera settles onto the bed while the screen goes dark
 			if _t >= fade_out_time:
 				_fade = 1.0
+				_blend = 1.0
 				_begin(Phase.BLACK)
 		Phase.BLACK:
-			_msg_a = clampf(_t / message_pop_time, 0.0, 1.0)
-			if _t >= black_hold and (not _port_loading() or _t >= black_hold + loading_wait_max):
+			_msg_a = clampf(_t / maxf(message_pop_time, 0.001), 0.0, 1.0)
+			var hold := black_hold
+			if _t >= hold and (not _port_loading() or _t >= hold + loading_wait_max):
 				_begin(Phase.FADE_IN)
 		Phase.FADE_IN:
-			_fade = 1.0 - clampf(_t / fade_in_time, 0.0, 1.0)
+			_fade = 1.0 - clampf(_t / maxf(fade_in_time, 0.001), 0.0, 1.0)
+			_msg_a = _fade      # the text fades out with the black
+			_blend = _fade      # and you get up as the screen clears
 			if _t >= fade_in_time:
 				_fade = 0.0
+				_msg_a = 0.0
+				_blend = 0.0
 				_begin(Phase.WAKE)
 		Phase.WAKE:
 			# fully clear now: the message lingers and fades, and you get up
-			_msg_a = 1.0 - clampf((_t - message_linger) / message_fade_time, 0.0, 1.0)
-			_blend = 1.0 - clampf((_t - get_up_delay) / get_up_time, 0.0, 1.0)
+			_msg_a = 1.0 - clampf((_t - message_linger) / maxf(message_fade_time, 0.001), 0.0, 1.0)
+			_blend = 1.0 - clampf((_t - get_up_delay) / maxf(get_up_time, 0.001), 0.0, 1.0)
 			if _t >= maxf(message_linger + message_fade_time, get_up_delay + get_up_time):
 				_finish()
 				return

@@ -30,6 +30,9 @@ extends Area3D
 ## For the hull ladders, which are one rung wide: grabbing at the edge of the box used to bounce you in and out of it.
 ## The wide rope nets (the shrouds) turn this off (ship_rigging.gd) so you can still shift along them.
 @export var center_on_grab := true
+## true: the ladder is ashore (a quay or pier ladder), so the climber is not carried along by the ship's motion.
+## world_streamer.gd sets this for the ladders it builds on the ports' quay walls.
+@export var fixed := false
 ## Optional: make this zone one of a ship's rigging climbs (ship_rigging.gd). "shroud_a" / "shroud_b" are the two nets (when you reach the
 ## top of one you are taken to the perch, the Climb_Barrel point; "mast" is the rung ladder up a mast). Leave empty for an ordinary ladder:
 ## any Area3D with this script and a BoxShape3D child works on its own, you only have to touch it.

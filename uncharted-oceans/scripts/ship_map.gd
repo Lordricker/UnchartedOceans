@@ -440,6 +440,11 @@ func _tc_part(parent: Node3D, mesh: Mesh, mat: Material, pos: Vector3) -> MeshIn
 	parent.add_child(mi)
 	return mi
 
+## True while the chart is open and you are looking at it.
+func is_open() -> bool:
+	return _open
+
+
 func _aimed() -> bool:
 	var cam := _camera()
 	if cam == null or not _built or Input.mouse_mode != Input.MOUSE_MODE_CAPTURED:
@@ -520,6 +525,10 @@ func _process(delta: float) -> void:
 	_turn_table_compass()
 	var aimed := not _open and _aimed()
 	_frame.visible = aimed
+	if aimed:
+		Outline.show_name(self, "Chart")
+	else:
+		Outline.hide_name(self)
 	if _open or _cam_moved:
 		var rest := _head.global_transform * _cam_rest
 		var want := _view() if _open else rest

@@ -1,0 +1,163 @@
+class_name WorldHud
+extends Control
+## HUD for the run (made by WorldStreamer): the waypoint marker on the horizon, a heading strip,
+## the sleep prompt, and the chart readout. All drawn in one _draw(), nothing to set up in the scene.
+
+var streamer: WorldStreamer
+
+const GOLD := Color(1.0, 0.82, 0.25)
+const GREEN := Color(0.45, 1.0, 0.55)
+const AMBER := Color(1.0, 0.62, 0.2)
+const WHITE := Color(1, 1, 1, 0.95)
+const SHADOW := Color(0, 0, 0, 0.85)
+
+var _font: Font
+var _morning: Button
+
+
+func _ready() -> void:
+	set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_font = ThemeDB.fallback_font
+	# the sleep window's "Sleep until morning" button (the rest of the HUD is drawn, this needs a click)
+	_morning = Button.new()
+	_morning.text = "Sleep until morning"
+	_morning.focus_mode = Control.FOCUS_NONE          # Enter must keep meaning "sleep", never "press the button"
+	_morning.size = Vector2(260.0, 32.0)
+	_morning.add_theme_font_size_override("font_size", 18)
+	_morning.visible = false
+	_morning.pressed.connect(_on_morning_pressed)
+	add_child(_morning)
+
+
+func _process(_delta: float) -> void:
+	queue_redraw()
+	var want := streamer != null and streamer.prompt_open and streamer.hours_until_morning() > 0.0
+	_morning.visible = want
+	if want:
+		var box := Rect2(size.x * 0.5 - 330.0, size.y * 0.5 - 70.0, 660.0, 196.0)
+		_morning.position = Vector2(box.position.x + box.size.x * 0.5 - _morning.size.x * 0.5, box.position.y + 82.0)
+
+
+func _on_morning_pressed() -> void:
+	if streamer:
+		streamer.fill_morning()
+
+
+func _text(pos: Vector2, s: String, size: int = 16, col: Color = WHITE, center: bool = false) -> void:
+	if center:
+		var w := _font.get_string_size(s, HORIZONTAL_ALIGNMENT_LEFT, -1, size).x
+		pos.x -= w * 0.5
+	draw_string_outline(_font, pos, s, HORIZONTAL_ALIGNMENT_LEFT, -1, size, 4, SHADOW)
+	draw_string(_font, pos, s, HORIZONTAL_ALIGNMENT_LEFT, -1, size, col)
+
+
+func _draw() -> void:
+	var st := streamer
+	if st == null or st.chart == null or st._ship == null:
+		return
+	var vp := size
+	# heading, marker and nearest port are for the test bench (H): in play they come from the compass,
+	# the chart and the props
+	# the marker on the horizon with just its distance; the heading strip, route and chart lines are for H
+	var full: bool = Engine.get_meta("debug_ui", false)
+	_draw_marker(st, vp, full)
+	if full:
+		_draw_readout(st, vp)
+	if st.prompt_open:
+		_draw_prompt(st, vp)
+	if st.fast_forward_i > 0:
+		_text(Vector2(vp.x - 70.0, 36.0), ">> x%d" % int(st.time_speed()), 24, GOLD, true)      # fast forward is on (. and ,)
+	if st.message_t > 0.0:
+		_text(Vector2(vp.x * 0.5, vp.y * 0.2), st.message, 20, GOLD, true)
+
+
+func _dist_text(m: float) -> String:
+	return "%.1f km" % (m / 1000.0) if m >= 1000.0 else "%d m" % int(round(m))
+
+
+func _draw_marker(st: WorldStreamer, vp: Vector2, full: bool = true) -> void:
+	var w := st.waypoint()
+	if w == Vector2.INF:
+		return
+	var cam := get_viewport().get_camera_3d()
+	if cam == null:
+		return
+	var bearing := st.waypoint_bearing()
+	var heading := st.ship_chart_heading()
+	var err := wrapf(bearing - heading, -180.0, 180.0)      # + = marker is to starboard
+	var dist := st.waypoint_distance_m()
+	# heading strip at the top
+	var col := GREEN if absf(err) < 3.0 else (AMBER if absf(err) < 12.0 else WHITE)
+	var hint := "on course" if absf(err) < 3.0 else ("turn right %d°" % int(round(absf(err))) if err > 0.0 else "turn left %d°" % int(round(absf(err))))
+	if full:
+		_text(Vector2(vp.x * 0.5, 34), "heading %03d   marker %03d   %s" % [int(round(heading)), int(round(bearing)), hint], 20, col, true)
+		if st.line_blocked_m >= 0.0:
+			_text(Vector2(vp.x * 0.5, 58), "land in the way after %.0f km - the route turns before it" % (st.line_blocked_m / 1000.0), 16, AMBER, true)
+	# the marker: a point far out along the bearing at eye height, so it sits on the horizon
+	var dir := WorldChart.direction(bearing)
+	var p3 := cam.global_position + Vector3(dir.x, 0.0, dir.y) * 4000.0
+	var fwd := -cam.global_transform.basis.z
+	var cam_heading := rad_to_deg(atan2(fwd.x, -fwd.z))
+	var rel := wrapf(bearing - cam_heading, -180.0, 180.0)
+	var margin := 46.0
+	var pos: Vector2
+	var on_screen := not cam.is_position_behind(p3)
+	if on_screen:
+		pos = cam.unproject_position(p3)
+		on_screen = pos.x > margin and pos.x < vp.x - margin
+	if not on_screen:
+		pos = Vector2(vp.x - margin if rel > 0.0 else margin, vp.y * 0.5)
+	pos.y = clampf(pos.y, 90.0, vp.y - 110.0)
+	var r := 13.0
+	var pts := PackedVector2Array([pos + Vector2(0, -r), pos + Vector2(r * 0.8, 0), pos + Vector2(0, r), pos + Vector2(-r * 0.8, 0)])
+	draw_colored_polygon(pts, Color(GOLD, 0.9))
+	var closed := PackedVector2Array([pts[0], pts[1], pts[2], pts[3], pts[0]])
+	draw_polyline(closed, SHADOW, 2.5)
+	if on_screen:
+		if full:
+			draw_line(pos + Vector2(0, r), pos + Vector2(0, r + 38.0), Color(GOLD, 0.6), 2.0)
+	else:
+		var s := ">" if rel > 0.0 else "<"
+		_text(pos + Vector2(-5 if rel > 0.0 else -5, 7), s, 22, SHADOW)
+	var name := st.destination if st.waypoint_is_port() else "waypoint %d of %d" % [st.route_i + 1, st.route.size()]
+	var hrs := dist / maxf(st.sleep_speed(), 0.1) / 3600.0
+	var label_y := pos.y + r + (60.0 if on_screen else 26.0)
+	if full:
+		_text(Vector2(pos.x, label_y), name, 18, GOLD, true)
+		_text(Vector2(pos.x, label_y + 20.0), "%.1f km, %.1f h at %.1f m/s" % [dist / 1000.0, hrs, st.sleep_speed()], 15, WHITE, true)
+	else:
+		pass      # in play the marker is just the diamond: no distance (the chart and the log line say how far)
+
+
+func _draw_readout(st: WorldStreamer, vp: Vector2) -> void:
+	var cx := st.ship_cx()
+	var cz := st.ship_cz()
+	var np := st.chart.nearest_port(cx, cz)
+	var y := vp.y - 86.0
+	var lines: Array[String] = []
+	lines.append("chart  x %.1f km   z %.1f km   water %.0f m   shore %.1f km" % [cx / 1000.0, cz / 1000.0, st.ship_depth_m(), st.chart.shore_distance_m(cx, cz) / 1000.0])
+	if not np.is_empty():
+		lines.append("nearest port  %s  %.1f km" % [np["id"], float(np["dist_m"]) / 1000.0])
+	if st.destination != "":
+		lines.append("to %s  %.0f km by the route" % [st.destination, st.route_length_m() / 1000.0] + ("   (no sea route found)" if st.route_blind else ""))
+	lines.append("T = sleep (type hours, Enter)    P = new route    Home = back to the home port")
+	for l in lines:
+		_text(Vector2(14, y), l, 15)
+		y += 19.0
+
+
+func _draw_prompt(st: WorldStreamer, vp: Vector2) -> void:
+	var box := Rect2(vp.x * 0.5 - 330.0, vp.y * 0.5 - 70.0, 660.0, 196.0)
+	draw_rect(box, Color(0.03, 0.05, 0.08, 0.88))
+	draw_rect(box, Color(GOLD, 0.7), false, 2.0)
+	var c := vp.x * 0.5
+	_text(Vector2(c, box.position.y + 30.0), "Sleep how many hours?", 22, GOLD, true)
+	var shown := st.prompt_text if st.prompt_text != "" else "%d" % int(st.sleep_hours)
+	var typed := st.prompt_text != ""
+	_text(Vector2(c, box.position.y + 66.0), shown + (" h" if typed else " h   (Enter to use this, or type a number)"), 26, WHITE if typed else Color(1, 1, 1, 0.6), true)
+	# what the sleep will do is for the player to work out (speed from the log, distance from the chart); H shows the sum
+	if Engine.get_meta("debug_ui", false):
+		_text(Vector2(c, box.position.y + 134.0), st.prompt_preview, 14, WHITE, true)
+	_text(Vector2(c, box.position.y + 156.0), "Enter = sleep    Esc = cancel", 13, Color(1, 1, 1, 0.6), true)
+	_text(Vector2(c, box.position.y + 178.0), "you wake early at a waypoint, a port, land, the edge or a storm", 13, Color(1, 1, 1, 0.6), true)

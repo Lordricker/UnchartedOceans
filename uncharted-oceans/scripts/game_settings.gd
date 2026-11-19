@@ -6,6 +6,8 @@ extends Node
 ##                      Low     Standard water, Low volumetric storms (fewer steps, no fine detail), flat fair-weather clouds
 ##                      Medium  Standard water, Medium storms, flat clouds. This is the project's own default.
 ##                      High    High water (Ocean.water_quality = 1, the O key), High storms and volumetric cumulus clouds
+##   mouse_sensitivity  0.25..2, a multiplier on the player's own mouse_sensitivity (1 = as the scene sets it).
+##   fullscreen         the window mode. Until the player has touched it, the project's own window setting stands.
 ## Saved in user://settings.cfg (call save() when a change is done). Until the player has touched the quality
 ## buttons nothing here changes the scene's own quality settings. An older settings file only has a high_quality
 ## yes/no: yes becomes High, no becomes Medium.
@@ -22,8 +24,11 @@ const QUALITY_NAMES: Array[String] = ["Low", "Medium", "High"]
 var music_volume := DEFAULT_MUSIC
 var ambience_volume := DEFAULT_AMBIENCE
 var quality_level := MEDIUM
+var mouse_sensitivity := 1.0
+var fullscreen := false
 
 var _quality_chosen := false
+var _fullscreen_chosen := false
 var _ocean: Ocean
 
 
@@ -32,6 +37,10 @@ func _ready() -> void:
 	_load()
 	_apply_music()
 	_apply_ambience()
+	if _fullscreen_chosen:
+		_apply_fullscreen()
+	else:
+		fullscreen = DisplayServer.window_get_mode() in [DisplayServer.WINDOW_MODE_FULLSCREEN, DisplayServer.WINDOW_MODE_EXCLUSIVE_FULLSCREEN]
 	get_tree().node_added.connect(_on_node_added)
 	if _quality_chosen:
 		_apply_quality.call_deferred()
@@ -45,6 +54,19 @@ func set_music_volume(v: float) -> void:
 func set_ambience_volume(v: float) -> void:
 	ambience_volume = clampf(v, 0.0, 1.0)
 	_apply_ambience()
+
+
+func set_mouse_sensitivity(v: float) -> void:
+	mouse_sensitivity = clampf(v, 0.25, 2.0)
+	var pl := get_tree().get_first_node_in_group("player")
+	if pl != null:
+		_apply_mouse(pl)
+
+
+func set_fullscreen(on: bool) -> void:
+	fullscreen = on
+	_fullscreen_chosen = true
+	_apply_fullscreen()
 
 
 func set_quality(level: int) -> void:
@@ -80,6 +102,9 @@ func save() -> void:
 	cfg.load(PATH)            # keep anything else in the file; a missing file is fine
 	cfg.set_value("audio", "music_volume", music_volume)
 	cfg.set_value("audio", "ambience_volume", ambience_volume)
+	cfg.set_value("controls", "mouse_sensitivity", mouse_sensitivity)
+	if _fullscreen_chosen:
+		cfg.set_value("display", "fullscreen", fullscreen)
 	if _quality_chosen:
 		cfg.set_value("graphics", "quality", quality_level)
 	cfg.save(PATH)
@@ -91,6 +116,10 @@ func _load() -> void:
 		return
 	music_volume = clampf(float(cfg.get_value("audio", "music_volume", music_volume)), 0.0, 1.0)
 	ambience_volume = clampf(float(cfg.get_value("audio", "ambience_volume", ambience_volume)), 0.0, 1.0)
+	mouse_sensitivity = clampf(float(cfg.get_value("controls", "mouse_sensitivity", mouse_sensitivity)), 0.25, 2.0)
+	if cfg.has_section_key("display", "fullscreen"):
+		fullscreen = bool(cfg.get_value("display", "fullscreen"))
+		_fullscreen_chosen = true
 	if cfg.has_section_key("graphics", "quality"):
 		quality_level = clampi(int(cfg.get_value("graphics", "quality")), LOW, HIGH)
 		_quality_chosen = true
@@ -111,6 +140,21 @@ func _apply_ambience() -> void:
 		a.set("ambience_volume", ambience_volume)
 
 
+## The player's base sensitivity is kept on it as metadata the first time, so changing the slider never compounds.
+func _apply_mouse(pl: Node) -> void:
+	if not ("mouse_sensitivity" in pl):
+		return
+	if not pl.has_meta("base_mouse_sensitivity"):
+		pl.set_meta("base_mouse_sensitivity", float(pl.get("mouse_sensitivity")))
+	pl.set("mouse_sensitivity", float(pl.get_meta("base_mouse_sensitivity")) * mouse_sensitivity)
+
+
+func _apply_fullscreen() -> void:
+	if DisplayServer.get_name() == "headless":
+		return
+	DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_FULLSCREEN if fullscreen else DisplayServer.WINDOW_MODE_WINDOWED)
+
+
 func _apply_quality() -> void:
 	if not _quality_chosen:
 		return
@@ -124,6 +168,8 @@ func _apply_quality() -> void:
 
 ## A new scene's ocean or sky gets the chosen quality too (deferred: they are not ready yet when they are added).
 func _on_node_added(n: Node) -> void:
+	if n is CharacterBody3D and ("mouse_sensitivity" in n):
+		_apply_mouse.call_deferred(n)
 	if _quality_chosen and (n is Ocean or n is SkySystem):
 		_ocean = null
 		_apply_quality.call_deferred()

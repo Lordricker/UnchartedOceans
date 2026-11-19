@@ -20,7 +20,8 @@
    "type": "bay",
    "px": 373,
    "py": 188,
-   "host_landmass_px": 107596
+   "host_landmass_px": 107596,
+   "name": "Aldermouth"
   },
   {
    "id": "BC01",
@@ -29,7 +30,8 @@
    "type": "bay",
    "px": 428,
    "py": 598,
-   "host_landmass_px": 147291
+   "host_landmass_px": 147291,
+   "name": "Yuelong"
   },
   {
    "id": "CC02",
@@ -38,7 +40,8 @@
    "type": "bay",
    "px": 1300,
    "py": 772,
-   "host_landmass_px": 86256
+   "host_landmass_px": 86256,
+   "name": "Selamabad"
   },
   {
    "id": "DC03",
@@ -47,7 +50,8 @@
    "type": "bay",
    "px": 1330,
    "py": 140,
-   "host_landmass_px": 208674
+   "host_landmass_px": 208674,
+   "name": "Kisara"
   },
   {
    "id": "AS04",
@@ -56,7 +60,8 @@
    "type": "harbor",
    "px": 62,
    "py": 178,
-   "host_landmass_px": 107596
+   "host_landmass_px": 107596,
+   "name": "Thornwick"
   },
   {
    "id": "AS05",
@@ -65,7 +70,8 @@
    "type": "harbor",
    "px": 295,
    "py": 449,
-   "host_landmass_px": 107596
+   "host_landmass_px": 107596,
+   "name": "Saltby"
   },
   {
    "id": "AS06",
@@ -74,7 +80,8 @@
    "type": "harbor",
    "px": 610,
    "py": 314,
-   "host_landmass_px": 107596
+   "host_landmass_px": 107596,
+   "name": "Wrenhaven"
   },
   {
    "id": "AS07",
@@ -83,7 +90,8 @@
    "type": "lagoon_or_light",
    "px": 52,
    "py": 434,
-   "host_landmass_px": 2378
+   "host_landmass_px": 2378,
+   "name": "Gullrock"
   },
   {
    "id": "AS08",
@@ -92,7 +100,8 @@
    "type": "lagoon_or_light",
    "px": 148,
    "py": 310,
-   "host_landmass_px": 306
+   "host_landmass_px": 306,
+   "name": "Candlestone"
   },
   {
    "id": "BS09",
@@ -101,7 +110,8 @@
    "type": "harbor",
    "px": 66,
    "py": 744,
-   "host_landmass_px": 147291
+   "host_landmass_px": 147291,
+   "name": "Qingwan"
   },
   {
    "id": "BS10",
@@ -110,7 +120,8 @@
    "type": "harbor",
    "px": 728,
    "py": 798,
-   "host_landmass_px": 147291
+   "host_landmass_px": 147291,
+   "name": "Hongsha"
   },
   {
    "id": "BS11",
@@ -119,7 +130,8 @@
    "type": "harbor",
    "px": 409,
    "py": 941,
-   "host_landmass_px": 147291
+   "host_landmass_px": 147291,
+   "name": "Mingzhou"
   },
   {
    "id": "BS12",
@@ -128,7 +140,8 @@
    "type": "lagoon_or_light",
    "px": 186,
    "py": 528,
-   "host_landmass_px": 651
+   "host_landmass_px": 651,
+   "name": "Zhulin"
   },
   {
    "id": "BS13",
@@ -137,7 +150,8 @@
    "type": "lagoon_or_light",
    "px": 198,
    "py": 909,
-   "host_landmass_px": 915
+   "host_landmass_px": 915,
+   "name": "Fenghuo"
   },
   {
    "id": "CS14",
@@ -146,7 +160,8 @@
    "type": "harbor",
    "px": 978,
    "py": 678,
-   "host_landmass_px": 86256
+   "host_landmass_px": 86256,
+   "name": "Akliman"
   },
   {
    "id": "CS15",
@@ -155,7 +170,8 @@
    "type": "harbor",
    "px": 1065,
    "py": 980,
-   "host_landmass_px": 86256
+   "host_landmass_px": 86256,
+   "name": "Kumburun"
   },
   {
    "id": "CS16",
@@ -164,7 +180,8 @@
    "type": "harbor",
    "px": 1178,
    "py": 595,
-   "host_landmass_px": 86256
+   "host_landmass_px": 86256,
+   "name": "Taskale"
   },
   {
    "id": "CS17",
@@ -173,7 +190,8 @@
    "type": "lagoon_or_light",
    "px": 1439,
    "py": 668,
-   "host_landmass_px": 2880
+   "host_landmass_px": 2880,
+   "name": "Mercanada"
   },
   {
    "id": "CS18",
@@ -182,7 +200,8 @@
    "type": "lagoon_or_light",
    "px": 1438,
    "py": 889,
-   "host_landmass_px": 33
+   "host_landmass_px": 33,
+   "name": "Fenerada"
   },
   {
    "id": "DS19",
@@ -191,7 +210,8 @@
    "type": "harbor",
    "px": 711,
    "py": 221,
-   "host_landmass_px": 208674
+   "host_landmass_px": 208674,
+   "name": "Mwani"
   },
   {
    "id": "DS20",
@@ -200,7 +220,8 @@
    "type": "harbor",
    "px": 1378,
    "py": 570,
-   "host_landmass_px": 208674
+   "host_landmass_px": 208674,
+   "name": "Ngazi"
   },
   {
    "id": "DS21",
@@ -209,7 +230,8 @@
    "type": "harbor",
    "px": 1049,
    "py": 393,
-   "host_landmass_px": 208674
+   "host_landmass_px": 208674,
+   "name": "Mikoko"
   },
   {
    "id": "DS22",
@@ -218,7 +240,8 @@
    "type": "lagoon_or_light",
    "px": 910,
    "py": 46,
-   "host_landmass_px": 215
+   "host_landmass_px": 215,
+   "name": "Kisiwa Taa"
   },
   {
    "id": "DS23",
@@ -227,7 +250,8 @@
    "type": "lagoon_or_light",
    "px": 1183,
    "py": 534,
-   "host_landmass_px": 34
+   "host_landmass_px": 34,
+   "name": "Kisiwa Lulu"
   },
   {
    "id": "FF24",
@@ -236,7 +260,8 @@
    "type": "lagoon",
    "px": 715,
    "py": 478,
-   "host_landmass_px": 6086
+   "host_landmass_px": 6086,
+   "name": "Freehold"
   }
  ]
 }

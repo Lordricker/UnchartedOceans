@@ -61,7 +61,11 @@ func _draw() -> void:
 	# the chart and the props
 	# the marker on the horizon with just its distance; the heading strip, route and chart lines are for H
 	var full: bool = Engine.get_meta("debug_ui", false)
-	_draw_marker(st, vp, full)
+	# the gold horizon marker is a tutorial aid only; the real game goes by compass, chart and log (H debug still shows it)
+	var scn := get_tree().current_scene
+	var in_tutorial: bool = GameSession.tutorial or (scn != null and scn.scene_file_path.ends_with("world_tutorial.tscn"))
+	if in_tutorial or full:
+		_draw_marker(st, vp, full)
 	if full:
 		_draw_readout(st, vp)
 	if st.prompt_open:
@@ -138,9 +142,9 @@ func _draw_readout(st: WorldStreamer, vp: Vector2) -> void:
 	var lines: Array[String] = []
 	lines.append("chart  x %.1f km   z %.1f km   water %.0f m   shore %.1f km" % [cx / 1000.0, cz / 1000.0, st.ship_depth_m(), st.chart.shore_distance_m(cx, cz) / 1000.0])
 	if not np.is_empty():
-		lines.append("nearest port  %s  %.1f km" % [np["id"], float(np["dist_m"]) / 1000.0])
+		lines.append("nearest port  %s (%s)  %.1f km" % [np["name"], np["id"], float(np["dist_m"]) / 1000.0])
 	if st.destination != "":
-		lines.append("to %s  %.0f km by the route" % [st.destination, st.route_length_m() / 1000.0] + ("   (no sea route found)" if st.route_blind else ""))
+		lines.append("to %s  %.0f km by the route" % [st.chart.port_name(st.destination), st.route_length_m() / 1000.0] + ("   (no sea route found)" if st.route_blind else ""))
 	lines.append("T = sleep (type hours, Enter)    P = new route    Home = back to the home port")
 	for l in lines:
 		_text(Vector2(14, y), l, 15)

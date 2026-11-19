@@ -1,0 +1,496 @@
+extends CanvasLayer
+## The Esc menu. Autoload "PauseMenu".
+##
+## Esc opens it only when nothing else is using Esc: not while a menu that locks the player is open (the chart, the
+## bookshelf and book, the market, peeking at something: they set the player's input_locked), not while the sleep
+## prompt is up, and only in a scene that has a player. Those menus keep their own Esc. Esc again (or Resume) closes it;
+## Esc inside Credits goes back to the menu.
+## The game is paused while it is open (turn pause_game off to leave the world running). Music keeps playing.
+##
+## Settings (GameSettings): Music and Ambient sliders, Graphics quality buttons (Low / Medium / High). Saved when the
+## menu closes. Credits: edit CREDITS below.
+
+const CREDITS := [
+	{"title": "Music", "names": ["Denny Schneidemesser", "Waterflame"]},
+	{"title": "Textures", "names": ["Poly Haven"]},
+	{"title": "Character base meshes (CC BY 4.0)", "names": ["sphere_joe: Proxy Human", "EbiosDesigner: Female 2500"]},
+	{"title": "Coding and modeling", "names": ["Claude"]},
+]
+const QUALITY_NAMES: Array[String] = ["Low", "Medium", "High"]
+const QUALITY_NOTES: Array[String] = [
+	"The lightest storm clouds and standard water. For older graphics cards.",
+	"Full storm clouds and standard water. The default.",
+	"Volumetric cumulus clouds, sharper storms and detailed water. A heavy load for the graphics card.",
+]
+const FONT_PATH := "res://assets/fonts/Ferrum-ExtraCondensed.otf"
+const GOLD := Color(0.86, 0.72, 0.45)
+const CREAM := Color(1.0, 0.97, 0.9)
+
+@export var pause_game := true
+
+var _root: Control
+var _main_page: VBoxContainer
+var _credits_page: VBoxContainer
+var _music_slider: HSlider
+var _music_value: Label
+var _amb_slider: HSlider
+var _amb_value: Label
+var _quality_buttons: Array[Button] = []
+var _quality_note: Label
+var _resume: Button
+var _report_page: VBoxContainer
+var _prompt_edit: TextEdit
+var _shot_rect: TextureRect
+var _report_status: Label
+var _status: Label
+var _load_btn: Button
+var _shot: Image                 # the frame on screen when Esc was pressed (before the menu drew)
+var _font: Font
+
+var _open := false
+var _free := false            # was nothing else using Esc, as of the last frame (see _input)
+var _mouse_before := Input.MOUSE_MODE_CAPTURED
+var _paused_by_me := false
+
+
+func _ready() -> void:
+	layer = 60
+	process_mode = Node.PROCESS_MODE_ALWAYS
+	add_to_group("pause_menu")
+	if ResourceLoader.exists(FONT_PATH):
+		_font = load(FONT_PATH) as Font
+	_build()
+	_root.visible = false
+
+
+func is_open() -> bool:
+	return _open
+
+
+# ------------------------------------------------------------------ Esc
+
+## Sampled once a frame, before any key is handled. A menu that closes on this very Esc has already unlocked the
+## player by the time this script would look, so the answer has to be the one from the frame before.
+func _process(_delta: float) -> void:
+	if not _open:
+		_free = _compute_free()
+
+
+func _compute_free() -> bool:
+	var tree := get_tree()
+	var pl := tree.get_first_node_in_group("player")
+	if pl == null or bool(pl.get("input_locked")):
+		return false
+	var st := tree.get_first_node_in_group("world_streamer")
+	if st != null and bool(st.get("prompt_open")):
+		return false
+	return true
+
+
+func _input(e: InputEvent) -> void:
+	if not (e is InputEventKey and e.pressed and not e.echo and e.physical_keycode == KEY_ESCAPE):
+		return
+	if _open:
+		if _credits_page.visible:
+			_show_credits(false)
+		elif _report_page.visible:
+			_show_report(false)
+		else:
+			close()
+		get_viewport().set_input_as_handled()
+	elif _free:
+		open()
+		get_viewport().set_input_as_handled()
+
+
+func open() -> void:
+	if _open:
+		return
+	_open = true
+	# grab the last frame now, while it still shows the game and not this menu
+	_shot = get_viewport().get_texture().get_image()
+	_status.text = ""
+	_load_btn.disabled = _save_sys() == null or not _save_sys().call("has_save")
+	_mouse_before = Input.mouse_mode
+	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+	_sync()
+	_show_credits(false)
+	_root.visible = true
+	if pause_game and not get_tree().paused:
+		get_tree().paused = true
+		_paused_by_me = true
+	_resume.grab_focus()
+
+
+func close() -> void:
+	if not _open:
+		return
+	_open = false
+	_root.visible = false
+	_save()
+	if _paused_by_me:
+		get_tree().paused = false
+		_paused_by_me = false
+	Input.mouse_mode = _mouse_before
+
+
+# ------------------------------------------------------------------ settings
+
+func _settings() -> Node:
+	return get_node_or_null("/root/GameSettings")
+
+
+func _sync() -> void:
+	var gs := _settings()
+	if gs == null:
+		return
+	_music_slider.set_value_no_signal(roundf(float(gs.get("music_volume")) * 100.0))
+	_music_value.text = "%d%%" % int(_music_slider.value)
+	_amb_slider.set_value_no_signal(roundf(float(gs.get("ambience_volume")) * 100.0))
+	_amb_value.text = "%d%%" % int(_amb_slider.value)
+	_show_quality(int(gs.call("current_quality")))
+
+
+func _show_quality(level: int) -> void:
+	level = clampi(level, 0, QUALITY_NAMES.size() - 1)
+	for i in _quality_buttons.size():
+		_quality_buttons[i].set_pressed_no_signal(i == level)
+	_quality_note.text = QUALITY_NOTES[level]
+
+
+func _save() -> void:
+	var gs := _settings()
+	if gs != null:
+		gs.call("save")
+
+
+func _on_music(v: float) -> void:
+	_music_value.text = "%d%%" % int(v)
+	var gs := _settings()
+	if gs != null:
+		gs.call("set_music_volume", v / 100.0)
+
+
+func _on_ambience(v: float) -> void:
+	_amb_value.text = "%d%%" % int(v)
+	var gs := _settings()
+	if gs != null:
+		gs.call("set_ambience_volume", v / 100.0)
+
+
+func _on_quality(level: int) -> void:
+	var gs := _settings()
+	if gs != null:
+		gs.call("set_quality", level)
+	_show_quality(level)
+
+
+func _on_quit() -> void:
+	_save()
+	get_tree().quit()
+
+
+func _show_credits(on: bool) -> void:
+	_report_page.visible = false
+	_credits_page.visible = on
+	_main_page.visible = not on
+
+
+# ------------------------------------------------------------------ save, load, bug report (SaveSystem)
+
+func _save_sys() -> Node:
+	return get_node_or_null("/root/SaveSystem")
+
+
+func _show_report(on: bool) -> void:
+	_credits_page.visible = false
+	_report_page.visible = on
+	_main_page.visible = not on
+	if on:
+		_report_status.text = ""
+		if _shot != null and not _shot.is_empty():
+			_shot_rect.texture = ImageTexture.create_from_image(_shot)
+		_prompt_edit.grab_focus()
+	else:
+		_resume.grab_focus()
+
+
+func _on_send_report() -> void:
+	var ss := _save_sys()
+	if ss == null:
+		_report_status.text = "SaveSystem autoload is missing."
+		return
+	var dir := String(ss.call("write_report", _prompt_edit.text, _shot))
+	if dir == "":
+		_report_status.text = "Could not write the report (see the Output panel)."
+		return
+	_prompt_edit.text = ""
+	_show_report(false)
+	_status.text = "Report saved and copied to the clipboard:\n%s\nPaste it to Claude." % dir
+	_load_btn.disabled = false
+
+
+func _on_save() -> void:
+	var ss := _save_sys()
+	if ss == null:
+		return
+	var path := String(ss.call("save_game"))
+	_status.text = "Game saved." if path != "" else "Saving failed (see the Output panel)."
+	_load_btn.disabled = path == "" and not ss.call("has_save")
+
+
+func _on_load() -> void:
+	var ss := _save_sys()
+	if ss == null or not ss.call("has_save"):
+		return
+	_open = false
+	_root.visible = false
+	_paused_by_me = false
+	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+	ss.call("load_last")
+
+
+# ------------------------------------------------------------------ the screen
+
+func _build() -> void:
+	_root = Control.new()
+	_root.name = "PauseRoot"
+	_root.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	_root.mouse_filter = Control.MOUSE_FILTER_STOP
+	add_child(_root)
+
+	var dim := ColorRect.new()
+	dim.color = Color(0, 0, 0, 0.55)
+	dim.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	dim.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_root.add_child(dim)
+
+	var center := CenterContainer.new()
+	center.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	_root.add_child(center)
+
+	var panel := PanelContainer.new()
+	var sb := StyleBoxFlat.new()
+	sb.bg_color = Color(0.085, 0.07, 0.055, 0.95)
+	sb.border_color = Color(0.62, 0.48, 0.28)
+	sb.set_border_width_all(2)
+	sb.set_corner_radius_all(6)
+	sb.set_content_margin_all(32)
+	panel.add_theme_stylebox_override("panel", sb)
+	center.add_child(panel)
+
+	# one box holds both pages; only one shows at a time
+	var pages := VBoxContainer.new()
+	pages.custom_minimum_size = Vector2(460, 0)
+	panel.add_child(pages)
+	_main_page = _make_main_page()
+	_credits_page = _make_credits_page()
+	_report_page = _make_report_page()
+	pages.add_child(_main_page)
+	pages.add_child(_credits_page)
+	pages.add_child(_report_page)
+
+
+func _make_main_page() -> VBoxContainer:
+	var box := VBoxContainer.new()
+	box.add_theme_constant_override("separation", 16)
+	box.add_child(_label("Paused", 46, GOLD, HORIZONTAL_ALIGNMENT_CENTER))
+	box.add_child(HSeparator.new())
+
+	var m := _slider_row(box, "Music")
+	_music_slider = m[0]
+	_music_value = m[1]
+	_music_slider.value_changed.connect(_on_music)
+	_music_slider.drag_ended.connect(func(_changed: bool) -> void: _save())
+
+	var a := _slider_row(box, "Ambient")
+	_amb_slider = a[0]
+	_amb_value = a[1]
+	_amb_slider.value_changed.connect(_on_ambience)
+	_amb_slider.drag_ended.connect(func(_changed: bool) -> void: _save())
+
+	# graphics quality: three buttons, one of them always on
+	box.add_child(_label("Graphics", 26, CREAM))
+	var tiers := HBoxContainer.new()
+	tiers.add_theme_constant_override("separation", 8)
+	var group := ButtonGroup.new()
+	for i in QUALITY_NAMES.size():
+		var b := _tier_button(QUALITY_NAMES[i], group)
+		b.pressed.connect(_on_quality.bind(i))
+		tiers.add_child(b)
+		_quality_buttons.append(b)
+	box.add_child(tiers)
+	_quality_note = _label(QUALITY_NOTES[1], 18, Color(1, 1, 1, 0.55))
+	_quality_note.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_quality_note.custom_minimum_size = Vector2(396, 0)
+	box.add_child(_quality_note)
+
+	box.add_child(HSeparator.new())
+	_resume = _button("Resume")
+	_resume.pressed.connect(close)
+	box.add_child(_resume)
+	var report := _button("Report a bug / ask Claude")
+	report.pressed.connect(_show_report.bind(true))
+	box.add_child(report)
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 8)
+	var save := _button("Save")
+	save.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	save.pressed.connect(_on_save)
+	row.add_child(save)
+	_load_btn = _button("Load last save")
+	_load_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_load_btn.pressed.connect(_on_load)
+	row.add_child(_load_btn)
+	box.add_child(row)
+	_status = _label("", 18, Color(1, 1, 1, 0.7))
+	_status.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_status.custom_minimum_size = Vector2(396, 0)
+	box.add_child(_status)
+	var credits := _button("Credits")
+	credits.pressed.connect(_show_credits.bind(true))
+	box.add_child(credits)
+	var quit := _button("Quit game")
+	quit.pressed.connect(_on_quit)
+	box.add_child(quit)
+	return box
+
+
+func _make_credits_page() -> VBoxContainer:
+	var box := VBoxContainer.new()
+	box.add_theme_constant_override("separation", 10)
+	box.add_child(_label("Credits", 46, GOLD, HORIZONTAL_ALIGNMENT_CENTER))
+	box.add_child(HSeparator.new())
+	for group in CREDITS:
+		var title := _label(String(group["title"]), 26, GOLD, HORIZONTAL_ALIGNMENT_CENTER)
+		box.add_child(title)
+		for n in group["names"]:
+			box.add_child(_label(String(n), 30, CREAM, HORIZONTAL_ALIGNMENT_CENTER))
+		var gap := Control.new()
+		gap.custom_minimum_size = Vector2(0, 10)
+		box.add_child(gap)
+	var filler := Control.new()
+	filler.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	box.add_child(filler)
+	box.add_child(HSeparator.new())
+	var back := _button("Back")
+	back.pressed.connect(_show_credits.bind(false))
+	box.add_child(back)
+	box.visible = false
+	return box
+
+
+func _make_report_page() -> VBoxContainer:
+	var box := VBoxContainer.new()
+	box.add_theme_constant_override("separation", 12)
+	box.add_child(_label("Report a bug", 46, GOLD, HORIZONTAL_ALIGNMENT_CENTER))
+	box.add_child(HSeparator.new())
+	box.add_child(_label("Saved with it: this picture, the game state and the recent log.", 18, Color(1, 1, 1, 0.6)))
+	_shot_rect = TextureRect.new()
+	_shot_rect.custom_minimum_size = Vector2(560, 315)
+	_shot_rect.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	_shot_rect.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	box.add_child(_shot_rect)
+	box.add_child(_label("What went wrong, or what should change?", 24, CREAM))
+	_prompt_edit = TextEdit.new()
+	_prompt_edit.custom_minimum_size = Vector2(560, 150)
+	_prompt_edit.wrap_mode = TextEdit.LINE_WRAPPING_BOUNDARY
+	_prompt_edit.placeholder_text = "e.g. the gangway stays out after casting off"
+	_prompt_edit.add_theme_font_size_override("font_size", 20)
+	box.add_child(_prompt_edit)
+	_report_status = _label("", 18, Color(1, 0.6, 0.5))
+	box.add_child(_report_status)
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 8)
+	var send := _button("Save report")
+	send.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	send.pressed.connect(_on_send_report)
+	row.add_child(send)
+	var back := _button("Back")
+	back.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	back.pressed.connect(_show_report.bind(false))
+	row.add_child(back)
+	box.add_child(row)
+	box.visible = false
+	return box
+
+
+## "Music  ----o----  80%". Returns [slider, value label].
+func _slider_row(parent: Control, text: String) -> Array:
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 14)
+	var name_label := _label(text, 26, CREAM)
+	name_label.custom_minimum_size = Vector2(110, 0)
+	row.add_child(name_label)
+	var s := HSlider.new()
+	s.min_value = 0.0
+	s.max_value = 100.0
+	s.step = 1.0
+	s.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	s.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	s.custom_minimum_size = Vector2(200, 28)
+	row.add_child(s)
+	var v := _label("100%", 26, CREAM, HORIZONTAL_ALIGNMENT_RIGHT)
+	v.custom_minimum_size = Vector2(64, 0)
+	row.add_child(v)
+	parent.add_child(row)
+	return [s, v]
+
+
+func _label(text: String, size: int, color: Color, align := HORIZONTAL_ALIGNMENT_LEFT) -> Label:
+	var l := Label.new()
+	l.text = text
+	l.horizontal_alignment = align
+	_style(l, size)
+	l.add_theme_color_override("font_color", color)
+	l.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.9))
+	l.add_theme_constant_override("outline_size", 4)
+	return l
+
+
+func _button(text: String) -> Button:
+	var b := Button.new()
+	b.text = text
+	b.custom_minimum_size = Vector2(0, 48)
+	_style(b, 28)
+	return b
+
+
+## One of the quality buttons: a dark box with a bright frame, gold when it is the one that is on (the stock toggle
+## look is nearly invisible on this dark panel).
+func _tier_button(text: String, group: ButtonGroup) -> Button:
+	var b := Button.new()
+	b.text = text
+	b.toggle_mode = true
+	b.button_group = group
+	b.focus_mode = Control.FOCUS_NONE
+	b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	b.custom_minimum_size = Vector2(0, 46)
+	_style(b, 26)
+	var off := StyleBoxFlat.new()
+	off.bg_color = Color(0.16, 0.13, 0.10)
+	off.border_color = Color(CREAM.r, CREAM.g, CREAM.b, 0.55)
+	off.set_border_width_all(2)
+	off.set_corner_radius_all(4)
+	var hover := off.duplicate() as StyleBoxFlat
+	hover.bg_color = Color(0.24, 0.19, 0.13)
+	var on := off.duplicate() as StyleBoxFlat
+	on.bg_color = GOLD
+	on.border_color = CREAM
+	b.add_theme_stylebox_override("normal", off)
+	b.add_theme_stylebox_override("hover", hover)
+	b.add_theme_stylebox_override("pressed", on)
+	b.add_theme_stylebox_override("hover_pressed", on)
+	b.add_theme_stylebox_override("focus", StyleBoxEmpty.new())
+	var dark := Color(0.10, 0.07, 0.04)
+	b.add_theme_color_override("font_color", CREAM)
+	b.add_theme_color_override("font_hover_color", CREAM)
+	b.add_theme_color_override("font_pressed_color", dark)
+	b.add_theme_color_override("font_hover_pressed_color", dark)
+	return b
+
+
+func _style(c: Control, size: int) -> void:
+	if _font != null:
+		c.add_theme_font_override("font", _font)
+	c.add_theme_font_size_override("font_size", size)

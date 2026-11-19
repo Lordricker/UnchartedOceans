@@ -60,12 +60,13 @@ GROUPS = {
  "MainDeck": ["Deck", "CockpitSole", "CockpitCoaming", "HoldFloor", "CabinFloor", "Companionway_Steps"],
  "DeckFittings": ["Capstan", "BoardingSteps", "Channels", "Deadeyes", "Chainplates", "Blocks", "RopeFittings", "SheetCleats", "Cleats", "MainsheetHorse", "PinRail", "BelayPins",
                   "Anchor", "BowspritBitts", "HoldLadder", "Mooring_Rope", "BinnacleBody", "BinnacleBrass", "RudderGudgeons"],
- "Rig_Spars": ["Mast", "Topmast", "Bowsprit", "MastTop"],
- "Rig_Ropes": ["Rigging", "Ratlines", "RunningRigging", "BoardingRopes"],
+ "Rig_Spars": ["Mast", "Topmast", "Bowsprit", "MastTop", "MastHoops"],
+ "Rig_Ropes": ["Rigging", "Ratlines", "BoardingRopes"],          # RunningRigging (halyards, jib sheets) and Mainsheet are modelled for the Blender view only: the game draws them live (ship_classes.gd rig haul / rope_lines) so they follow the sails
  "Interiors": ["Cabin", "Skylight", "Bulkheads", "Bunk_Port", "ChartTable", "CabinBookshelf_Frame"],
+ "HullTrim": ["CapRail", "Wales", "StemKeel"],                     # the sloop hull's rail cap, wales and stem / keel: their own mesh so the Hull convex collider is not widened by them
  "Glass": ["CabinWindows", "SkylightGlass"],
 }
-ROLE = {"Hull": "static", "MainDeck": "static", "DeckFittings": "static", "Rig_Spars": "static", "Rig_Ropes": "static", "Interiors": "static", "Glass": "glass"}
+ROLE = {"Hull": "static", "MainDeck": "static", "DeckFittings": "static", "Rig_Spars": "static", "Rig_Ropes": "static", "Interiors": "static", "Glass": "glass", "HullTrim": "static"}
 # kept as their own nodes (old name, new name, props). Sails and spars are siblings under the root, like the brig's spanker parts.
 KEEP = [
  ("Rudder", "Rudder", {"game_role": "rudder", "vis_begin": 0.0, "vis_end": 60.0}),
@@ -74,12 +75,8 @@ KEEP = [
  ("Swivel_Gun", "Gun_0_Barrel", {"game_role": "gun_barrel"}),
  ("MainSail", "Sail_Spanker", {"game_role": "sail", "reefable": False, "sail_kind": "spanker"}),
  ("Boom", "Spanker_Boom", {"game_role": "spanker_spar", "vis_begin": 0.0, "vis_end": 250.0}),
- ("Gaff", "Spanker_Gaff", {"game_role": "spanker_spar", "vis_begin": 0.0, "vis_end": 250.0}),
- ("GaffTopsail", "Spanker_Topsail", {"game_role": "spanker_spar", "vis_begin": 0.0, "vis_end": 250.0}),
- ("Spanker_Fittings", "Spanker_Fittings", {"game_role": "spanker_spar", "vis_begin": 0.0, "vis_end": 120.0}),      # boom-end block + topsail clew line: swing with the boom (ShipSails finds them by name)
  ("HorseBlock", "Sheet_Block", {"game_role": "sheet_block", "vis_begin": 0.0, "vis_end": 120.0}),                     # the mainsheet block on the horse; ShipSails slides it along the bar
  ("Jib", "Sail_Jib", {"game_role": "sail", "reefable": False, "sail_kind": "headsail"}),
- ("Staysail", "Sail_ForeStaysail", {"game_role": "sail", "reefable": False, "sail_kind": "headsail"}),
  ("BinnacleGlass", "BinnacleGlass", {"interaction": "compass"}),
  ("CabinBed", "CabinBed", {"interaction": "bed"}), ("CabinBedding", "CabinBedding", {"interaction": "bed"}), ("Chart", "TableChart", {"interaction": "chart"}),                      # ShipHelm builds its compass card under this node
  ("PumpHandle", "Pump_Brake", {}), ("Pump", "Pump_Body", {}), ("LogLineCoil", "LogLine_Coil", {"interaction": "log_line", "vis_begin": 0.0, "vis_end": 35.0}),
@@ -192,13 +189,11 @@ def attach_weights_and_shapes(ob, mode):
 def set_origin(ob, p):
     p = Vector(p); ob.data.transform(Matrix.Translation(-(p - ob.matrix_basis.translation)))   # world verts stay put
     mb = ob.matrix_basis.copy(); mb.translation = p; ob.matrix_basis = mb
-for nm, mode in (("Sail_Spanker", "main"), ("Sail_Jib", "head"), ("Sail_ForeStaysail", "head")):
+for nm, mode in (("Sail_Spanker", "main"), ("Sail_Jib", "head")):
     ob = O[nm]
     if mode == "head":                                           # headsails swing about their stay: the node origin is the tack
         _, wco = sail_data(ob); set_origin(ob, wco[np.argmin(wco[:, 1])])
     attach_weights_and_shapes(ob, mode)
-tsl = O["Spanker_Topsail"]; ca = tsl.data.color_attributes.new("PinWeights", 'FLOAT_COLOR', 'POINT')       # not driven by the game: plain white
-for i in range(len(tsl.data.vertices)): ca.data[i].color = (1.0, 1.0, 1.0, 1.0)
 L("sails done")
 
 # ---- markers (game_role props as the brig's)
@@ -237,8 +232,7 @@ for name, loc, kind, size, scale, rot, cprops in stations:
     if name == "CabinBookshelf": continue                         # the shelf node above
     if name.startswith(("Ladder_", "Climb_")): continue            # climbing zones and points live in scenes/ships/cutter.tscn (editable Area3Ds), not in the glb
     nn = side_fix(RENAME.get(name, name), loc.x); add_marker(nn, loc, kind, size, tuple(scale), rot, cprops)
-for s, x in (("Port", 0.7), ("Stbd", -0.7)): add_marker("Station_Sheet_Staysail_" + s, (x, -1.5, 0.9))
-for i, p in enumerate([(0.6, 4.2, 0.43), (1.0, 5.2, 1.35), (1.0, 5.7, 1.2), (1.0, 5.9, 0.8), (1.0, 6.0, 0.4)]): add_marker("LogLine_P%d" % i, p)
+for i, p in enumerate([(0.6, 4.2, 0.43), (1.0, 5.25, 1.60), (1.0, 5.7, 1.45), (1.0, 5.9, 1.05), (1.0, 6.0, 0.65)]): add_marker("LogLine_P%d" % i, p)
 lt = bpy.data.lights.new("LT_Lamp_Cabin_0", 'POINT'); lt.energy = 40.0
 lo = newobj("LT_Lamp_Cabin_0", lt); lo.location = (0.0, 0.3, 1.15); lo.parent = root; exp.objects.link(lo)
 setprops(lo, {"godot_energy": 1.2, "godot_range": 5.0, "godot_shadow": True, "blender_watts": 40.0, "game_role": "light"})
@@ -258,7 +252,7 @@ def add_box(lo_, hi_):
     r = bmesh.ops.create_cube(bm, size=1.0)
     for v in r["verts"]: v.co = (v.co.x * s.x + c.x, v.co.y * s.y + c.y, v.co.z * s.z + c.z)
 for n, (lo_, hi_) in boxes.items(): add_box(lo_, hi_)
-add_box(Vector((-0.17, -1.87, -1.2)), Vector((0.17, -1.53, 3.0)))             # the mast, as far up as anyone reaches
+add_box(Vector((-0.17, -1.86, -1.2)), Vector((0.17, -1.38, 3.0)))             # the mast (it rakes aft a little), as far up as anyone reaches
 me = bpy.data.meshes.new("Col_Obstacles"); bm.to_mesh(me); bm.free(); col_obj("Col_Obstacles-colonly", me)
 
 # ---- drop everything that is not part of the export

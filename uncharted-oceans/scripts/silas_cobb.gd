@@ -1,0 +1,586 @@
+class_name SilasCobb
+extends Node3D
+## Captain Silas Cobb, the retired captain who sold you the cutter and came along to see she survives the week. Lives
+## only in the tutorial (tutorial_director.gd) and never leaves the ship: he is a child of the ShipRig, so he rides the
+## deck whatever the sea does.
+##
+## The model is a PLACEHOLDER (NPC_Sailor.glb, recoloured: white hair, dark cap and coat, a bit stout). The real
+## Silas replaces `_load_model()`; everything else (walking, stations, the idle loop, head-look) stays.
+##
+## Walking: when the ship is built he probes the deck once with rays and a cylinder, and makes a grid of the places
+## a man can stand (0.25 m cells in the ship's own frame, steps up to 0.4 m, headroom 1.3 m or more, several floors
+## per column for the cabin and hold). A* over that grid finds the way, so no waypoints are placed by hand. Stations
+## (the tiller, the bookshelf, the chart table...) are looked up by marker name on the ship.
+##
+##   go_to("tiller")   walk there; `arrived(station)` when he has stopped
+##   face_player()     turn to the player when standing
+##   at_station        where he is standing now ("" while walking)
+
+signal arrived(station: String)
+## The player clicked him (the director repeats the current instruction).
+signal clicked
+
+const HeadLookScript := preload("res://scripts/npc_head_look.gd")
+const Outline := preload("res://scripts/interact_outline.gd")
+## The real Silas (Characters/Silas_Cobb.blend, exported with the Idle and Walk_Hobble clips). If it is missing, the
+## recoloured sailor stands in.
+const MODEL := "res://assets/npcs/NPC_Silas.glb"
+const PLACEHOLDER := "res://assets/npcs/NPC_Sailor.glb"
+const ANIM_IDLE := "Idle"
+const ANIM_WALK := "Walk_Hobble"
+
+const CELL := 0.25
+const X_RANGE := Vector2(-2.4, 2.4)
+const Z_RANGE := Vector2(-6.6, 6.9)
+const MAX_STEP := 0.4
+const MIN_HEADROOM := 1.3
+const HEIGHT_M := 1.68
+const STOUT := 1.12
+## His hobble covers about 0.85 m/s; faster and the feet slide.
+const WALK_SPEED := 0.85
+const PLACEHOLDER_SPEED := 1.15
+
+## station name -> {marker: node name | "" , point: Vector3 override, look: Vector3, stand: metres from the marker}
+var stations := {
+	"bookshelf": {"node": "CabinBookshelf", "stand": 0.95},
+	"tiller": {"node": "Station_Tiller", "stand": 1.0},
+	"chart": {"node": "TableChart", "stand": 0.95},
+	"log": {"node": "Station_LogLine", "stand": 1.0},
+	"bed": {"node": "Station_Bed", "stand": 0.9},
+	"hold": {"node": "HoldBounds", "stand": 0.0},
+	"mast": {"node": "Station_Halyard_Spanker", "stand": 0.0},
+	"gangway": {"node": "", "stand": 0.0},
+}
+
+var at_station := ""
+
+var _rig: Node3D
+var _model: Node3D
+var _astar := AStar3D.new()
+var _pts: Array[Vector3] = []             # id -> rig-local standing point
+var _head: Array[float] = []              # id -> headroom
+var _cols := {}                           # Vector2i -> Array[int] ids
+var _main := {}                           # id -> true, the largest connected piece
+var _path: PackedVector3Array = []
+var _path_i := 0
+var _goal := ""
+var _walk_t := 0.0
+var _anim: AnimationPlayer
+## True once the real model loaded (its own clips, real size); false for the placeholder.
+var _real := false
+var _look_at_local := Vector3.INF
+var _ready_graph := false
+var _aimed := false
+var _prompt: Label
+var _bounds := AABB(Vector3(-0.38, 0.0, -0.32), Vector3(0.76, HEIGHT_M + 0.1, 0.64))
+## How close the player has to be to talk to him (m).
+@export var reach := 3.5
+
+
+## Put Silas on the ship. Call once the ship rig and its collision exist (a frame after the scene starts).
+func setup(rig: Node3D) -> void:
+	_rig = rig
+	rig.add_child(self)
+	_load_model()
+	_build_graph()
+	_ready_graph = _pts.size() > 0
+	if not _ready_graph:
+		push_warning("SilasCobb: no deck found to walk on; he will stand at the stations directly")
+	var p := _stand_point("tiller")
+	transform = Transform3D(Basis.IDENTITY, p)
+	at_station = "tiller"
+	_make_prompt()
+
+
+func go_to(station: String) -> void:
+	if not stations.has(station):
+		push_warning("SilasCobb: unknown station %s" % station)
+		return
+	if station == at_station and _path.is_empty():
+		arrived.emit(station)
+		return
+	_goal = station
+	at_station = ""
+	var goal := _stand_point(station)
+	if _ready_graph:
+		var a := _nearest_id(position)
+		var b := _nearest_id(goal)
+		_path = _astar.get_point_path(a, b) if a >= 0 and b >= 0 else PackedVector3Array()
+		if _path.is_empty():
+			_path = PackedVector3Array([goal])
+	else:
+		_path = PackedVector3Array([goal])
+	_path_i = 0
+
+
+func is_walking() -> bool:
+	return not _path.is_empty()
+
+
+func face_player() -> void:
+	var pl := get_tree().get_first_node_in_group("player") as Node3D
+	if pl != null and _rig != null:
+		_look_at_local = _rig.to_local(pl.global_position)
+
+
+## Rig-local point of a station's marker (what he looks at when he gets there).
+func station_target(station: String) -> Vector3:
+	var s: Dictionary = stations.get(station, {})
+	var nm := String(s.get("node", ""))
+	if nm == "":
+		return _gangway_point()
+	var n := _rig.find_child(nm, true, false) as Node3D
+	if n == null:
+		return Vector3(0, 0.3, 0)
+	return _node_center(n)
+
+
+# ------------------------------------------------------------------ walking
+
+func _process(delta: float) -> void:
+	if _rig == null:
+		return
+	_update_aim()
+	if not _path.is_empty():
+		_walk(delta)
+	else:
+		_idle_face(delta)
+	_stoop(delta)
+
+
+func _walk(delta: float) -> void:
+	_walk_t += delta
+	var target := _path[_path_i]
+	var d := target - position
+	var flat := Vector3(d.x, 0.0, d.z)
+	var step := (WALK_SPEED if _real else PLACEHOLDER_SPEED) * delta
+	_play(ANIM_WALK)
+	if flat.length() <= step:
+		position = target
+		_path_i += 1
+		if _path_i >= _path.size():
+			_path = PackedVector3Array()
+			at_station = _goal
+			_look_at_local = station_target(_goal)
+			if _model != null:
+				_model.position.y = _model_base_y
+			_play(ANIM_IDLE)
+			arrived.emit(_goal)
+		return
+	var dir := flat.normalized()
+	position.x += dir.x * step
+	position.z += dir.z * step
+	position.y = move_toward(position.y, target.y, step * 1.5)
+	rotation.y = lerp_angle(rotation.y, atan2(dir.x, dir.z), minf(1.0, delta * 8.0))
+	if _model != null and not _real:
+		# no walk clip on the placeholder: a little bob and sway
+		_model.position.y = _model_base_y + absf(sin(_walk_t * 7.0)) * 0.035
+		_model.rotation.z = sin(_walk_t * 3.5) * 0.035
+
+
+func _idle_face(delta: float) -> void:
+	if _model != null:
+		_model.rotation.z = lerpf(_model.rotation.z, 0.0, minf(1.0, delta * 6.0))
+	if _look_at_local == Vector3.INF:
+		return
+	var d := _look_at_local - position
+	d.y = 0.0
+	if d.length() > 0.05:
+		rotation.y = lerp_angle(rotation.y, atan2(d.x, d.z), minf(1.0, delta * 4.0))
+
+
+var _model_base_y := 0.0
+var _model_scale_y := 1.0
+
+## Duck his head under low deck beams: the model squashes a little where the headroom is short.
+func _stoop(delta: float) -> void:
+	if _model == null or not _ready_graph:
+		return
+	var id := _nearest_id(position)
+	var hr := _head[id] if id >= 0 else 2.0
+	var want := clampf(hr / (HEIGHT_M + 0.12), 0.8, 1.0)
+	_model_scale_y = lerpf(_model_scale_y, want, minf(1.0, delta * 5.0))
+	_model.scale.y = _unit_scale_y * _model_scale_y
+
+
+var _unit_scale_y := 1.0
+
+
+# ------------------------------------------------------------------ clicking him
+
+func _make_prompt() -> void:
+	var layer := CanvasLayer.new()
+	layer.layer = 6
+	add_child(layer)
+	_prompt = Label.new()
+	_prompt.set_anchors_preset(Control.PRESET_CENTER_BOTTOM)
+	_prompt.grow_horizontal = Control.GROW_DIRECTION_BOTH
+	_prompt.grow_vertical = Control.GROW_DIRECTION_BEGIN
+	_prompt.offset_bottom = -230.0
+	_prompt.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_prompt.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.9))
+	_prompt.add_theme_constant_override("outline_size", 6)
+	var font := load("res://assets/fonts/Ferrum-ExtraCondensed.otf") as Font
+	if font != null:
+		_prompt.add_theme_font_override("font", font)
+	_prompt.add_theme_font_size_override("font_size", 26)
+	_prompt.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_prompt.text = "Click: ask Captain Cobb"
+	_prompt.visible = false
+	layer.add_child(_prompt)
+
+
+## Looking at him, close enough, hands empty, mouse captured: he is outlined and a click asks him again.
+func _update_aim() -> void:
+	var want := false
+	var pl := get_tree().get_first_node_in_group("player") as Node3D
+	var cam := get_viewport().get_camera_3d()
+	if pl != null and cam != null and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED and not bool(pl.get("input_locked")):
+		var cg = pl.get("cargo")
+		if cg == null or cg.get("carried") == null:
+			var o := cam.global_position
+			var d := -cam.global_transform.basis.z
+			var inv := global_transform.affine_inverse()
+			var hit = _bounds.intersects_ray(inv * o, (inv.basis * d).normalized())
+			if hit != null:
+				var dist := o.distance_to(global_transform * (hit as Vector3))
+				if dist <= reach:
+					# a wall or a mast between you and him: no
+					var q := PhysicsRayQueryParameters3D.create(o, o + d * dist, 1, [(pl as CollisionObject3D).get_rid()] if pl is CollisionObject3D else [])
+					var w := get_world_3d().direct_space_state.intersect_ray(q)
+					want = w.is_empty() or o.distance_to(w["position"] as Vector3) > dist - 0.25
+	if want != _aimed:
+		_aimed = want
+		if _model != null:
+			Outline.set_on(self, want)
+		if _prompt != null:
+			_prompt.visible = want
+
+
+func _input(e: InputEvent) -> void:
+	if not _aimed:
+		return
+	var mb := e as InputEventMouseButton
+	if mb == null or not mb.pressed or mb.button_index != MOUSE_BUTTON_LEFT:
+		return
+	face_player()
+	clicked.emit()
+	get_viewport().set_input_as_handled()
+
+
+# ------------------------------------------------------------------ stations
+
+func _stand_point(station: String) -> Vector3:
+	var s: Dictionary = stations[station]
+	var t := station_target(station)
+	var stand := float(s.get("stand", 0.0))
+	if not _ready_graph:
+		return t
+	# the free spot about `stand` metres from the marker: not on it, not far
+	var best := -1
+	var best_score := 1e9
+	for id in _main:
+		var p := _pts[id]
+		var d := Vector2(p.x - t.x, p.z - t.z).length()
+		var dy := absf(p.y - t.y)
+		if station == "gangway":
+			d = Vector2(p.x - (-1.0), p.z - t.z).length()
+			dy = 0.0
+		var score := absf(d - stand) + dy * 0.7
+		if score < best_score:
+			best_score = score
+			best = id
+	return _pts[best] if best >= 0 else t
+
+
+func _gangway_point() -> Vector3:
+	var z := -2.07
+	var hb := _rig.get_node_or_null("ShipHarbor")
+	if hb != null and hb.get("_gang_z") != null:
+		z = float(hb.get("_gang_z"))
+	return Vector3(-3.0, 0.9, z)
+
+
+## Centre of a marker or of the meshes under a node, in the rig's frame.
+func _node_center(n: Node3D) -> Vector3:
+	var inv := _rig.global_transform.affine_inverse()
+	var box := AABB()
+	var first := true
+	var list: Array = n.find_children("*", "MeshInstance3D", true, false)
+	if n is MeshInstance3D:
+		list.append(n)
+	for m in list:
+		var mi := m as MeshInstance3D
+		if mi.mesh == null or not mi.is_visible_in_tree():
+			continue
+		var b: AABB = (inv * mi.global_transform) * mi.get_aabb()
+		if first:
+			box = b
+			first = false
+		else:
+			box = box.merge(b)
+	if first:
+		return inv * n.global_position
+	var c := box.get_center()
+	return Vector3(c.x, box.position.y, c.z)
+
+
+# ------------------------------------------------------------------ the walk graph
+
+func _build_graph() -> void:
+	var space := _rig.get_world_3d().direct_space_state
+	var excl: Array[RID] = []
+	var pl := get_tree().get_first_node_in_group("player")
+	if pl is CollisionObject3D:
+		excl.append((pl as CollisionObject3D).get_rid())
+	var up := Vector3.UP
+	var shape := CylinderShape3D.new()
+	shape.radius = 0.2
+	shape.height = 0.8
+	var nx := int(round((X_RANGE.y - X_RANGE.x) / CELL))
+	var nz := int(round((Z_RANGE.y - Z_RANGE.x) / CELL))
+	for ix in range(nx + 1):
+		for iz in range(nz + 1):
+			var x := X_RANGE.x + ix * CELL
+			var z := Z_RANGE.x + iz * CELL
+			var top := 3.5
+			var ids: Array[int] = []
+			var guard := 0
+			while top > -3.0 and guard < 5:
+				guard += 1
+				var q := PhysicsRayQueryParameters3D.create(_rig.to_global(Vector3(x, top, z)), _rig.to_global(Vector3(x, -3.0, z)), 1, excl)
+				var h := space.intersect_ray(q)
+				if h.is_empty():
+					break
+				var lp: Vector3 = _rig.to_local(h["position"])
+				var ln: Vector3 = _rig.global_transform.basis.inverse() * (h["normal"] as Vector3)
+				top = lp.y - 0.1
+				if ln.dot(up) < 0.7:
+					continue
+				# headroom above the floor
+				var uq := PhysicsRayQueryParameters3D.create(_rig.to_global(lp + Vector3(0, 0.05, 0)), _rig.to_global(lp + Vector3(0, 2.2, 0)), 1, excl)
+				var uh := space.intersect_ray(uq)
+				var room := 2.2 if uh.is_empty() else (_rig.to_local(uh["position"]) as Vector3).y - lp.y
+				if room < MIN_HEADROOM:
+					continue
+				# nothing solid in the cell (a rail, a crate, a bulkhead)
+				var sp := PhysicsShapeQueryParameters3D.new()
+				sp.shape = shape
+				sp.collision_mask = 1
+				sp.exclude = excl
+				sp.transform = Transform3D(_rig.global_transform.basis, _rig.to_global(lp + Vector3(0, 0.55, 0)))
+				if not space.intersect_shape(sp, 1).is_empty():
+					continue
+				var id := _pts.size()
+				_pts.append(lp)
+				_head.append(room)
+				_astar.add_point(id, lp)
+				var key := Vector2i(ix, iz)
+				if not _cols.has(key):
+					_cols[key] = []
+				(_cols[key] as Array).append(id)
+				ids.append(id)
+	# links to the eight neighbours at a similar height
+	for key in _cols:
+		for id in _cols[key]:
+			for off in [Vector2i(1, 0), Vector2i(0, 1), Vector2i(1, 1), Vector2i(1, -1)]:
+				var nk: Vector2i = key + off
+				if not _cols.has(nk):
+					continue
+				for oid in _cols[nk]:
+					if absf(_pts[oid].y - _pts[id].y) <= MAX_STEP:
+						if off.x != 0 and off.y != 0:
+							# a diagonal needs both sides free, or he cuts a corner through a post
+							if not _has_near(Vector2i(key.x + off.x, key.y), _pts[id].y) or not _has_near(Vector2i(key.x, key.y + off.y), _pts[id].y):
+								continue
+						_astar.connect_points(id, oid, true)
+	_find_main()
+
+
+func _has_near(key: Vector2i, y: float) -> bool:
+	if not _cols.has(key):
+		return false
+	for id in _cols[key]:
+		if absf(_pts[id].y - y) <= MAX_STEP:
+			return true
+	return false
+
+
+## Keep the largest connected piece of floor: a ledge he could not climb back from is not somewhere to send him.
+func _find_main() -> void:
+	var seen := {}
+	var best: Array = []
+	for id in range(_pts.size()):
+		if seen.has(id):
+			continue
+		var comp: Array = []
+		var stack := [id]
+		seen[id] = true
+		while not stack.is_empty():
+			var c: int = stack.pop_back()
+			comp.append(c)
+			for n in _astar.get_point_connections(c):
+				if not seen.has(n):
+					seen[n] = true
+					stack.append(n)
+		if comp.size() > best.size():
+			best = comp
+	_main.clear()
+	for id in best:
+		_main[id] = true
+	for id in range(_pts.size()):
+		if not _main.has(id):
+			_astar.set_point_disabled(id, true)
+
+
+func _nearest_id(p: Vector3) -> int:
+	var best := -1
+	var bd := 1e9
+	for id in _main:
+		var d := (_pts[id] - p).length_squared()
+		if d < bd:
+			bd = d
+			best = id
+	return best
+
+
+## For the director's tests and the debug map: how many standing places and which stations are reachable.
+func graph_info() -> Dictionary:
+	var reach := {}
+	for s in stations:
+		var sp := _stand_point(s)
+		reach[s] = {"point": sp, "dist_to_graph": (_pts[_nearest_id(sp)] - sp).length() if _ready_graph else -1.0}
+	return {"points": _pts.size(), "main": _main.size(), "stations": reach}
+
+
+## A text map of the standing places (X across, Z down): '#' reachable, '+' reachable with low headroom, '.' not.
+func ascii_map() -> String:
+	var nx := int(round((X_RANGE.y - X_RANGE.x) / CELL))
+	var nz := int(round((Z_RANGE.y - Z_RANGE.x) / CELL))
+	var rows: PackedStringArray = []
+	for iz in range(nz + 1):
+		var line := ""
+		for ix in range(nx + 1):
+			var ch := "."
+			var key := Vector2i(ix, iz)
+			if _cols.has(key):
+				for id in _cols[key]:
+					if _main.has(id):
+						ch = "+" if _head[id] < 1.75 else "#"
+			line += ch
+		rows.append(line)
+	return "\n".join(rows)
+
+
+# ------------------------------------------------------------------ the model (placeholder)
+
+func _load_model() -> void:
+	var ps: PackedScene = null
+	if ResourceLoader.exists(MODEL):
+		ps = load(MODEL) as PackedScene
+	_real = ps != null
+	if ps == null:
+		push_warning("SilasCobb: %s missing, using the placeholder" % MODEL)
+		ps = load(PLACEHOLDER) as PackedScene
+	if ps == null:
+		return
+	_model = ps.instantiate() as Node3D
+	add_child(_model)
+	if _real:
+		# modelled in metres with the feet on the origin and facing +Z: nothing to fit
+		_model_base_y = 0.0
+		_unit_scale_y = 1.0
+	else:
+		_recolour()
+		_fit()
+	_start_idle()
+	var skels := _model.find_children("*", "Skeleton3D", true, false)
+	if not skels.is_empty():
+		var m = HeadLookScript.new()
+		m.npc = self
+		(skels[0] as Skeleton3D).add_child(m)
+
+
+## White hair, dark cap and coat. By material name; whatever is not there is left alone.
+func _recolour() -> void:
+	var tint := {
+		"NPC_Hair": Color(0.86, 0.86, 0.84),
+		"NPC_Bandana": Color(0.1, 0.13, 0.22),
+		"NPC_Vest": Color(0.16, 0.2, 0.3),
+		"NPC_Shirt": Color(0.82, 0.78, 0.68),
+		"NPC_Sash": Color(0.45, 0.12, 0.1),
+		"NPC_Pants": Color(0.3, 0.27, 0.23),
+	}
+	for m in _model.find_children("*", "MeshInstance3D", true, false):
+		var mi := m as MeshInstance3D
+		if mi.mesh == null:
+			continue
+		for s in range(mi.mesh.get_surface_count()):
+			var mat := mi.get_active_material(s) as BaseMaterial3D
+			if mat == null:
+				continue
+			var key := mat.resource_name
+			if not tint.has(key):
+				continue
+			var dup := mat.duplicate() as BaseMaterial3D
+			dup.albedo_color = tint[key]
+			mi.set_surface_override_material(s, dup)
+
+
+## Feet on the node's origin, body centred, 1.68 m tall and a little broad.
+func _fit() -> void:
+	var inv := global_transform.affine_inverse()
+	var box := AABB()
+	var first := true
+	for m in _model.find_children("*", "MeshInstance3D", true, false):
+		var mi := m as MeshInstance3D
+		if mi.mesh == null:
+			continue
+		var xf := mi.global_transform
+		var sk := mi.get_node_or_null(mi.skeleton) as Skeleton3D
+		if sk != null:
+			xf = sk.global_transform
+		var b: AABB = (inv * xf) * mi.get_aabb()
+		if first:
+			box = b
+			first = false
+		else:
+			box = box.merge(b)
+	if first or box.size.y < 0.1:
+		return
+	var s := HEIGHT_M / box.size.y
+	_model.scale = Vector3(s * STOUT, s, s * STOUT)
+	var c := box.get_center() * s
+	_model.position = Vector3(-c.x, -box.position.y * s, -c.z)
+	_model_base_y = _model.position.y
+	_unit_scale_y = s
+
+
+func _start_idle() -> void:
+	for a in _model.find_children("*", "AnimationPlayer", true, false):
+		var ap := a as AnimationPlayer
+		var pick := ""
+		for n in ap.get_animation_list():
+			if n == &"RESET":
+				continue
+			if pick == "" or String(n).to_lower().contains("idle"):
+				pick = String(n)
+		if pick == "":
+			continue
+		for n in ap.get_animation_list():
+			var a2 := ap.get_animation(n)
+			if a2 != null and n != &"RESET":
+				a2.loop_mode = Animation.LOOP_LINEAR
+		var anim := ap.get_animation(pick)
+		ap.play(pick)
+		_anim = ap
+		return
+
+
+## Cross-fade to a clip by name (only when the real model is loaded; the placeholder just idles).
+func _play(clip: String) -> void:
+	if _anim == null or not _real or not _anim.has_animation(clip):
+		return
+	if _anim.current_animation == clip:
+		return
+	_anim.play(clip, 0.25)

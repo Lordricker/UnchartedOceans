@@ -64,6 +64,8 @@ class Track extends RefCounted:
 @export var start_storm_distance_m := 30000.0
 @export var start_storm_speed_mps := 5.0
 @export var weather_seed := 1031
+## Not zero: the wind is this everywhere and always (m/s, x east, y south): the tutorial's steady fair wind.
+@export var fixed_wind_mps := Vector2.ZERO
 @export var coast_breeze := true
 ## Inside this distance of a port (m) its own breeze takes over from the general coastal breeze: full strength in the
 ## inner 70% and fading out to nothing at the edge. The breeze blows port_breeze_speed (m/s) along the harbour's axis,
@@ -314,7 +316,7 @@ func weather_text() -> String:
 	for t in tracks:
 		if t.cell.intensity < 0.25:
 			continue
-		var d := Vector2(t.cx, t.cz).distance_to(p)
+		var d := WorldChart.distance_m(t.cx, t.cz, p.x, p.y)
 		if d < bd:
 			bd = d
 			best = t
@@ -327,6 +329,8 @@ func weather_text() -> String:
 
 ## The wind at a chart position now: air velocity in m/s, x east and y south (before gusts).
 func wind_at(cx: float, cz: float) -> Vector2:
+	if fixed_wind_mps != Vector2.ZERO:
+		return fixed_wind_mps
 	var v := field.prevailing(cx, cz, year_phase())
 	if coast_breeze and _streamer and _streamer.chart:
 		# near a port the daily breeze blows along the harbour's own axis (and the land takes the edge off the
@@ -378,7 +382,7 @@ func ship_chart_pos() -> Vector2:
 ## itself, and the dark sky, are drawn from the cell's full depth_m); pass scale = 1 for the whole cloud's reach.
 func _proximity(t: Track, cx: float, cz: float, scale := -1.0) -> float:
 	var dp := maxf(t.cell.depth_m * (danger_depth_scale if scale < 0.0 else scale), 1.0)
-	var d := Vector2(cx - t.cx, cz - t.cz).length()
+	var d := WorldChart.distance_m(cx, cz, t.cx, t.cz)
 	return t.cell.intensity * (1.0 - smoothstep(0.8 * dp, 3.5 * dp, d))
 
 
@@ -389,7 +393,7 @@ func storm_wind(cx: float, cz: float) -> Vector2:
 		var p := _proximity(t, cx, cz)
 		if p <= 0.0:
 			continue
-		var rel := Vector2(t.cx - cx, t.cz - cz)
+		var rel := Vector2(WorldChart.wrap_d(t.cx - cx, WorldChart.wrap_w), WorldChart.wrap_d(t.cz - cz, WorldChart.wrap_h))
 		var inflow := rel.normalized() if rel.length() > 1.0 else Vector2.ZERO
 		out += (WindFieldS.vec(1.0, t.heading) + inflow * 0.45) * t.wind_boost * p
 	return out
@@ -429,7 +433,7 @@ func nearest_storm() -> Dictionary:
 	var best: Track = null
 	var bd := INF
 	for t in tracks:
-		var d := Vector2(t.cx, t.cz).distance_to(p)
+		var d := WorldChart.distance_m(t.cx, t.cz, p.x, p.y)
 		if d < bd:
 			bd = d
 			best = t
@@ -442,7 +446,7 @@ func nearest_storm() -> Dictionary:
 
 func _process(delta: float) -> void:
 	_find_sky(delta)
-	_advance(delta * clock_hours_per_second * 3600.0)
+	_advance(delta * clock_hours_per_second * 3600.0)      # fast time speeds this up through Engine.time_scale
 	if drive_sky and _sky != null:
 		_sky.hours_per_second = 0.0
 		_sky.time_hours = hour_of_day()
@@ -492,7 +496,7 @@ func _warm_up() -> void:
 	var sp := ship_chart_pos()
 	for i in range(tracks.size() - 1, -1, -1):
 		var t := tracks[i]
-		if Vector2(t.cx, t.cz).distance_to(sp) < clear_start_radius_m + t.cell.radius_m:
+		if WorldChart.distance_m(t.cx, t.cz, sp.x, sp.y) < clear_start_radius_m + t.cell.radius_m:
 			tracks.remove_at(i)
 
 
@@ -508,8 +512,10 @@ func _step_tracks(dt: float) -> void:
 		t.cz += v.y * dt
 		var u := t.age / t.life
 		t.cell.intensity = t.peak * smoothstep(0.0, 0.15, u) * (1.0 - smoothstep(0.7, 1.0, u))
-		var m := 150000.0
-		if t.age >= t.life or t.cx < -m or t.cx > field.width_m + m or t.cz < -m or t.cz > field.height_m + m:
+		# the world wraps: a storm that runs off one edge comes back in at the other, until its life is spent
+		t.cx = fposmod(t.cx, field.width_m)
+		t.cz = fposmod(t.cz, field.height_m)
+		if t.age >= t.life:
 			_remove_track(i)
 
 
@@ -665,8 +671,9 @@ func _sync_sky() -> void:
 	if _sky == null or _streamer == null:
 		return
 	var o := Vector2(_streamer.origin_x, _streamer.origin_z)
+	var sp := ship_chart_pos()
 	for t in tracks:
-		t.cell.pos = Vector2(t.cx, t.cz) - o
+		t.cell.pos = WorldChart.near(Vector2(t.cx, t.cz), sp) - o      # the copy of the storm nearest the ship (the world wraps)
 		t.cell.velocity = Vector2.ZERO
 
 
@@ -722,7 +729,7 @@ func storm_wake_in(cx: float, cz: float, heading_deg: float, speed_mps: float, h
 			var u := ta[i] / trk.life
 			var inten := trk.peak * smoothstep(0.0, 0.15, u) * (1.0 - smoothstep(0.7, 1.0, u))
 			var dp := maxf(trk.cell.depth_m * danger_depth_scale, 1.0)
-			var d := Vector2(sx - tx[i], sz - tz[i]).length()
+			var d := WorldChart.distance_m(sx, sz, tx[i], tz[i])
 			if inten * (1.0 - smoothstep(0.8 * dp, 3.5 * dp, d)) >= storm_wake_level:
 				return t / 3600.0
 		if t >= total:
@@ -741,6 +748,56 @@ func storm_wake_in(cx: float, cz: float, heading_deg: float, speed_mps: float, h
 ## A sleep: let up to `hours` of game time pass while the ship sails straight on (heading, speed) from a chart position.
 ## The weather moves for real, in ten-minute steps, and the sleep ends early if a storm's weather (storm_wake_level) is
 ## about to reach the ship, new storms included. Returns the hours that did pass.
+## Hours until the storms that exist now have passed over a ship that stays where she is (a sleep riding it out).
+## Looks ahead only, nothing moves. Returns `hours` if the storm is still on her at the end, 0.0 if none ever reaches her.
+func storm_clear_in(cx: float, cz: float, hours: float) -> float:
+	if tracks.is_empty() or hours <= 0.0:
+		return 0.0
+	var total := hours * 3600.0
+	var n := tracks.size()
+	var tx := PackedFloat64Array()
+	var tz := PackedFloat64Array()
+	var th := PackedFloat64Array()
+	var ta := PackedFloat64Array()
+	tx.resize(n)
+	tz.resize(n)
+	th.resize(n)
+	ta.resize(n)
+	for i in n:
+		tx[i] = tracks[i].cx
+		tz[i] = tracks[i].cz
+		th[i] = tracks[i].heading
+		ta[i] = tracks[i].age
+	var t := 0.0
+	var seen := false
+	while true:
+		var on_her := false
+		for i in n:
+			var trk := tracks[i]
+			var u := ta[i] / trk.life
+			var inten := trk.peak * smoothstep(0.0, 0.15, u) * (1.0 - smoothstep(0.7, 1.0, u))
+			var dp := maxf(trk.cell.depth_m * danger_depth_scale, 1.0)
+			var d := WorldChart.distance_m(cx, cz, tx[i], tz[i])
+			if inten * (1.0 - smoothstep(0.8 * dp, 3.5 * dp, d)) >= storm_wake_level:
+				on_her = true
+				break
+		if on_her:
+			seen = true
+		elif seen:
+			return t / 3600.0
+		if t >= total:
+			break
+		var dt := minf(600.0, total - t)
+		for i in n:
+			th[i] = fposmod(th[i] + tracks[i].curve * dt / 3600.0, 360.0)
+			var v := WindFieldS.vec(tracks[i].speed, th[i])
+			tx[i] += v.x * dt
+			tz[i] += v.y * dt
+			ta[i] += dt
+		t += dt
+	return hours if seen else 0.0
+
+
 ## ride_out: she is under bare poles and sleeps through it. Nothing ends the sleep, and out["storm_hours"] says how many
 ## hours of it she lay in the storm's weather (storm_wake_level), for the damage to be worked out from.
 func sleep_advance(cx: float, cz: float, heading_deg: float, speed_mps: float, hours: float, ride_out := false, out: Dictionary = {}, curve_per_m := 0.0) -> float:
@@ -777,7 +834,7 @@ func rain_at(cx: float, cz: float) -> float:
 	var best := 0.0
 	for t in tracks:
 		var dp := maxf(t.cell.depth_m * danger_depth_scale, 1.0)
-		var d := Vector2(cx - t.cx, cz - t.cz).length()
+		var d := WorldChart.distance_m(cx, cz, t.cx, t.cz)
 		best = maxf(best, t.cell.rain * t.cell.intensity * (1.0 - smoothstep(0.5 * dp, 1.7 * dp, d)))
 	return best
 

@@ -24,6 +24,62 @@ const WALK_PREFIX := ["Cap_Town_", "Cap_Back_House_", "Cap_Bldg_", "Cap_Arcade_"
 	"Cap_Shipyard", "Cap_Smithy", "Cap_Booth", "Cap_Yard", "Cap_Back_Hill", "Cap_Back_ShipYard", "Cap_LighthouseEast",
 	"Cap_BeaconWest", "Cap_Stall", "Cap_Civic", "Cap_TreadCrane", "SP_"]
 
+## Anything else a capital is built from (Cap_/Ott_/Asi_ meshes) is solid too, so the player cannot walk through props,
+## stalls, fences, domes, trees and so on, except for the things below: decoration, glass, cloth, tiny items and doors.
+const AUTO_PREFIX := ["Cap_", "Ott_", "Asi_"]
+const SKIP_TOKENS := ["Window", "Glass", "Flag", "Banner", "Pennant", "RopeLine", "Strand", "Cloth", "Awning", "Canvas", "Sign", "Slate",
+	"Scroll", "Sword", "Bolt", "Drape", "Tankard", "Bun", "Tart", "Cake", "Slice", "Lantern", "Chandelier", "HangSign",
+	"Sack", "Shavings", "Net", "Fish", "Bird", "Smoke", "Steam", "Trim", "Fill", "Details", "Fittings", "HeadLamps",
+	"SailCloth", "Bollard", "Ring", "Chain", "Coil", "Door_", "Gate_L", "Gate_R", "Curtain", "Carpet", "Rug"]
+## Posts are solid even though their names contain a skipped word (Lantern, Lamp).
+const SOLID_TOKENS := ["LanternPost", "LampPost", "PathLantern", "RopeWalk", "Ropewalk"]
+const MIN_SOLID_M := 0.35
+## Trunk collision for trees whose .glb has none: radius by species, height capped.
+const TRUNK_R := {"Baobab": 1.6, "Mango": 0.45, "Palm": 0.25, "Banana": 0.0}
+
+func _auto_solid(mi: MeshInstance3D, ex: Dictionary) -> bool:
+	var nm := String(mi.name)
+	var ok := false
+	for p in AUTO_PREFIX:
+		if nm.begins_with(p):
+			ok = true
+			break
+	if not ok or mi.mesh == null or str(ex.get("game_role", "")) == "door":
+		return false
+	var forced := false
+	for t in SOLID_TOKENS:
+		if nm.contains(t):
+			forced = true
+	for t in SKIP_TOKENS:
+		if nm.contains(t) and not forced:
+			return false
+	var sz := mi.mesh.get_aabb().size * mi.scale.abs()
+	return maxf(sz.x, maxf(sz.y, sz.z)) >= MIN_SOLID_M
+
+func _add_trunk(inst: Node, owner_scene: Node, species_name: String) -> void:
+	if not inst.find_children("*", "StaticBody3D", true, false).is_empty():
+		return   # the tree already has collision
+	var r := 0.0
+	for k in TRUNK_R:
+		if species_name.contains(k):
+			r = float(TRUNK_R[k])
+	if r <= 0.0:
+		return
+	var h := 5.0 if r < 1.0 else 7.0
+	var sb := StaticBody3D.new()
+	sb.name = "TrunkCol"
+	sb.collision_layer = 1 | 8
+	var cs := CollisionShape3D.new()
+	var sh := CylinderShape3D.new()
+	sh.radius = r
+	sh.height = h
+	cs.shape = sh
+	cs.position = Vector3(0, h * 0.5, 0)
+	sb.add_child(cs)
+	inst.add_child(sb)
+	sb.owner = owner_scene
+	cs.owner = owner_scene
+
 func _post_import(scene: Node) -> Object:
 	_share_textures(scene)
 	var trimesh: Array[MeshInstance3D] = []
@@ -62,10 +118,15 @@ func _post_import(scene: Node) -> Object:
 			if ResourceLoader.exists(path):
 				var inst := (load(path) as PackedScene).instantiate()
 				n.add_child(inst); inst.owner = scene
+				_add_trunk(inst, scene, str(ex["vegetation"]))
 		if n is MeshInstance3D and not (n.get_parent() is StaticBody3D):
+			var walk := false
 			for p in WALK_PREFIX:
 				if String(n.name).begins_with(p):
-					trimesh.append(n as MeshInstance3D); break
+					walk = true
+					break
+			if walk or _auto_solid(n as MeshInstance3D, ex):
+				trimesh.append(n as MeshInstance3D)
 		if n is StaticBody3D:
 			(n as StaticBody3D).collision_layer = 1 | 8
 	for mi in trimesh:

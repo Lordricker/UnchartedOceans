@@ -87,6 +87,7 @@ class SailRec:
 	var swing_sign := 1.0
 	var rope: ShipRope
 	var strain := 0.0            # 0..1 how hard the wind is loading this sail
+	var phase := 0.0             # flutter phase fed to the shader (see sail_wind.gdshader flutter_phase)
 
 var model := SailModel.new()
 var recs: Array[SailRec] = []
@@ -106,9 +107,12 @@ var _deck_y: Array = DECK_Y
 var _spanker_pivot_z: float = MAST_Z[1]
 var _pin_x: Dictionary = {}
 var _pin_z: Dictionary = {}	  # per sail: z of its pin when it is not on the rail's own row (a pin on the fore side of the rail)
+var _pin_y: Dictionary = {}	  # per sail: height of its pin when it is not on the rail the class names (rail_pin_y)
+var _brace_specs: Array = []	# the class's own braces: [mast, side, label, pin, block]; empty = the brig's
+var brace_tip: Array = [5.1, 5.1]	# per mast: how far the brace is tied from the middle of the course yard (half the yard)
 var _haul: Dictionary = {}	   # per sail: the route its haul rope takes above the sail (see route_point)
 var _sail_rows: Array = SAILS   # this ship's sail table (the class's own \"sails\" if it has one, else the brig's)
-var _booms: Dictionary = {}     # boom node name -> z of the mast it turns on (ship frame), for the class's boom sails
+var _booms: Dictionary = {}     # boom node name -> z of the mast it turns on, or two points on a raked mast (ship frame); see _boom_axis
 var _clew_blocks: Dictionary = {} # sail id -> name of the model node (a block) that sits on that sail's clew
 var _clew_nodes: Dictionary = {}
 var _boom_parts: Dictionary = {} # boom node name -> names of the separate nodes (gaff, topsail) that swing with it (the merged glb has no hierarchy)
@@ -123,6 +127,12 @@ var _sp_parts: Array = []        # the spanker's boom (and gaff): {"n": node, "x
 var _sp_scanned := false
 var _flags: Array[Node3D] = []
 var _flag_basis: Array[Basis] = []
+var _flag_phase: Array[float] = []
+var _flag_psi := 0.0
+var _flag_psi_set := false
+## How quickly the flags swing round to a new apparent wind (per second). The apparent wind is noisy (gusts, the
+## ship's own yaw and pitch), so following it every frame shook the flags.
+@export var flag_swivel_rate := 2.5
 var _label: Label
 var _cam: Camera3D
 var _hands: Node
@@ -148,6 +158,7 @@ func _ready() -> void:
 		set_physics_process(false)
 		return
 	_load_rig()
+	_apply_class_tuning()
 	_setup_wind()
 	_find_sails()
 	_find_flags()
@@ -158,6 +169,17 @@ func _ready() -> void:
 	_setup_done = true
 	for r in recs:
 		_apply_visual(r, 0.0)
+
+## The hull's mass, drag, hull speed, stability and keel for this class (ShipClasses.sail_tuning). SailModel's defaults
+## are the brig's, so a ship without a class of her own would sail like one.
+func _apply_class_tuning() -> void:
+	var c = ship.get("ship_class")
+	if c == null:
+		return
+	var t := ShipClasses.sail_tuning(int(c))
+	for k in t:
+		model.set(k, float(t[k]))
+
 
 ## This ship class's rig geometry (pivot of the boom sail, pin rails, deck heights, which pins its sails use).
 func _load_rig() -> void:
@@ -171,6 +193,9 @@ func _load_rig() -> void:
 	_pin_x = rig.get("pin_x", {})
 	_pin_z = rig.get("pin_z", {})
 	_haul = rig.get("haul", {})
+	_pin_y = rig.get("pin_y", {})
+	_brace_specs = rig.get("brace_specs", [])
+	brace_tip = rig.get("brace_tip", [5.1, 5.1])
 	_line_specs = rig.get("rope_lines", [])
 	_sliders = rig.get("sliders", [])
 	_braces = bool(rig.get("braces", true))
@@ -178,6 +203,8 @@ func _load_rig() -> void:
 	_booms = rig.get("booms", {})
 	_boom_parts = rig.get("boom_parts", {})
 	_clew_blocks = rig.get("clew_blocks", {})
+	# a class can scale its sails' working area (the physics, not the look): the cutter's modelled sail plan is small for her hull
+	area_scale = float(rig.get("area_scale", area_scale))
 
 func _setup_wind() -> void:
 	wind = get_tree().get_first_node_in_group("wind") as SeaWind
@@ -340,6 +367,7 @@ func _find_flags() -> void:
 		if f:
 			_flags.append(f)
 			_flag_basis.append(f.transform.basis)
+			_flag_phase.append(randf() * TAU)
 			if f is MeshInstance3D:
 				var m := ShaderMaterial.new()
 				m.shader = load("res://assets/ships/brig/sail_wind.gdshader")
@@ -366,6 +394,8 @@ func _make_ropes() -> void:
 		rope.label = r.label
 		var d: Array = _sail_def(r.id)
 		var rail := _rail_pin(r.mast, float(_pin_x.get(r.id, d[5])))
+		if _pin_y.has(r.id):
+			rail.y = float(_pin_y[r.id])
 		if _pin_z.has(r.id):
 			rail.z = float(_pin_z[r.id])
 			rope.tail_dir = -1.0 if rail.z < float(_rail_z[r.mast]) else 1.0
@@ -387,6 +417,8 @@ func _make_ropes() -> void:
 		[1, -1, "Main brace (port)", Vector3(-2.74, 2.36, 3.35), Vector3(-3.0, 3.1, 3.85)],
 		[1, 1, "Main brace (starboard)", Vector3(2.74, 2.36, 3.35), Vector3(3.0, 3.1, 3.85)],
 	]
+	if not _brace_specs.is_empty():
+		specs = _brace_specs
 	for s in (specs if _braces else []):
 		var rope := ShipRope.new()
 		rope.name = "Brace_%s_%s" % ["Fore" if s[0] == 0 else "Main", "P" if s[1] < 0 else "S"]
@@ -464,6 +496,8 @@ func route_point(r: SailRec, tok) -> Vector3:
 		return head_ship(r)
 	var a: Array = tok
 	match String(a[0]):
+		"yard":
+			return yard_point(r, a[1])
 		"spar":
 			return spar_point(a[1], String(a[2]) if a.size() > 2 else "")
 		"clew":
@@ -482,12 +516,25 @@ func spar_point(p: Vector3, boom := "") -> Vector3:
 	if boom != "":
 		var bd: Dictionary = _boom_nodes.get(boom, {})
 		s = float(bd.get("swing", 0.0))
-		pz = float(_booms.get(boom, 0.0))
+		var ax := _boom_axis(boom)
+		return Basis(ax[1] as Vector3, s) * (p - (ax[0] as Vector3)) + (ax[0] as Vector3)
 	else:
 		if _spk == null:
 			_spk = rec("Spanker")
 		s = _spk.swing_vis if _spk != null else 0.0
 	return Basis(Vector3.UP, s) * Vector3(p.x, p.y, p.z - pz) + Vector3(0.0, 0.0, pz)
+
+## The line a boom turns about, ship frame: [a point on it, its direction]. The rig table gives either the mast's z (a
+## plumb mast) or two points on the mast's centre line (a raked mast: the schooner's lean aft about 3 degrees, so turning
+## about a plumb line through the gooseneck threw the gaff topsail half a metre off the topmast).
+func _boom_axis(boom: String) -> Array:
+	var v = _booms.get(boom, 0.0)
+	if v is Array and (v as Array).size() >= 2:
+		var a: Vector3 = v[0]
+		var b: Vector3 = v[1]
+		if (b - a).length() > 0.01:
+			return [a, (b - a).normalized()]
+	return [Vector3(0.0, 0.0, float(v) if not (v is Array) else 0.0), Vector3.UP]
 
 ## A block on the horse: it slides to where the boom-end block `track` is, as far as the bar goes; the bar is an arc (2 x radius = arc2r).
 func slide_point(rest: Vector3, track: Vector3, half: float, arc2r: float, drop: float, boom := "") -> Vector3:
@@ -628,6 +675,12 @@ func rope_value(rope: ShipRope) -> float:
 	var b: float = braces[rope.key]
 	return (b + 1.0) * 0.5 if rope.side < 0 else (1.0 - b) * 0.5
 
+## What the rope is, for the name along the bottom of the screen ("Fore course line", "Main brace (port)").
+func rope_name(rope: ShipRope) -> String:
+	if rope.kind == ShipRope.HAUL:
+		return "%s line" % rope.label
+	return rope.label
+
 func rope_text(rope: ShipRope) -> String:
 	if rope.kind == ShipRope.HAUL:
 		var r: SailRec = recs[rope.key]
@@ -694,7 +747,7 @@ func _process(delta: float) -> void:
 		return
 	for r in recs:
 		_apply_visual(r, delta)
-	_update_flags()
+	_update_flags(delta)
 	_move_sliders()
 	_move_clew_blocks()
 	for rope in ropes:
@@ -751,6 +804,8 @@ func _apply_visual(r: SailRec, _delta: float) -> void:
 	r.mat.set_shader_parameter("luff", r.luff * clampf(set_frac * 2.0, 0.0, 1.0))
 	r.mat.set_shader_parameter("gust", maxf(gust, 0.0))
 	r.mat.set_shader_parameter("slack", clampf(set_frac * 1.5, 0.0, 1.0))
+	r.phase += _delta * 6.0 * (1.0 + r.luff * clampf(set_frac * 2.0, 0.0, 1.0) * 0.8)
+	r.mat.set_shader_parameter("flutter_phase", r.phase)
 
 ## The spars that belong to the spanker (its boom, and its gaff if the model has one) swing with the sail. The rig table
 ## only lists the sail mesh, so they are found by name in the Brig: anything called boom / gaff / spanker that is not
@@ -838,8 +893,9 @@ func _swing_boom(r: SailRec, delta: float) -> void:
 	target *= clampf(frac * 4.0, 0.0, 1.0)
 	b["swing"] = lerpf(float(b["swing"]), target, 1.0 - exp(-delta * spanker_swing_rate))
 	var st := ship.global_transform
-	var pivot := st * Vector3(0.0, 0.0, float(_booms.get(r.boom, 0.0)))
-	var rot := Basis(st.basis.y.normalized(), float(b["swing"]))
+	var ax := _boom_axis(r.boom)
+	var pivot := st * (ax[0] as Vector3)
+	var rot := Basis((st.basis * (ax[1] as Vector3)).normalized(), float(b["swing"]))
 	var swing := Transform3D(rot, pivot - rot * pivot)
 	(n3 as Node3D).global_transform = swing * ((n3 as Node3D).get_parent_node_3d().global_transform * (b["x"] as Transform3D))
 	# the gaff and the topsail are their own nodes next to the boom: they turn with it (a topsail is taken in with its sail)
@@ -854,7 +910,7 @@ func _swing_boom(r: SailRec, delta: float) -> void:
 		if o.boom == r.boom and not (n3 as Node3D).is_ancestor_of(o.node):
 			o.node.transform = _brig.global_transform.affine_inverse() * (swing * (_brig.global_transform * o.node_xform))
 
-func _update_flags() -> void:
+func _update_flags(delta: float) -> void:
 	if wind == null:
 		return
 	var a := model.apparent
@@ -863,13 +919,20 @@ func _update_flags() -> void:
 	# where the air is going, in the ship frame (x starboard, z aft); the flags are modelled flying toward -Z
 	var d := Vector2(a.y, -a.x)
 	var psi := atan2(-d.x, -d.y)
+	if not _flag_psi_set:
+		_flag_psi = psi
+		_flag_psi_set = true
+	else:
+		_flag_psi = lerp_angle(_flag_psi, psi, 1.0 - exp(-delta * flag_swivel_rate))
+	var speed := 5.0 + minf(a.length(), 14.0) * 0.8
 	for i in _flags.size():
-		_flags[i].transform.basis = Basis(Vector3.UP, psi) * _flag_basis[i]
+		_flags[i].transform.basis = Basis(Vector3.UP, _flag_psi) * _flag_basis[i]
+		_flag_phase[i] += delta * speed
 		var mi := _flags[i] as MeshInstance3D
 		if mi and mi.get_surface_override_material(0):
 			var m := mi.get_surface_override_material(0) as ShaderMaterial
 			m.set_shader_parameter("flutter_amp", 0.06 + 0.02 * minf(a.length(), 12.0))
-			m.set_shader_parameter("flutter_speed", 5.0 + minf(a.length(), 14.0) * 0.8)
+			m.set_shader_parameter("flutter_phase", _flag_phase[i])
 
 ## The deck height under each fife rail and pin rail, from the deck collision (once, when physics is up).
 func _probe_deck() -> void:
@@ -992,6 +1055,9 @@ func _update_prompt() -> void:
 		_aimed = target
 		if _aimed:
 			_aimed.set_highlight(true)
+			InteractOutline.show_name(self, rope_name(_aimed))
+		else:
+			InteractOutline.hide_name(self)
 	if held:
 		text = rope_text(held)
 		var load := rope_load(held)

@@ -12,6 +12,11 @@ extends Node
 ## Add one ShipFleet node to a world scene (group "ship_fleet"); it finds the active rig and the berths by itself.
 
 signal active_ship_changed(rig: Node3D)
+## A ship that was for sale is now yours.
+signal ship_purchased(model: int)
+
+const TradeStateScript := preload("res://scripts/trade_state.gd")
+const PurchaseUiScript := preload("res://scripts/ship_purchase.gd")
 
 ## model index == ship class (ShipClasses.Size)
 ## "rig": the ShipRig (ship_motion.gd) settings that belong to this hull; anything not listed keeps the script's default
@@ -31,18 +36,63 @@ static var MODELS := {
 			"sample_points": PackedVector2Array([Vector2(0, -6.5), Vector2(0, 6.5), Vector2(-1.8, -3.5), Vector2(1.8, -3.5),
 				Vector2(-2.0, 0.5), Vector2(2.0, 0.5), Vector2(-1.8, 4.5), Vector2(1.8, 4.5)])},
 		"spawn": Vector3(0.0, 1.5, 4.5)},
+	4: {"name": "Fluyt", "scene": "res://scenes/ships/fluyt.tscn", "sailable": true,
+		"rig": {"ship_path": NodePath("FluytShip/Fluyt"), "ship_class": 4, "max_turn_rate_deg": 4.5, "turn_lag": 2.4,
+			"sample_points": PackedVector2Array([Vector2(0, -10.0), Vector2(0, 10.0), Vector2(-2.2, -6.0), Vector2(2.2, -6.0),
+				Vector2(-2.8, 0.0), Vector2(2.8, 0.0), Vector2(-2.2, 6.5), Vector2(2.2, 6.5)])},
+		"spawn": Vector3(0.0, 2.2, -2.0)},
 }
 ## ShipRig settings taken from the rig being left (flags, ocean path) rather than from the new hull.
+## What a ship costs and what the purchase window shows. Prices are counted in "trips": one trip is one full hold of
+## the schooner sold at a good port, about TRIP_PROFIT gold of profit (measured on the trade model: a full hold costs
+## about 12-14k to buy and nets 6-7k between two capitals). So a brig is ten maxed-out schooner hauls of saving.
+## deck_y: height of the deck where you step aboard (ship frame, m). cargo_t / crew / guns are the numbers shown.
+const TRIP_PROFIT := 6500
+const SALE := {
+	0: {"trips": 2.5, "deck_y": 0.9, "cargo_t": 6, "max_crew": 4, "min_crew": 1, "guns": "1 swivel gun"},
+	1: {"trips": 10.0, "deck_y": 1.86, "cargo_t": 90, "max_crew": 24, "min_crew": 6, "guns": "6 cannons"},
+	3: {"trips": 7.0, "deck_y": 1.2, "cargo_t": 35, "max_crew": 12, "min_crew": 4, "guns": "4 cannons"},
+	4: {"trips": 8.0, "deck_y": 2.0, "cargo_t": 160, "max_crew": 13, "min_crew": 8, "guns": "none"},
+}
+## Length (m) of the landing platform built round the gangway of a ship for sale, and how far a deck's edge is kept clear.
+const LANDING_HALF_LEN := 3.0
 const HULL_KEYS := ["ship_path", "ship_class", "sample_points", "max_turn_rate_deg", "turn_lag", "heading_deg", "windsock_enabled"]
 
 ## Fill every berth with a ship (a test of how the harbour performs).
 @export var fill_berths := true
+## Chance (0-1) that a berth has a ship in it. Rolled once per berth, per run, and a ship that is there is FOR SALE
+## until you buy it (you own no ship but the one you sail).
+@export_range(0.0, 1.0) var berth_fill_chance := 0.2
+## The sale_berth_count berths nearest the port's shipyard are the ones that sell ships:
+## each has this chance of holding one, drawn once per visit, every ship type equally likely. The ship for sale has an
+## A-frame sign on the quay (ship_sale_sign.gd); click it for the stats and the price. Every other berth only has the
+## berth_fill_chance of an ordinary boat (scenery, not for sale).
+@export_range(0.0, 1.0) var sale_chance := 0.5
+@export var sale_berth_count := 3
+## A visit lasts until the ship has been this far (m, chart distance) from the port: only then are the shipyard berths
+## drawn again (and a berth you sailed out of may fill again).
+@export var reset_distance_m := 100000.0
+## Where the sign stands on the quay: metres in from the quay's edge, and metres abaft the edge of the ship's gangway.
+@export var sign_quay_offset := 1.9
+@export var sign_gangway_gap := 1.5
 ## Seconds between checks for berths without a ship (ports stream in and out as you sail).
 @export var refill_interval := 1.0
 ## A berth this close (m, on the water plane) to the active ship's slot counts as the one she lies in.
 @export var own_berth_radius := 8.0
 
 var _t := 0.0
+static var run_seed := 0
+## berth key -> the model rolled for it, or -1 for "no ship" (decided once)
+var _rolled := {}
+## berth key -> {"model": int (-1 = no ship), "bought": bool, "origin": Vector2 (chart position of the port) or null}.
+## The shipyard berths' draw for this visit (see sale_chance, reset_distance_m).
+var _sale := {}
+## port node name -> chart position of the port, for ports with shipyard berths (to know when a visit is over)
+var _visit_origin := {}
+## port node -> names of its berths that sell ships
+var _sale_berths := {}
+## port node -> the node the shipyard stands at (or null)
+var _yard_cache := {}
 var _count := 0
 ## berth node -> {"model": int, "node": Node3D, "id": int}
 var _by_berth := {}
@@ -67,6 +117,12 @@ var _ocean_searched := false
 
 func _ready() -> void:
 	add_to_group("ship_fleet")
+	if run_seed == 0:
+		run_seed = randi() | 1
+	var ui := PurchaseUiScript.new()
+	ui.name = "ShipPurchase"
+	ui.set("fleet", self)
+	add_child(ui)
 	print("[ShipFleet] ready, fill_berths=%s" % fill_berths)
 
 
@@ -113,8 +169,8 @@ func roster() -> Array:
 		if not is_instance_valid(b):
 			continue
 		var e: Dictionary = _by_berth[b]
-		if not is_instance_valid(e["node"]):
-			continue
+		if not is_instance_valid(e["node"]) or not bool(e.get("owned", false)):
+			continue        # ships for sale are not yours: you buy them aboard (ship_purchase.gd)
 		var m: Dictionary = MODELS[int(e["model"])]
 		out.append({"id": int(e["id"]), "name": String(m["name"]), "model": int(e["model"]),
 			"sailable": bool(m["sailable"]), "berth_name": String((b as Node).name)})
@@ -122,8 +178,66 @@ func roster() -> Array:
 	return out
 
 
+## How many of your ships lie in this harbour (not counting the one you sail, nor ships for sale).
 func ship_count() -> int:
-	return _by_berth.size()
+	return roster().size()
+
+
+# ------------------------------------------------------------------ for sale
+
+static func price_of(model: int) -> int:
+	var trips: float = float(SALE[model]["trips"])
+	return int(round(trips * float(TRIP_PROFIT) / 500.0)) * 500
+
+
+## Hull speed in knots, 1.34 x sqrt(waterline feet): what the ship can do in a strong fair wind (the brig works out
+## at about 10.6 kn, the 5.3 m/s of ship_classes.gd).
+static func top_speed_kn(model: int) -> float:
+	var length_m := float(ShipClasses.data(model).length)
+	return 1.34 * sqrt(length_m * 3.281)
+
+
+## Rows for the purchase window: [[label, value], ...]
+static func stats_of(model: int) -> Array:
+	var d := ShipClasses.data(model)
+	var s: Dictionary = SALE[model]
+	var kn := top_speed_kn(model)
+	return [
+		["Top speed", "%.1f knots  (%.1f km/h)" % [kn, kn * 1.852]],
+		["Cargo capacity", "about %d tonnes" % int(s["cargo_t"])],
+		["Crew", "%d to sail, up to %d" % [int(s["min_crew"]), int(s["max_crew"])]],
+		["Guns", String(s["guns"])],
+		["Length", "%.1f m" % float(d.length)],
+		["Beam", "%.1f m" % float(d.beam)],
+	]
+
+
+## Buy the ship with this roster id. Returns "" on success, else why not.
+func purchase(id: int) -> String:
+	for b in _by_berth:
+		var e: Dictionary = _by_berth[b]
+		if int(e["id"]) != id:
+			continue
+		if bool(e.get("owned", false)):
+			return "She is already yours."
+		if not bool(e.get("sale", false)):
+			return "She is not for sale."
+		var price := price_of(int(e["model"]))
+		if TradeStateScript.gold < price:
+			return "You need %d more gold." % (price - TradeStateScript.gold)
+		TradeStateScript.gold -= price
+		e["owned"] = true
+		e["sale"] = false
+		var sg = e.get("sign")
+		if sg != null and is_instance_valid(sg):
+			(sg as Node).queue_free()
+		e.erase("sign")
+		var bk := _berth_key(b as Node)
+		if _sale.has(bk):
+			_sale[bk]["bought"] = true      # she stays yours in her berth if the port is unloaded and loaded again
+		ship_purchased.emit(int(e["model"]))
+		return ""
+	return "That ship is not here any more."
 
 
 # ------------------------------------------------------------------ proxies
@@ -151,6 +265,26 @@ func _nearest_berth_to(rig: Node3D) -> DockBerth:
 	return best
 
 
+## Decide, once per berth, whether a ship lies there and which one. -1 = empty.
+func _roll_berth(b: DockBerth) -> int:
+	var key := _berth_key(b)
+	if _rolled.has(key):
+		return int(_rolled[key])
+	var rng := RandomNumberGenerator.new()
+	rng.seed = hash(key) ^ run_seed
+	var model := -1
+	if rng.randf() < berth_fill_chance:
+		var fits: Array = []
+		for cls in MODELS:
+			if ShipClasses.berth_class(int(cls)) <= b.max_ship_class:
+				fits.append(int(cls))
+		fits.sort()
+		if not fits.is_empty():
+			model = int(fits[rng.randi() % fits.size()])
+	_rolled[key] = model
+	return model
+
+
 func _model_for(b: DockBerth, index: int) -> int:
 	# every ship type that berths here, cycling so each shows up where it can (biggest first)
 	var fits: Array = []
@@ -172,6 +306,7 @@ func _refill() -> void:
 	var hb := active_harbor()
 	if own != null and hb != null and bool(hb.get("moored")):
 		_vacant[_berth_key(own)] = true       # when she sails off, nobody takes her place
+	_check_visit_over()
 	var i := 0
 	for n in berths:
 		var b := n as DockBerth
@@ -184,17 +319,28 @@ func _refill() -> void:
 			_by_berth.erase(b)
 		if _vacant.has(_berth_key(b)):
 			continue
-		var model := _model_for(b, i)
+		var model := -1
+		var for_sale := false
+		var owned := false
+		if _is_sale_berth(b):
+			var e := _roll_sale(b)
+			model = int(e["model"])
+			owned = bool(e["bought"])
+			for_sale = not owned
+		else:
+			model = _roll_berth(b)
+		if model < 0:
+			continue        # this berth stays empty
 		if _in_view(b, model):
 			continue        # never pop a ship in where the player can see it: try again next check
-		_spawn_proxy(b, model)
+		_spawn_proxy(b, model, owned, for_sale)
 	# forget berths that went away with their port
 	for k in _by_berth.keys():
 		if not is_instance_valid(k):
 			_by_berth.erase(k)
 
 
-func _spawn_proxy(b: DockBerth, model: int) -> Node3D:
+func _spawn_proxy(b: DockBerth, model: int, owned := false, for_sale := false) -> Node3D:
 	var m: Dictionary = MODELS[model]
 	var ps := load(String(m["scene"])) as PackedScene
 	if ps == null:
@@ -213,8 +359,189 @@ func _spawn_proxy(b: DockBerth, model: int) -> Node3D:
 	b.get_parent().add_child(node)
 	var pos := b.slot_position(model)
 	node.global_transform = Transform3D(Basis(Vector3.UP, deg_to_rad(b.berth_heading)), Vector3(pos.x, 0.0, pos.z))
-	_by_berth[b] = {"model": model, "node": node, "id": _count, "yaw": deg_to_rad(b.berth_heading), "h": 0.0, "pitch": 0.0, "roll": 0.0}
+	_by_berth[b] = {"model": model, "node": node, "id": _count, "yaw": deg_to_rad(b.berth_heading), "h": 0.0, "pitch": 0.0, "roll": 0.0, "owned": owned, "sale": for_sale}
+	if for_sale:
+		_make_sale_fixtures(node, model)
+		_by_berth[b]["sign"] = _make_sign(b, model, _count)
 	return node
+
+
+## True if this berth is one of the sale_berth_count berths nearest the port's shipyard, which sell ships.
+func _is_sale_berth(b: DockBerth) -> bool:
+	var port := b.get_parent()
+	if port == null:
+		return false
+	if not _sale_berths.has(port):
+		var yard := _yard_of(port)
+		var names: Array = []
+		if yard != null:
+			var list: Array = []
+			for c in port.get_children():
+				if c is DockBerth:
+					list.append(c)
+			var yp := Vector2(yard.global_position.x, yard.global_position.z)
+			list.sort_custom(func(a: Node3D, c: Node3D) -> bool:
+				return Vector2(a.global_position.x, a.global_position.z).distance_to(yp) < Vector2(c.global_position.x, c.global_position.z).distance_to(yp))
+			for i in mini(sale_berth_count, list.size()):
+				names.append(String((list[i] as Node).name))
+		_sale_berths[port] = names
+	return (_sale_berths[port] as Array).has(String(b.name))
+
+
+## The node a port's shipyard stands at: the Blender empty with game_role "shipyard" (the European, African ones), else the
+## empty marked interaction "shipyard" that is a building, else the yard's ground (the Ottoman port has no shipyard empty).
+func _yard_of(port: Node) -> Node3D:
+	if _yard_cache.has(port) and (_yard_cache[port] == null or is_instance_valid(_yard_cache[port])):
+		return _yard_cache[port]
+	var found: Node3D = null
+	var loose: Node3D = null
+	for c in port.find_children("*", "Node3D", true, false):
+		var ex: Dictionary = {}
+		if c.has_meta("extras") and c.get_meta("extras") is Dictionary:
+			ex = c.get_meta("extras")
+		var role := String(ex.get("game_role", ""))
+		var nm := String(c.name)
+		if role == "shipyard":
+			found = c as Node3D
+			break
+		if found == null and role == "building" and String(ex.get("building_type", "")) == "shipyard":
+			found = c as Node3D
+		if loose == null and nm.ends_with("_Yard_Ground"):
+			loose = c as Node3D
+	if found == null:
+		found = loose
+	_yard_cache[port] = found
+	return found
+
+
+## Chart position of the port this berth belongs to (a Vector2), or null when there is no chart (test scenes).
+func _port_origin(b: DockBerth):
+	var st := get_tree().get_first_node_in_group("world_streamer") as WorldStreamer
+	var port := b.get_parent()
+	if st == null or st.chart == null or port == null or not port.has_meta("port_id"):
+		return null
+	var p := st.chart.get_port(String(port.get_meta("port_id")))
+	if p.is_empty():
+		return null
+	return Vector2(float(p["x"]), float(p["z"]))
+
+
+## The shipyard berth's draw for this visit: sale_chance of a ship, any ship type that fits the berth equally likely.
+## Drawn once; it stands until the visit is over (_check_visit_over).
+func _roll_sale(b: DockBerth) -> Dictionary:
+	var key := _berth_key(b)
+	if _sale.has(key):
+		return _sale[key]
+	var rng := RandomNumberGenerator.new()
+	rng.randomize()
+	var e := {"model": -1, "bought": false, "origin": _port_origin(b)}
+	if rng.randf() < sale_chance:
+		var fits: Array = []
+		for cls in MODELS:
+			if ShipClasses.berth_class(int(cls)) <= b.max_ship_class:
+				fits.append(int(cls))
+		fits.sort()
+		if not fits.is_empty():
+			e["model"] = int(fits[rng.randi() % fits.size()])
+	_sale[key] = e
+	if e["origin"] != null:
+		_visit_origin[String(b.get_parent().name)] = e["origin"]
+	return e
+
+
+## Once the ship has been reset_distance_m away from a port, the visit there is over: its shipyard berths are drawn again
+## on the next visit (and so are the berths you sailed out of).
+func _check_visit_over() -> void:
+	if _visit_origin.is_empty():
+		return
+	var st := get_tree().get_first_node_in_group("world_streamer") as WorldStreamer
+	if st == null or st.chart == null:
+		return
+	var cx := st.ship_cx()
+	var cz := st.ship_cz()
+	for pname in _visit_origin.keys():
+		var o: Vector2 = _visit_origin[pname]
+		if WorldChart.distance_m(cx, cz, o.x, o.y) <= reset_distance_m:
+			continue
+		var prefix := String(pname) + "/"
+		for k in _sale.keys():
+			if String(k).begins_with(prefix):
+				_sale.erase(k)
+		for k in _vacant.keys():
+			if String(k).begins_with(prefix):
+				_vacant.erase(k)
+		_visit_origin.erase(pname)
+
+
+## The A-frame sign on the quay beside a ship for sale, next to where her gangway lands (the berth's frame: +x away from
+## the pier, -z the way she points, the quay deck deck_y up).
+func _make_sign(b: DockBerth, model: int, id: int) -> Node3D:
+	var d := ShipClasses.data(model)
+	var gz := float(d.get("gangway_z", -1.3))
+	var gw := float(d.get("gangway_width", 0.9))
+	var sg := ShipSaleSign.new()
+	sg.name = "SaleSign"
+	sg.setup(id, model, String(MODELS[model]["name"]), price_of(model))
+	b.add_child(sg)
+	sg.position = Vector3(-sign_quay_offset, b.deck_y, gz + gw * 0.5 + sign_gangway_gap)
+	return sg
+
+
+## A ship for sale is a picture with nothing to walk on, so give her a gangway and a small landing on her deck (solid for
+## the player, layer 4 like every pier and gangway), so you can walk aboard. Everything is a child of her node, so it rocks with her.
+func _make_sale_fixtures(node: Node3D, model: int) -> void:
+	var d := ShipClasses.data(model)
+	var deck: float = float(SALE[model]["deck_y"])
+	var pts: Array = d.get("gangway", ShipHarbor.GANGWAY)
+	var gz: float = float(d.get("gangway_z", -1.3))
+	var gw: float = float(d.get("gangway_width", 0.9))
+	var body := AnimatableBody3D.new()
+	body.name = "SaleDeck"
+	body.sync_to_physics = false
+	body.collision_layer = Island.LAYER_BIT
+	body.collision_mask = 0
+	node.add_child(body)
+	var wood := StandardMaterial3D.new()
+	wood.albedo_color = Color(0.5, 0.38, 0.24)
+	wood.roughness = 0.9
+	# the landing: a slab at deck height, the width of the ship's waist, with low invisible walls so you do not walk off
+	var beam := float(d.beam)
+	var slab := CollisionShape3D.new()
+	var sb := BoxShape3D.new()
+	sb.size = Vector3(beam * 0.9, 0.2, LANDING_HALF_LEN * 2.0)
+	slab.shape = sb
+	slab.position = Vector3(0.0, deck - 0.1, gz)
+	body.add_child(slab)
+	for wall in [Vector3(beam * 0.45, deck + 0.7, gz), Vector3(0.0, deck + 0.7, gz - LANDING_HALF_LEN), Vector3(0.0, deck + 0.7, gz + LANDING_HALF_LEN)]:
+		var cs := CollisionShape3D.new()
+		var bs := BoxShape3D.new()
+		var across: bool = absf(wall.x) > 0.01
+		bs.size = Vector3(0.2, 1.4, LANDING_HALF_LEN * 2.0) if across else Vector3(beam * 0.9, 1.4, 0.2)
+		cs.shape = bs
+		cs.position = wall
+		body.add_child(cs)
+	# the gangway: planks from the quay down to the deck
+	for i in pts.size() - 1:
+		var a: Vector2 = pts[i]
+		var c: Vector2 = pts[i + 1]
+		var dv := c - a
+		var ang := atan2(dv.y, dv.x)
+		var mid := (a + c) * 0.5
+		var nrm := Vector2(-sin(ang), cos(ang))
+		var xf := Transform3D(Basis(Vector3.BACK, ang), Vector3(mid.x - nrm.x * 0.05, mid.y - nrm.y * 0.05, gz))
+		var mi := MeshInstance3D.new()
+		var bm := BoxMesh.new()
+		bm.size = Vector3(dv.length(), 0.1, gw)
+		mi.mesh = bm
+		mi.material_override = wood
+		mi.transform = xf
+		node.add_child(mi)
+		var cs2 := CollisionShape3D.new()
+		var bs2 := BoxShape3D.new()
+		bs2.size = bm.size
+		cs2.shape = bs2
+		cs2.transform = xf
+		body.add_child(cs2)
 
 
 ## True if any part of a ship lying in this berth (bow, middle, stern, and the masts above) would be inside the
@@ -255,8 +582,11 @@ func _bob(delta: float) -> void:
 	var k := 1.0 - exp(-delta * 4.0)
 	for b in _by_berth:
 		var e: Dictionary = _by_berth[b]
-		var n := e["node"] as Node3D
-		if not is_instance_valid(n) or not n.is_inside_tree():
+		var raw = e["node"]
+		if not is_instance_valid(raw):
+			continue        # proxy was freed (port unloaded / swapped): the 1 s check prunes the entry
+		var n := raw as Node3D
+		if n == null or not n.is_inside_tree():
 			continue
 		var p := n.global_position
 		if Vector2(p.x - ref.x, p.z - ref.z).length() > bob_distance:
@@ -297,6 +627,8 @@ func activate(id: int) -> String:
 		return "That ship is not in the harbour any more."
 	var e: Dictionary = _by_berth[target_berth]
 	var model := int(e["model"])
+	if not bool(e.get("owned", false)):
+		return "She is not yours yet: buy her first."
 	if not bool(MODELS[model]["sailable"]):
 		return "The %s is not ready to sail yet." % String(MODELS[model]["name"]).to_lower()
 	var old := active_rig()
@@ -318,9 +650,10 @@ func _do_switch(old: Node3D, old_berth: DockBerth, old_model: int, model: int, n
 	var local_pos := Vector3.ZERO
 	if player != null:
 		local_pos = old.global_transform.affine_inverse() * player.global_position
-	var proxy := entry["node"] as Node
+	var proxy_raw = entry["node"]
+	var proxy: Node = proxy_raw as Node if is_instance_valid(proxy_raw) else null
 	_by_berth.erase(new_berth)
-	if is_instance_valid(proxy):
+	if proxy != null and proxy.get_parent() != null:
 		proxy.get_parent().remove_child(proxy)
 		proxy.queue_free()
 	# the old rig leaves the groups at once so nothing finds it any more
@@ -339,7 +672,7 @@ func _do_switch(old: Node3D, old_berth: DockBerth, old_model: int, model: int, n
 	rig.set("heading_deg", new_berth.berth_heading)
 	parent.add_child(rig)
 	rig.global_position = Vector3(slot.x, 0.0, slot.z)
-	_spawn_proxy(old_berth, old_model)
+	_spawn_proxy(old_berth, old_model, true)
 	# the spray follows the new rig
 	var oc = rig.get("_ocean")
 	if oc != null:

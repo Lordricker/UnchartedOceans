@@ -147,7 +147,7 @@ func _physics_process(delta: float) -> void:
 	if _player == null or not is_instance_valid(_player):
 		_player = get_tree().get_first_node_in_group("player") as Node3D
 	var exclude: Array[RID] = []
-	if _player is CollisionObject3D:
+	if is_instance_valid(_player) and _player is CollisionObject3D:
 		exclude.append((_player as CollisionObject3D).get_rid())
 	var from := cam.global_position
 	var q := PhysicsRayQueryParameters3D.create(from, from + Vector3(0.0, 12.0, 0.0))

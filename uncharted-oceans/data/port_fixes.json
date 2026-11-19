@@ -1,0 +1,21 @@
+{
+	"_about": "Fixes applied to a port model after it loads (world_streamer.gd _apply_port_fixes), keyed by the port .glb's name. Coordinates are the port's own frame (the glb's). clip_colliders: [x_min, z_min, x_max, z_max] the collider's points are pulled inside. move: new position of a node. Remove an entry once the Blender file has the fix and the port is re-exported.",
+	"PortCapital": {
+		"clip_colliders": {
+			"_note": "The east tavern's walkable-interior walls were built for a bigger footprint than the tavern shell: they stood up to 1.3 m out from the visible walls (an invisible wall in front of the pub). Clipped to the shell.",
+			"Cap_Int_Col_012": [14.24, -23.05, 23.88, -14.95],
+			"Cap_Int_Col_013": [14.24, -23.05, 23.88, -14.95],
+			"Cap_Int_Col_014": [14.24, -23.05, 23.88, -14.95],
+			"Cap_Int_Col_015": [14.24, -23.05, 23.88, -14.95],
+			"Cap_Int_Col_016": [14.24, -23.05, 23.88, -14.95]
+		},
+		"move": {
+			"_note": "The tables' origins are at one end of the table, so the tankards placed by the origin stood on the cobbles beside them. Moved onto the table tops.",
+			"Cap_Det_Tavern_Tankard0": [26.7, 2.62, -17.65],
+			"Cap_Det_Tavern_Tankard1": [26.7, 2.62, -22.05],
+			"Cap_Terrace_Tankard.1": [8.15, 2.74, -22.35],
+			"Cap_Terrace_Tankard.2": [8.15, 2.74, -25.35],
+			"Cap_Terrace_Tankard.3": [8.15, 2.74, -28.35]
+		}
+	}
+}

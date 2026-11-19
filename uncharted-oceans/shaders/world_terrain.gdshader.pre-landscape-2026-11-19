@@ -1,0 +1,266 @@
+// Macro terrain for the world chart: land from the smoothed heightmap and the sea floor from the
+// chart's shelf, on a camera-following radial grid (world_terrain.gd). No collision; grounding is
+// done against the chart (see WorldStreamer). The curvature matches the ocean's, so a coast sinks
+// below the horizon the same way the sea does.
+//
+// Coasts: each stretch of shore is a sandy beach, a rocky shore with a low cliff behind it, or a low green shore
+// (coast_kind() in world_ground.gdshaderinc, shared with the ocean so its surf knows the kind too). Sand and rock take
+// a regional colour by latitude: dark grey shingle and stone in the north, warm sand in the middle, pale coral sand
+// and rock in the south. The cliffs only raise land that is already above the water, so the waterline (and the ship's
+// grounding on the CPU) is unchanged.
+shader_type spatial;
+render_mode cull_back;
+
+#include "res://shaders/world_chart.gdshaderinc"
+
+uniform sampler2D chart_land : filter_linear, repeat_enable;
+uniform sampler2D chart_shore : filter_linear, repeat_enable;
+uniform sampler2D chart_height16 : filter_nearest, repeat_enable;  // R = high byte, G = low byte
+uniform vec2 chart_origin = vec2(0.0);
+uniform vec2 chart_size = vec2(600000.0, 400000.0);
+uniform vec2 chart_px = vec2(1536.0, 1024.0);
+uniform float chart_mpp = 390.625;
+uniform float curve_k = 0.0;
+uniform float relief_m = 1100.0;          // height of the highest heightmap value above the coast
+uniform float coast_level = 0.2431;       // heightmap value (0..1) at the shoreline
+uniform float detail_m = 55.0;            // fine relief added on land
+uniform vec3 hole = vec3(0.0, 0.0, -1.0); // (x, z, radius) in Godot world coordinates: a full port scene replaces the terrain here
+
+uniform vec3 sand_color : source_color = vec3(0.55, 0.5, 0.36);          // middle latitudes
+uniform vec3 sand_north_color : source_color = vec3(0.4, 0.38, 0.33);    // dark grey-brown sand and shingle
+uniform vec3 sand_south_color : source_color = vec3(0.66, 0.6, 0.48);    // pale coral sand
+uniform vec3 grass_color : source_color = vec3(0.17, 0.26, 0.1);
+uniform vec3 forest_color : source_color = vec3(0.07, 0.14, 0.07);
+uniform vec3 rock_color : source_color = vec3(0.3, 0.28, 0.26);          // middle latitudes
+uniform vec3 rock_north_color : source_color = vec3(0.22, 0.22, 0.23);   // dark granite
+uniform vec3 rock_south_color : source_color = vec3(0.52, 0.48, 0.41);   // pale limestone and coral rock
+uniform vec3 snow_color : source_color = vec3(0.8, 0.82, 0.85);
+uniform vec3 seabed_color : source_color = vec3(0.16, 0.2, 0.16);
+// ---- High water setting (pushed every frame by world_terrain.gd from the sea) ----
+uniform float high_water = 0.0;           // 1 = caustics on the sea floor, and a wet beach that the waves wash up and back
+uniform float ocean_time = 0.0;
+uniform vec3 sun_dir = vec3(0.4, 0.6, 0.5);                  // toward the sun
+uniform vec3 sun_color : source_color = vec3(1.0, 0.93, 0.82);
+uniform float sun_level = 1.0;            // 0..1: the sun's strength (cloud and night take it down)
+uniform float water_dark = 0.0;           // 0..1: storm gloom
+uniform float caustic_strength : hint_range(0.0, 3.0) = 0.45;
+uniform float swash_m = 0.34;             // how high (m above the waterline) the wash of the waves reaches on a beach
+// The detail patch (world_terrain.gd): a fine grid round the camera near coasts; the coarse rings leave it alone
+instance uniform float patch_layer = 0.0; // 1 on the patch
+uniform vec4 patch_rect = vec4(0.0);      // (min x, min z, max x, max z), Godot world; zero size = no patch
+// sand up close: the shared Poly Haven sand (textures/port/shared/sand_01)
+uniform sampler2D sand_detail : source_color, filter_linear_mipmap, repeat_enable;
+uniform sampler2D sand_normal : hint_normal, filter_linear_mipmap, repeat_enable;
+uniform vec2 sand_uv_off = vec2(0.0);     // the origin's share of the tiling, worked out on the CPU in 64-bit
+uniform float sand_tile_m = 3.0;
+uniform float cliff_m = 26.0;
+// The swash (both settings; pushed by world_terrain.gd from the sea): the water each wave sends up the sand
+uniform float swell_a = 0.7;              // the sea's sea_amplitude
+uniform float surf_period = 9.0;
+uniform sampler2D foam_noise : hint_default_white, filter_linear_mipmap, repeat_enable;             // average height of the low cliffs along rocky stretches
+
+#include "res://shaders/world_ground.gdshaderinc"
+
+varying vec2 world_xz;
+varying float terrain_h;
+
+vec2 hash22(vec2 p) {
+	vec3 p3 = fract(vec3(p.xyx) * vec3(0.1031, 0.1030, 0.0973));
+	p3 += dot(p3, p3.yxz + 33.33);
+	return fract((p3.xx + p3.yz) * p3.zy);
+}
+
+// Distance between the nearest two of a field of wandering points (F2 - F1): 0 along the cell borders, so the borders
+// make a drifting net of bright lines, which is what sunlight focused by the waves looks like on the bottom.
+float cell_edge(vec2 p, float t) {
+	vec2 ip = floor(p);
+	vec2 fp = fract(p);
+	float f1 = 8.0;
+	float f2 = 8.0;
+	for (int j = -1; j <= 1; j++) {
+		for (int i = -1; i <= 1; i++) {
+			vec2 g = vec2(float(i), float(j));
+			vec2 o = hash22(ip + g);
+			vec2 r = g + 0.5 + 0.42 * sin(t * (0.6 + o.yx * 0.8) + o * 6.2831) - fp;
+			float d = dot(r, r);
+			if (d < f1) {
+				f2 = f1;
+				f1 = d;
+			} else if (d < f2) {
+				f2 = d;
+			}
+		}
+	}
+	return sqrt(f2) - sqrt(f1);
+}
+
+// Caustic light on the sea floor at chart xz, 0..1. Two nets of different size and drift laid over each other; the
+// lines are thin in the shallows and blur and spread with depth.
+float caustic_light(vec2 cp, float t, float depth, float foot) {
+	// ribbons of sunlight focused by the ripples into a net of large rounded cells, in pools that drift (not an even web)
+	float w = mix(0.09, 0.26, clamp(depth / 6.0, 0.0, 1.0)) + foot * 0.35;
+	float e1 = cell_edge(cp / 3.4 + vec2(t * 0.03, 0.0), t * 0.55);
+	float e2 = cell_edge(mat2(vec2(0.8, 0.6), vec2(-0.6, 0.8)) * cp / 2.2 + 19.3, t * 0.8 + 4.0);
+	float l1 = 1.0 - smoothstep(0.0, w, e1);
+	float l2 = 1.0 - smoothstep(0.0, w * 1.2, e2);
+	float net = max(l1, l2 * 0.7) + 0.6 * l1 * l2;           // crossings glow brighter
+	float pools = 0.25 + 0.75 * smoothstep(0.3, 0.68, fbm(cp / 7.0 + vec2(t * 0.06, -t * 0.04)));
+	float haze = 0.16 * smoothstep(0.4, 0.75, fbm(cp / 4.0 - vec2(t * 0.05, 0.0)));
+	return clamp(pow(net, 1.15) * pools * 1.3 + haze, 0.0, 1.0);
+}
+
+// Height of the cliff along a rocky stretch at chart xz: varies along the coast, about 10 to 42 m.
+float cliff_height(vec2 cp) {
+	return cliff_m * (0.4 + 1.2 * fbm(cp / 650.0 + vec2(3.1, 9.7)));
+}
+
+// Ground height at a Godot world xz: the chart's ground, plus the cliffs of rocky stretches on the land side.
+float terrain_y(vec2 wxz) {
+	float y = chart_ground_y(wxz);
+	if (y <= 0.0) {
+		return y;
+	}
+	vec2 cp = wxz + chart_origin;
+	float rock = coast_kind(cp).y * (1.0 - port_pad_w(wxz));      // no cliffs round a port's plate
+	if (rock > 0.0) {
+		// a few metres of rocky foreshore, then the cliff rises over the next 30 m or so
+		y += rock * cliff_height(cp) * smoothstep(5.0, 38.0, shore_d(cp));
+	}
+	return y;
+}
+
+void vertex() {
+	vec3 wp = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
+	world_xz = wp.xz;
+	float y = terrain_y(wp.xz);
+	terrain_h = y;
+	float d = length(wp.xz - CAMERA_POSITION_WORLD.xz);
+	VERTEX.y = y - d * d * curve_k;
+	if (patch_layer > 0.5 && COLOR.r > 0.5) {
+		VERTEX.y -= 30.0;      // the patch's skirt
+	}
+}
+
+void fragment() {
+	float foot = length(fwidth(world_xz));      // metres per pixel here (taken before any branch, for the caustics)
+	if (hole.z > 0.0 && distance(world_xz, hole.xy) < hole.z) {
+		discard;
+	}
+	// the coarse rings give way to the detail patch (overlapping it by a metre so no seam opens)
+	if (patch_layer < 0.5 && patch_rect.z > patch_rect.x && world_xz.x > patch_rect.x + 1.0 && world_xz.x < patch_rect.z - 1.0
+			&& world_xz.y > patch_rect.y + 1.0 && world_xz.y < patch_rect.w - 1.0) {
+		discard;
+	}
+	float e = clamp(foot * 3.0, 1.0, 40.0);
+	float y0 = terrain_y(world_xz);
+	float yx = terrain_y(world_xz + vec2(e, 0.0));
+	float yz = terrain_y(world_xz + vec2(0.0, e));
+	vec3 n_world = normalize(vec3(-(yx - y0) / e, 1.0, -(yz - y0) / e));
+	NORMAL = normalize((VIEW_MATRIX * vec4(n_world, 0.0)).xyz);
+
+	float slope = 1.0 - n_world.y;
+	float h = y0;
+	vec2 cp = world_xz + chart_origin;
+	vec3 k = coast_kind(cp);
+	float pad_w = port_pad_w(world_xz);
+	k = mix(k, vec3(0.0, 0.0, 1.0), pad_w);      // round a port's plate: a green shore (no cliffs there to colour as rock)
+
+	// regional sand and rock by latitude
+	float lat = clamp(cp.y / chart_size.y, 0.0, 1.0);
+	vec3 sand = mix(sand_north_color, sand_color, smoothstep(0.15, 0.4, lat));
+	sand = mix(sand, sand_south_color, smoothstep(0.6, 0.85, lat));
+	vec3 rock = mix(rock_north_color, rock_color, smoothstep(0.15, 0.4, lat));
+	rock = mix(rock, rock_south_color, smoothstep(0.6, 0.85, lat));
+	// fine mottling of sand and rock up close, fading to its average before it can shimmer
+	float mf = 1.0 - smoothstep(1.5, 6.0, length(fwidth(world_xz)));
+	float mott = mix(0.47, fbm(cp / 14.0), mf);
+	rock *= 0.82 + 0.36 * mott;
+	// up close (the patch), the real sand's grain and ripples over the regional colour, fading out with distance
+	float near_k = patch_layer * (1.0 - smoothstep(40.0, 160.0, length(world_xz - CAMERA_POSITION_WORLD.xz)));
+	vec2 suv = world_xz / sand_tile_m + sand_uv_off;
+	if (near_k > 0.0) {
+		vec3 sd = texture(sand_detail, suv).rgb;
+		vec3 sav = textureLod(sand_detail, vec2(0.5), 10.0).rgb;
+		sand = mix(sand, sand * clamp(mix(vec3(1.0), sd / max(sav, vec3(0.05)), 0.6), 0.75, 1.25), near_k);
+	}
+
+	float wet_k = 0.0;
+	float caus = 0.0;
+	vec3 c;
+	if (h > 0.0) {
+		float n1 = fbm(world_xz / 120.0 + chart_origin / 120.0);
+		vec3 low = mix(grass_color, forest_color, smoothstep(0.35, 0.65, n1));
+		// how high the sand reaches: a wide strand on beaches, a thin line on green and rocky shores
+		float s_lo = dot(k, vec3(5.0, 0.4, 0.3));
+		float s_hi = dot(k, vec3(16.0, 2.0, 1.4));
+		c = mix(sand * (0.92 + 0.16 * mott), low, smoothstep(s_lo, s_hi, h));
+		// rocky stretches: bare rock from the water up to the cliff top
+		float ctop = cliff_height(cp);
+		c = mix(c, rock, k.y * (1.0 - smoothstep(ctop * 0.75, ctop * 1.1, h)));
+		c = mix(c, rock, smoothstep(350.0, 650.0, h + (n1 - 0.45) * 200.0));
+		c = mix(c, rock, smoothstep(0.12, 0.3, slope));
+		c = mix(c, snow_color, smoothstep(850.0, 1000.0, h) * (1.0 - smoothstep(0.2, 0.45, slope)));
+		// The swash: each wave's water runs up the sand and drains back (the sea's surf, in step: surf_u). A thin sheet of
+		// water over darker wet sand, a lacy white lip at its leading edge, and the sand stays wet below the highest it
+		// reaches. Distances in metres from the waterline.
+		float dsh = shore_d(cp);
+		vec3 sl = shore_slopes(k);
+		float xs = swash_x(swell_a, k.y, sl.y);
+		if (dsh < xs * 1.3 + 1.0 && pad_w < 0.3) {      // no swash in a port's harbour
+			float sp1 = textureLod(foam_noise, world_xz * 0.065 + vec2(0.37, 0.11), 0.0).r;
+			float sp2 = textureLod(foam_noise, world_xz * 0.21 + vec2(0.71, 0.23), 0.0).r;
+			float pat = clamp(0.55 * sp1 + 0.45 * (1.0 - abs(2.0 * sp2 - 1.0)), 0.0, 1.0);
+			float sheet = 0.0;
+			float lip = 0.0;
+			for (int f = 0; f < 2; f++) {
+				float u = surf_u(cp, ocean_time, surf_period, f);
+				if (u >= SURF_IN) {
+					float s = (u - SURF_IN) / (1.0 - SURF_IN);
+					float amp = f == 0 ? 1.0 : 0.75;
+					float edge = xs * amp * swash_edge(s);
+					float up = s < 0.35 ? 1.0 : 0.0;                         // still rushing up: a fuller lip
+					sheet = max(sheet, 1.0 - smoothstep(edge - 0.6, edge + 0.05, dsh));
+					float lw = mix(0.45, 1.1, up) * amp;
+					float band = smoothstep(edge - lw, edge - lw * 0.3, dsh) * (1.0 - smoothstep(edge - 0.05, edge + 0.08, dsh));
+					lip = max(lip, surf_lace(band * mix(0.55, 0.95, up) * smoothstep(0.02, 0.12, swash_edge(s)), pat));
+				}
+			}
+			float top = xs * (0.85 + 0.25 * fbm(cp / 31.0 + vec2(1.3, 7.1)));
+			wet_k = 1.0 - smoothstep(top * 0.85, top * 1.05 + 0.3, dsh);
+			c *= mix(1.0, 0.68, wet_k);                                   // wet sand
+			vec3 film = mix(c * 0.85, vec3(0.32, 0.55, 0.52) * (0.5 + 0.5 * c), 0.35);
+			c = mix(c, film, sheet);                                      // under a thin sheet of water
+			c = mix(c, vec3(0.93, 0.95, 0.94), lip);
+			wet_k = max(wet_k, sheet);
+			wet_k *= 1.0 - lip;
+		}
+		c *= mix(0.85, 1.0, smoothstep(0.0, 0.6, h));
+	} else {
+		// the sea floor: in the shallows it takes the colour of its shore (pale sand off a beach, dark stone off rock)
+		vec3 bed = mix(sand * 0.75, rock * 0.6, k.y);
+		c = mix(bed, seabed_color, smoothstep(1.5, 14.0, -h));
+		if (high_water > 0.5) {
+			// High setting: caustics on the bottom of the shallows, following the sun (the net is laid out on the sea
+			// surface and shifts with depth as the sun moves) and gone at night, under cloud and out of the clear water
+			float depth = -h;
+			float sk = sun_level * smoothstep(0.08, 0.35, sun_dir.y) * (1.0 - 0.8 * water_dark);
+			float dfade = smoothstep(0.03, 0.4, depth) * (1.0 - smoothstep(3.5, 10.0, depth));
+			float near_f = (1.0 - smoothstep(250.0, 900.0, length(world_xz - CAMERA_POSITION_WORLD.xz))) * (1.0 - smoothstep(0.05, 0.28, foot));
+			float vis = sk * dfade * near_f;
+			if (vis > 0.01) {
+				vec2 csrf = cp + sun_dir.xz / max(sun_dir.y, 0.2) * depth * 0.75;
+				caus = caustic_light(csrf, ocean_time, depth, foot) * vis;
+			}
+		}
+	}
+	if (near_k > 0.0 && h > -0.5 && h < 6.0) {
+		vec3 nm = texture(sand_normal, suv).xyz * 2.0 - 1.0;
+		float nk = near_k * k.x * (1.0 - 0.6 * wet_k);
+		vec3 nw = normalize(n_world + vec3(nm.x, 0.0, -nm.y) * 0.5 * nk);
+		NORMAL = normalize((VIEW_MATRIX * vec4(nw, 0.0)).xyz);
+	}
+	ALBEDO = c;
+	ROUGHNESS = mix(0.92, 0.35, wet_k * (1.0 - 0.6 * k.y));
+	SPECULAR = mix(0.15, 0.45, wet_k);
+	EMISSION = sun_color * vec3(1.0, 0.98, 0.92) * caus * caustic_strength * (0.28 + c * 1.5);
+}

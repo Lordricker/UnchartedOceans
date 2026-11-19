@@ -1,0 +1,215 @@
+extends RefCounted
+## Joins a small port's land plate to the world's generated land (bug reports 2026-11-19: the tutorial town floated
+## in the sea as a green slab with vertical sides).
+##
+## Built once when the port scene loads, from the port's own SP_Land mesh: a small grid in the port's frame
+## (u = port-local x, v = port-local z, +v = out to sea) that the macro ground is blended with:
+##  - under the plate the ground sits PAD_UNDER_M below the plate's top, so it never pokes through the town;
+##  - round the plate the ground starts at the plate's rim height and eases back into the chart's land over BAND_M,
+##    which hides the plate's vertical sides and makes the town part of the coast;
+##  - in front of the quay a dredged basin keeps BASIN_DEPTH_M of water out to about 400 m, so the harbour is clear.
+## Texel (R, G, B, A) = (rim / under-plate height, land weight, basin weight, 0).
+## The GPU (port_pad_* in world_ground.gdshaderinc) and the CPU (WorldGround) blend with exactly the same numbers,
+## so the keel test, the walkable shore collider and the drawn ground agree.
+## Read-only after build(), so it is safe to read from worker threads.
+
+const CELL_M := 8.0
+const BAND_M := 280.0           ## how far round the plate the ground is blended back into the chart's land
+const FRONT_M := 600.0          ## how far out to sea the grid reaches (the basin fades out before this)
+const PAD_UNDER_M := 2.0        ## ground under the plate sits this far below its top
+const BASIN_DEPTH_M := 9.0
+const BASIN_HALF_W := Vector2(110.0, 175.0)   ## basin full width out to |u| = x, gone by y
+const BASIN_LEN := Vector2(380.0, 590.0)      ## basin full out to v = x, gone by y
+
+var u0 := 0.0                   ## port-local u, v of texel (0, 0)'s centre
+var v0 := 0.0
+var nu := 0
+var nv := 0
+var data := PackedFloat32Array()   # nu * nv * 4
+## Where the port is: chart x, z of its origin and its yaw (Godot rotation.y). Set by WorldStreamer.
+var cx := 0.0
+var cz := 0.0
+var yaw := 0.0
+
+
+## Build the pad from the port root and its SP_Land mesh instance (both in the tree, so transforms are valid).
+## Loaded by path (preload("res://scripts/port_pad.gd").new()), no class_name, so no editor class cache is needed.
+func build(root: Node3D, land: MeshInstance3D) -> bool:
+	var pad := self
+	var mesh := land.mesh
+	if mesh == null:
+		return false
+	var rel := root.global_transform.affine_inverse() * land.global_transform
+	var aabb := rel * mesh.get_aabb()
+	pad.u0 = aabb.position.x - BAND_M
+	pad.v0 = aabb.position.z - BAND_M
+	var u1 := aabb.end.x + BAND_M
+	var v1 := maxf(aabb.end.z, 0.0) + FRONT_M
+	pad.nu = int(ceil((u1 - pad.u0) / CELL_M)) + 1
+	pad.nv = int(ceil((v1 - pad.v0) / CELL_M)) + 1
+	var n := pad.nu * pad.nv
+	var top := PackedFloat32Array()
+	top.resize(n)
+	top.fill(-INF)
+	# the plate's top: every upward-facing triangle rasterised at the cell centres, highest wins
+	for s in mesh.get_surface_count():
+		var arr := mesh.surface_get_arrays(s)
+		var vx: PackedVector3Array = arr[Mesh.ARRAY_VERTEX]
+		var ix: PackedInt32Array = arr[Mesh.ARRAY_INDEX]
+		if ix.is_empty():
+			ix.resize(vx.size())
+			for i in vx.size():
+				ix[i] = i
+		var lv := PackedVector3Array()
+		lv.resize(vx.size())
+		for i in vx.size():
+			lv[i] = rel * vx[i]
+		for t in range(0, ix.size() - 2, 3):
+			pad._raster(lv[ix[t]], lv[ix[t + 1]], lv[ix[t + 2]], top)
+	# nearest plate cell for every cell outside it (two-pass propagation of the nearest seed)
+	var seed := PackedInt32Array()
+	seed.resize(n)
+	seed.fill(-1)
+	for i in n:
+		if top[i] > -INF:
+			seed[i] = i
+	pad._propagate(seed, true)
+	pad._propagate(seed, false)
+	pad.data.resize(n * 4)
+	for j in pad.nv:
+		var v := pad.v0 + float(j) * CELL_M
+		for i in pad.nu:
+			var u := pad.u0 + float(i) * CELL_M
+			var k := j * pad.nu + i
+			var t_h := 0.0
+			var wl := 0.0
+			if top[k] > -INF:
+				t_h = top[k] - PAD_UNDER_M
+				wl = 1.0
+			elif seed[k] >= 0:
+				var si := seed[k] % pad.nu
+				var sj := seed[k] / pad.nu
+				var d := Vector2(float(i - si), float(j - sj)).length() * CELL_M
+				t_h = top[seed[k]]
+				wl = 1.0 - smoothstep(0.0, BAND_M, d)
+			var wb := (1.0 - smoothstep(BASIN_HALF_W.x, BASIN_HALF_W.y, absf(u))) * smoothstep(-8.0, 2.0, v) \
+					* (1.0 - smoothstep(BASIN_LEN.x, BASIN_LEN.y, v))
+			# the grid's own border is always plain chart ground, so nothing jumps where the pad ends
+			if i == 0 or j == 0 or i == pad.nu - 1 or j == pad.nv - 1:
+				wl = 0.0
+				wb = 0.0
+			pad.data[k * 4] = t_h
+			pad.data[k * 4 + 1] = wl
+			pad.data[k * 4 + 2] = wb
+			pad.data[k * 4 + 3] = 0.0
+	return true
+
+
+func _raster(a: Vector3, b: Vector3, c: Vector3, top: PackedFloat32Array) -> void:
+	var nrm := (b - a).cross(c - a)
+	if nrm.length_squared() < 1e-8:
+		return
+	if absf(nrm.normalized().y) < 0.25:      # walls and the plate's sides: not its top
+		return
+	var i0 := maxi(int(ceil((minf(a.x, minf(b.x, c.x)) - u0) / CELL_M)), 0)
+	var i1 := mini(int(floor((maxf(a.x, maxf(b.x, c.x)) - u0) / CELL_M)), nu - 1)
+	var j0 := maxi(int(ceil((minf(a.z, minf(b.z, c.z)) - v0) / CELL_M)), 0)
+	var j1 := mini(int(floor((maxf(a.z, maxf(b.z, c.z)) - v0) / CELL_M)), nv - 1)
+	var den := (b.z - c.z) * (a.x - c.x) + (c.x - b.x) * (a.z - c.z)
+	if absf(den) < 1e-9:
+		return
+	for j in range(j0, j1 + 1):
+		var pz := v0 + float(j) * CELL_M
+		for i in range(i0, i1 + 1):
+			var px := u0 + float(i) * CELL_M
+			var l1 := ((b.z - c.z) * (px - c.x) + (c.x - b.x) * (pz - c.z)) / den
+			var l2 := ((c.z - a.z) * (px - c.x) + (a.x - c.x) * (pz - c.z)) / den
+			var l3 := 1.0 - l1 - l2
+			if l1 < -1e-4 or l2 < -1e-4 or l3 < -1e-4:
+				continue
+			var h := l1 * a.y + l2 * b.y + l3 * c.y
+			var k := j * nu + i
+			if h > top[k]:
+				top[k] = h
+
+
+func _propagate(seed: PackedInt32Array, fwd: bool) -> void:
+	var offs: Array
+	if fwd:
+		offs = [Vector2i(-1, 0), Vector2i(-1, -1), Vector2i(0, -1), Vector2i(1, -1)]
+	else:
+		offs = [Vector2i(1, 0), Vector2i(1, 1), Vector2i(0, 1), Vector2i(-1, 1)]
+	var jr := range(nv) if fwd else range(nv - 1, -1, -1)
+	var ir := range(nu) if fwd else range(nu - 1, -1, -1)
+	for j in jr:
+		for i in ir:
+			var k: int = j * nu + i
+			var best := seed[k]
+			var bd := INF
+			if best >= 0:
+				bd = _d2(i, j, best)
+			for o: Vector2i in offs:
+				var ni: int = i + o.x
+				var nj: int = j + o.y
+				if ni < 0 or nj < 0 or ni >= nu or nj >= nv:
+					continue
+				var s := seed[nj * nu + ni]
+				if s < 0:
+					continue
+				var d := _d2(i, j, s)
+				if d < bd:
+					bd = d
+					best = s
+			seed[k] = best
+
+
+func _d2(i: int, j: int, s: int) -> float:
+	var di := float(i - s % nu)
+	var dj := float(j - s / nu)
+	return di * di + dj * dj
+
+
+## (height, land weight, basin weight) at port-local u, v; zeros off the grid. Bilinear from the four texels, exactly
+## as port_pad_sample() in world_ground.gdshaderinc does it.
+func sample_local(u: float, v: float) -> Vector3:
+	var gx := (u - u0) / CELL_M
+	var gy := (v - v0) / CELL_M
+	if gx < 0.0 or gy < 0.0 or gx > float(nu - 1) or gy > float(nv - 1):
+		return Vector3.ZERO
+	var i := mini(int(floor(gx)), nu - 2)
+	var j := mini(int(floor(gy)), nv - 2)
+	var fx := gx - float(i)
+	var fy := gy - float(j)
+	return _tx(i, j).lerp(_tx(i + 1, j), fx).lerp(_tx(i, j + 1).lerp(_tx(i + 1, j + 1), fx), fy)
+
+
+func _tx(i: int, j: int) -> Vector3:
+	var k := (j * nu + i) * 4
+	return Vector3(data[k], data[k + 1], data[k + 2])
+
+
+## Port-local (u, v) of chart x, z (the world wraps: the shortest way round).
+func to_local(x: float, z: float, wrap_w: float, wrap_h: float) -> Vector2:
+	var dx := x - cx
+	var dz := z - cz
+	dx -= roundf(dx / wrap_w) * wrap_w
+	dz -= roundf(dz / wrap_h) * wrap_h
+	var c := cos(yaw)
+	var s := sin(yaw)
+	return Vector2(dx * c - dz * s, dx * s + dz * c)
+
+
+## The ground blended with the pad: the same as port_pad_apply() in the shader.
+static func blend(y: float, s: Vector3) -> float:
+	y = lerpf(y, s.x, s.y)
+	return lerpf(y, minf(y, -BASIN_DEPTH_M), s.z)
+
+
+func texture() -> ImageTexture:
+	var img := Image.create_from_data(nu, nv, false, Image.FORMAT_RGBAF, data.to_byte_array())
+	return ImageTexture.create_from_image(img)
+
+
+## Shader uniform port_pad_grid: (u0, v0, cell, 1 = on).
+func grid_uniform() -> Vector4:
+	return Vector4(u0, v0, CELL_M, 1.0)

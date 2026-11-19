@@ -75,7 +75,7 @@ func _ship_home() -> void:
 	ship_z = p.get("z", chart.height_m * 0.5)
 	ship_heading = 0.0
 	trail = [Vector2(ship_x, ship_z) / chart.mpp]
-	last_result = "At %s." % p.get("id", "?")
+	last_result = "At %s." % p.get("name", p.get("id", "?"))
 
 
 func _to_px(x: float, z: float) -> Vector2:
@@ -161,7 +161,7 @@ func _process(_dt: float) -> void:
 	var s := "cursor %.0f, %.0f km  %s" % [c.x / 1000.0, c.y / 1000.0, "LAND" if land else "sea %.0f m deep, %.1f km off the coast" % [chart.sea_depth_m(c.x, c.y), chart.shore_distance_m(c.x, c.y) / 1000.0]]
 	var np := chart.nearest_port(c.x, c.y)
 	if not np.is_empty():
-		s += "\nnearest port %s (%s, %s): %.0f km" % [np["id"], np["region"], np["tier"], float(np["dist_m"]) / 1000.0]
+		s += "\nnearest port %s %s (%s, %s): %.0f km" % [np["id"], np["name"], np["region"], np["tier"], float(np["dist_m"]) / 1000.0]
 	if meas.size() == 2:
 		var d: float = (meas[1] - meas[0]).length() * chart.mpp
 		var h: float = d / ship_speed_mps / 3600.0
@@ -187,7 +187,7 @@ func _draw() -> void:
 		draw_circle(pos, r, Color(0, 0, 0, 0.65))
 		draw_arc(pos, r, 0.0, TAU, 20, col, 2.5 / z)
 		if z > 0.9 or big:
-			draw_string(font, pos + Vector2(r + 2.0 / z, 4.0 / z), p["id"], HORIZONTAL_ALIGNMENT_LEFT, -1, fs, Color(1, 1, 1))
+			draw_string(font, pos + Vector2(r + 2.0 / z, 4.0 / z), String(p["name"]), HORIZONTAL_ALIGNMENT_LEFT, -1, fs, Color(1, 1, 1))
 		if z > 3.0:
 			draw_arc(pos, WorldChart.PORT_SPAWN_M / chart.mpp, 0.0, TAU, 48, Color(col, 0.55), 1.2 / z)
 	if trail.size() > 1:

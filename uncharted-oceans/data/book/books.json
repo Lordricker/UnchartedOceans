@@ -58,5 +58,10 @@
 		"color": "#3b4a2a",
 		"file": "res://data/book/ship_terms.md",
 		"title": "Of the Ship and Her Words"
+	},
+	"side_quests": {
+		"color": "#2f4a3a",
+		"text": "# Side Quests\n\n*Nothing here yet.*",
+		"title": "Side Quests"
 	}
 }

@@ -211,6 +211,10 @@ func _process(_delta: float) -> void:
 	if aimed != _lit:
 		_lit = aimed
 		Outline.set_on(self, aimed)
+		if aimed:
+			Outline.show_name(self, "Mooring line")
+		else:
+			Outline.hide_name(self)
 
 
 ## Once, a few frames in (the deck collision is up by then): when no marker placed the rope, find the poop deck under

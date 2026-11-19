@@ -13,13 +13,14 @@ extends CanvasLayer
 const CREDITS := [
 	{"title": "Music", "names": ["Denny Schneidemesser", "Waterflame"]},
 	{"title": "Textures", "names": ["Poly Haven"]},
+	{"title": "Character base meshes (CC BY 4.0)", "names": ["sphere_joe: Proxy Human", "EbiosDesigner: Female 2500"]},
 	{"title": "Coding and modeling", "names": ["Claude"]},
 ]
 const QUALITY_NAMES: Array[String] = ["Low", "Medium", "High"]
 const QUALITY_NOTES: Array[String] = [
 	"The lightest storm clouds and standard water. For older graphics cards.",
-	"Full storm clouds and standard water. The default.",
-	"Volumetric cumulus clouds, sharper storms and detailed water. A heavy load for the graphics card.",
+	"Full storm clouds, standard water, light haze and soft shadows. The default.",
+	"Volumetric cumulus clouds, sharper storms, detailed water and ambient occlusion with bounce light. A heavy load for the graphics card.",
 ]
 const FONT_PATH := "res://assets/fonts/Ferrum-ExtraCondensed.otf"
 const GOLD := Color(0.86, 0.72, 0.45)
@@ -37,6 +38,13 @@ var _amb_value: Label
 var _quality_buttons: Array[Button] = []
 var _quality_note: Label
 var _resume: Button
+var _report_page: VBoxContainer
+var _prompt_edit: TextEdit
+var _shot_rect: TextureRect
+var _report_status: Label
+var _status: Label
+var _load_btn: Button
+var _shot: Image                 # the frame on screen when Esc was pressed (before the menu drew)
 var _font: Font
 
 var _open := false
@@ -85,6 +93,8 @@ func _input(e: InputEvent) -> void:
 	if _open:
 		if _credits_page.visible:
 			_show_credits(false)
+		elif _report_page.visible:
+			_show_report(false)
 		else:
 			close()
 		get_viewport().set_input_as_handled()
@@ -97,6 +107,10 @@ func open() -> void:
 	if _open:
 		return
 	_open = true
+	# grab the last frame now, while it still shows the game and not this menu
+	_shot = get_viewport().get_texture().get_image()
+	_status.text = ""
+	_load_btn.disabled = _save_sys() == null or not _save_sys().call("has_save")
 	_mouse_before = Input.mouse_mode
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 	_sync()
@@ -171,14 +185,82 @@ func _on_quality(level: int) -> void:
 	_show_quality(level)
 
 
+func _on_main_menu() -> void:
+	_save()
+	_open = false
+	_root.visible = false
+	_paused_by_me = false
+	var gsn := get_node_or_null("/root/GameSession")
+	if gsn != null:
+		gsn.call("to_main_menu")
+	else:
+		get_tree().paused = false
+		get_tree().change_scene_to_file("res://scenes/main_menu.tscn")
+
+
 func _on_quit() -> void:
 	_save()
 	get_tree().quit()
 
 
 func _show_credits(on: bool) -> void:
+	_report_page.visible = false
 	_credits_page.visible = on
 	_main_page.visible = not on
+
+
+# ------------------------------------------------------------------ save, load, bug report (SaveSystem)
+
+func _save_sys() -> Node:
+	return get_node_or_null("/root/SaveSystem")
+
+
+func _show_report(on: bool) -> void:
+	_credits_page.visible = false
+	_report_page.visible = on
+	_main_page.visible = not on
+	if on:
+		_report_status.text = ""
+		if _shot != null and not _shot.is_empty():
+			_shot_rect.texture = ImageTexture.create_from_image(_shot)
+		_prompt_edit.grab_focus()
+	else:
+		_resume.grab_focus()
+
+
+func _on_send_report() -> void:
+	var ss := _save_sys()
+	if ss == null:
+		_report_status.text = "SaveSystem autoload is missing."
+		return
+	var dir := String(ss.call("write_report", _prompt_edit.text, _shot))
+	if dir == "":
+		_report_status.text = "Could not write the report (see the Output panel)."
+		return
+	_prompt_edit.text = ""
+	_show_report(false)
+	_status.text = "Report saved and copied to the clipboard:\n%s\nPaste it to Claude." % dir
+	_load_btn.disabled = false
+
+
+func _on_save() -> void:
+	var ss := _save_sys()
+	if ss == null:
+		return
+	var path := String(ss.call("save_game"))
+	_status.text = "Game saved." if path != "" else "Saving failed (see the Output panel)."
+	_load_btn.disabled = path == "" and not ss.call("has_save")
+
+
+func _on_load() -> void:
+	var ss := _save_sys()
+	if ss == null or not ss.call("has_save"):
+		return
+	_open = false
+	_root.visible = false
+	_paused_by_me = false
+	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+	ss.call("load_last")
 
 
 # ------------------------------------------------------------------ the screen
@@ -216,8 +298,10 @@ func _build() -> void:
 	panel.add_child(pages)
 	_main_page = _make_main_page()
 	_credits_page = _make_credits_page()
+	_report_page = _make_report_page()
 	pages.add_child(_main_page)
 	pages.add_child(_credits_page)
+	pages.add_child(_report_page)
 
 
 func _make_main_page() -> VBoxContainer:
@@ -258,9 +342,30 @@ func _make_main_page() -> VBoxContainer:
 	_resume = _button("Resume")
 	_resume.pressed.connect(close)
 	box.add_child(_resume)
+	var report := _button("Report a bug / ask Claude")
+	report.pressed.connect(_show_report.bind(true))
+	box.add_child(report)
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 8)
+	var save := _button("Save")
+	save.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	save.pressed.connect(_on_save)
+	row.add_child(save)
+	_load_btn = _button("Load last save")
+	_load_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_load_btn.pressed.connect(_on_load)
+	row.add_child(_load_btn)
+	box.add_child(row)
+	_status = _label("", 18, Color(1, 1, 1, 0.7))
+	_status.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_status.custom_minimum_size = Vector2(396, 0)
+	box.add_child(_status)
 	var credits := _button("Credits")
 	credits.pressed.connect(_show_credits.bind(true))
 	box.add_child(credits)
+	var to_menu := _button("Main menu")
+	to_menu.pressed.connect(_on_main_menu)
+	box.add_child(to_menu)
 	var quit := _button("Quit game")
 	quit.pressed.connect(_on_quit)
 	box.add_child(quit)
@@ -287,6 +392,41 @@ func _make_credits_page() -> VBoxContainer:
 	var back := _button("Back")
 	back.pressed.connect(_show_credits.bind(false))
 	box.add_child(back)
+	box.visible = false
+	return box
+
+
+func _make_report_page() -> VBoxContainer:
+	var box := VBoxContainer.new()
+	box.add_theme_constant_override("separation", 12)
+	box.add_child(_label("Report a bug", 46, GOLD, HORIZONTAL_ALIGNMENT_CENTER))
+	box.add_child(HSeparator.new())
+	box.add_child(_label("Saved with it: this picture, the game state and the recent log.", 18, Color(1, 1, 1, 0.6)))
+	_shot_rect = TextureRect.new()
+	_shot_rect.custom_minimum_size = Vector2(560, 315)
+	_shot_rect.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	_shot_rect.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	box.add_child(_shot_rect)
+	box.add_child(_label("What went wrong, or what should change?", 24, CREAM))
+	_prompt_edit = TextEdit.new()
+	_prompt_edit.custom_minimum_size = Vector2(560, 150)
+	_prompt_edit.wrap_mode = TextEdit.LINE_WRAPPING_BOUNDARY
+	_prompt_edit.placeholder_text = "e.g. the gangway stays out after casting off"
+	_prompt_edit.add_theme_font_size_override("font_size", 20)
+	box.add_child(_prompt_edit)
+	_report_status = _label("", 18, Color(1, 0.6, 0.5))
+	box.add_child(_report_status)
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 8)
+	var send := _button("Save report")
+	send.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	send.pressed.connect(_on_send_report)
+	row.add_child(send)
+	var back := _button("Back")
+	back.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	back.pressed.connect(_show_report.bind(false))
+	row.add_child(back)
+	box.add_child(row)
 	box.visible = false
 	return box
 

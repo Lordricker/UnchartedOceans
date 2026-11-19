@@ -47,6 +47,11 @@ const LINES := [
 
 ## The brig's gangway (ship-local x across to port, y up): quay, over the rail, down to the deck. Other classes bring
 ## their own in ShipClasses.DATA ("gangway", "gangway_z", "gangway_width", "gangway_min_y").
+## Click a mooring bollard (one a line is made fast to) while moored to cast off.
+const Outline := preload("res://scripts/interact_outline.gd")
+const BOLLARD_REACH := 7.0       ## how far you can reach a bollard (m)
+const BOLLARD_RADIUS := 0.55     ## radius of the click cylinder round a bollard (m)
+
 const GANGWAY := [Vector2(-4.8, 1.9), Vector2(-3.35, 2.82), Vector2(-2.35, 2.82), Vector2(-1.2, 1.86)]
 
 var ship: Node3D
@@ -84,6 +89,14 @@ func _ready() -> void:
 	_make_label()
 	_make_ropes()
 	_make_gangway()
+
+func _input(e: InputEvent) -> void:
+	if e is InputEventMouseButton and e.button_index == MOUSE_BUTTON_LEFT and e.pressed and _bollard_aimed():
+		get_viewport().set_input_as_handled()
+		if settle > 0.8:
+			cast_off()
+		else:
+			_say("Wait for the lines to come taut")
 
 func _unhandled_input(e: InputEvent) -> void:
 	if e is InputEventKey and e.pressed and not e.echo:
@@ -192,6 +205,7 @@ func _physics_process(delta: float) -> void:
 	_update_gangway()
 	_update_ropes()
 	_update_label()
+	_update_bollard_name()
 
 ## Water under the keel at the shallowest sampled point.
 func _keel_clearance() -> float:
@@ -765,3 +779,75 @@ func _update_label() -> void:
 	var h := _hint_text()
 	_hint.text = h
 	_hint.visible = h != ""
+
+
+# ------------------------------------------------------------------ clicking a bollard to cast off
+
+var _cam: Camera3D
+var _player: Node
+var _bollard_named := false
+
+func _camera() -> Camera3D:
+	if _cam == null or not is_instance_valid(_cam):
+		_player = get_tree().get_first_node_in_group("player")
+		if _player:
+			_cam = _player.get_node_or_null("Head/Camera3D") as Camera3D
+	return _cam
+
+## Distance along the view ray to a vertical cylinder round `c` (radius r, from y0 to y1 above/below c), or INF.
+func _bollard_hit(c: Vector3, o: Vector3, d: Vector3, r: float, y0: float, y1: float) -> float:
+	var lo := o - c
+	var best := INF
+	var a := d.x * d.x + d.z * d.z
+	if a > 0.00000001:
+		var b := 2.0 * (lo.x * d.x + lo.z * d.z)
+		var cc := lo.x * lo.x + lo.z * lo.z - r * r
+		var disc := b * b - 4.0 * a * cc
+		if disc >= 0.0:
+			var sq := sqrt(disc)
+			for k in 2:
+				var t := (-b - sq) / (2.0 * a) if k == 0 else (-b + sq) / (2.0 * a)
+				if t >= 0.0:
+					var y := lo.y + d.y * t
+					if y >= y0 and y <= y1:
+						best = minf(best, t)
+	if absf(d.y) > 0.000001:
+		for k in 2:
+			var t2 := ((y0 if k == 0 else y1) - lo.y) / d.y
+			if t2 >= 0.0:
+				var px := lo.x + d.x * t2
+				var pz := lo.z + d.z * t2
+				if px * px + pz * pz <= r * r:
+					best = minf(best, t2)
+	return best if best <= BOLLARD_REACH else INF
+
+## True while moored and the crosshair is on a bollard the lines are made fast to.
+func _bollard_aimed() -> bool:
+	if not moored or berth == null or not is_instance_valid(berth):
+		return false
+	var cam := _camera()
+	if cam == null or Input.mouse_mode != Input.MOUSE_MODE_CAPTURED:
+		return false
+	if _player != null and (bool(_player.get("input_locked")) or bool(_player.get_meta("grab_busy", false))):
+		return false
+	var o := cam.global_position
+	var d := -cam.global_transform.basis.z
+	var seen: Array[Vector3] = []
+	for ln in _lines():
+		var p: Vector3 = berth.bollards_world()[ln[1]]
+		if p in seen:
+			continue
+		seen.append(p)
+		# bollard tops: the post stands below the point, with some margin above it
+		if _bollard_hit(p, o, d, BOLLARD_RADIUS, -0.9, 0.35) < INF:
+			return true
+	return false
+
+func _update_bollard_name() -> void:
+	var on := _bollard_aimed()
+	if on:
+		Outline.show_name(self, "Bollard - cast off")
+		_bollard_named = true
+	elif _bollard_named:
+		Outline.hide_name(self)
+		_bollard_named = false

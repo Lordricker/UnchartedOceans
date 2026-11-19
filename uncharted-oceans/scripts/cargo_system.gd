@@ -23,6 +23,9 @@ extends Node
 ## may overhang.
 
 const Outline := preload("res://scripts/interact_outline.gd")
+## Physics layer 10: stowed and dropped boxes (the player collides with it, nothing else scans it).
+const CARGO_LAYER_BIT := 1 << 9
+const QuestsScript := preload("res://scripts/courier_quests.gd")
 
 const DIRS: Array[Vector3i] = [
 	Vector3i(1, 0, 0), Vector3i(-1, 0, 0), Vector3i(0, 1, 0),
@@ -39,6 +42,7 @@ const CATEGORY_COLOR := {
 	"luxury": Color(0.78, 0.64, 0.2),
 	"dyes": Color(0.52, 0.27, 0.62),
 	"military": Color(0.27, 0.32, 0.27),
+	"courier": Color(0.2, 0.46, 0.5),
 }
 
 ## How far you can reach to click a crate or a box (m).
@@ -86,6 +90,9 @@ var snapping := false
 var ghost_ok := false
 var ghost_anchor := Vector3i.ZERO
 
+## Boxes the hold starts with ({good id: how many}), stowed wherever they fit once the hold grid is ready (see stow_auto).
+## Set from the player's start_cargo (player.gd), so a world scene can say what the ship starts with.
+var starting_cargo := {}
 var placed := {}      # uid -> Placed
 var occ := {}         # Vector3i lattice cell -> uid
 var loose: Array[Loose] = []
@@ -113,6 +120,8 @@ var _label: Label
 var _msg := ""
 var _msg_t := 0.0
 var _gen_done := false
+var _start_done := false
+var _start_wait := 0.0
 var _gen_timer := 0.0
 var _gen_tries := 0
 
@@ -210,9 +219,17 @@ func _find_refs() -> void:
 		rig.add_child(_ghost)
 
 
-## Once, when the hold grid is ready: count the free cargo cells and print what the hold can take (Output panel and
-## on screen), against the weight at which the ship swamps.
+## When the hold grid is ready (and rarely after that): print a one-line summary of the free cargo cells. Throttled so
+## hammock changes don't spam the Output panel.
+const REPORT_MIN_INTERVAL_MS := 60000
+var _last_report_ms := -REPORT_MIN_INTERVAL_MS
+var _last_reported_free := -1
+
+
 func _report_capacity() -> void:
+	var now := Time.get_ticks_msec()
+	if _last_reported_free >= 0 and now - _last_report_ms < REPORT_MIN_INTERVAL_MS:
+		return
 	var nx := int(ceil(flood.grid_half_width * 2.0 / flood.cell))
 	var nz := int(ceil((flood.grid_z_max - flood.grid_z_min) / flood.cell))
 	var ny := int(ceil((flood.grid_top - flood.cargo_floor_y()) / flood.cell)) + 1
@@ -222,12 +239,12 @@ func _report_capacity() -> void:
 			for y in ny:
 				if _cell_free(Vector3i(x, y, z)):
 					free += 1
-	var cell_m3 := pow(flood.cell, 3.0)
-	var vol := float(free) * cell_m3
-	var swamp_t := flood.cargo_swamp_sink * flood.waterplane_area * 1.025
-	var s := "Cargo hold: %d free cells = %.0f m3 (%d base blocks). Full of copper: %.0f t, of grain: %.0f t. Ship swamps at about %.0f t." % [
-		free, vol, free / 8, vol * 2500.0 / 1000.0, vol * 750.0 / 1000.0, swamp_t]
-	print(s)
+	if free == _last_reported_free:
+		return
+	_last_reported_free = free
+	_last_report_ms = now
+	var vol := float(free) * pow(flood.cell, 3.0)
+	print("Cargo hold: %d free cells (%.0f m3)" % [free, vol])
 
 
 func _grid_ready() -> bool:
@@ -771,6 +788,7 @@ func _place() -> void:
 	mi.position = _lat_origin() + Vector3(ghost_anchor) * _cell()
 	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	rig.add_child(mi)
+	_add_collision(mi, p.shape)
 	p.node = mi
 	placed[p.uid] = p
 	_version += 1
@@ -786,6 +804,24 @@ func _place() -> void:
 			break
 	print("cargo placed %s at %s, resting %s" % [carried.id, str(ghost_anchor), how])
 	_used_one()
+
+
+## Makes a stowed or dropped box solid for the player: one box shape per hold cell, on its own physics layer
+## (CARGO_LAYER_BIT, which player.gd adds to its mask) so the flood grid's scans and the aiming rays never see it.
+func _add_collision(mi: MeshInstance3D, cells: Array[Vector3i]) -> void:
+	var body := StaticBody3D.new()
+	body.name = "Collision"
+	body.collision_layer = CARGO_LAYER_BIT
+	body.collision_mask = 0
+	var cm := data.cell_m
+	for c in cells:
+		var cs := CollisionShape3D.new()
+		var bs := BoxShape3D.new()
+		bs.size = Vector3.ONE * cm
+		cs.shape = bs
+		cs.position = (Vector3(c) + Vector3.ONE * 0.5) * cm
+		body.add_child(cs)
+	mi.add_child(body)
 
 
 func _let_go() -> void:
@@ -837,6 +873,7 @@ func _drop() -> void:
 	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	parent.add_child(mi)
 	mi.global_transform = Transform3D(basis, centre - basis * (sz * 0.5))
+	_add_collision(mi, hand_cells)
 	l.node = mi
 	loose.append(l)
 	_used_one()
@@ -865,6 +902,92 @@ func _pick_up_loose(l: Loose) -> void:
 	_aim_loose = null
 	_aim_node = null
 	_carry(l.good, l.hand_cells)
+
+
+## Once the hold grid is ready (and the hammocks have been counted), stow the starting load, once.
+func _try_start_cargo(delta: float) -> void:
+	if _start_done or starting_cargo.is_empty():
+		return
+	if _reported and _grid_ready():
+		_start_done = true
+		for id in starting_cargo:
+			var want := int(starting_cargo[id])
+			var got := stow_auto(str(id), want)
+			print("cargo: starting load %s: %d of %d boxes stowed" % [str(id), got, want])
+		return
+	_start_wait += delta
+	if _start_wait > 30.0:
+		_start_done = true
+		push_warning("CargoSystem: the hold grid never became ready, so the starting cargo was not stowed")
+
+
+## Put up to n boxes of a good straight into the hold, wherever they fit, without anyone carrying them: lowest level
+## first, working out from the middle of the hold, each resting on the floor or on another box. Returns how many fit.
+func stow_auto(good_id: String, n: int) -> int:
+	if not _grid_ready():
+		return 0
+	var g := data.get_good(good_id)
+	if g == null:
+		push_warning("CargoSystem: no such good '%s'" % good_id)
+		return 0
+	var shape := normalized(g.cells)
+	var sz := size_of(shape)
+	var nx := int(ceil(flood.grid_half_width * 2.0 / flood.cell))
+	var nz := int(ceil((flood.grid_z_max - flood.grid_z_min) / flood.cell))
+	var ny := int(ceil((flood.grid_top - flood.cargo_floor_y()) / flood.cell)) + 1
+	var zc := float(nz - sz.z) * 0.5
+	var spots: Array[Vector3i] = []
+	for y in ny:
+		for z in range(0, maxi(nz - sz.z, 0) + 1):
+			for x in range(0, maxi(nx - sz.x, 0) + 1):
+				spots.append(Vector3i(x, y, z))
+	spots.sort_custom(func(a: Vector3i, b: Vector3i) -> bool:
+		if a.y != b.y:
+			return a.y < b.y
+		var da := absf(float(a.z) - zc)
+		var db := absf(float(b.z) - zc)
+		if not is_equal_approx(da, db):
+			return da < db
+		return a.x < b.x)
+	var done := 0
+	for i in n:
+		var spot := Vector3i(-1, -1, -1)
+		for a in spots:
+			if _can_place(shape, a):
+				spot = a
+				break
+		if spot.x < 0:
+			break
+		_stow_box(g, shape, spot)
+		done += 1
+	if done > 0:
+		_version += 1
+		_push_load()
+	return done
+
+
+## One box into the hold at a lattice spot (the same as _place, for a box nobody carried).
+func _stow_box(g: GoodDef, shape: Array[Vector3i], anchor: Vector3i) -> void:
+	var p := Placed.new()
+	p.uid = _next_uid
+	_next_uid += 1
+	p.good = g
+	p.shape = shape.duplicate()
+	p.anchor = anchor
+	for c in shape:
+		var w := anchor + c
+		p.cells.append(w)
+		occ[w] = p.uid
+	var mi := MeshInstance3D.new()
+	mi.name = "Cargo_%s_%d" % [g.id, p.uid]
+	mi.mesh = _visual(g, p.shape)
+	mi.material_override = CargoVisuals.material()
+	mi.position = _lat_origin() + Vector3(anchor) * _cell()
+	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	rig.add_child(mi)
+	_add_collision(mi, p.shape)
+	p.node = mi
+	placed[p.uid] = p
 
 
 ## How many boxes of each good are stowed in the hold: {good id: count}.
@@ -924,9 +1047,20 @@ func _push_load() -> void:
 ## Put the box in your hands back into the port box (it joins the shared pool).
 func _put_in_port_box(gen: Node3D) -> void:
 	var n := carried_qty
+	var said := ""
+	if QuestsScript.is_parcel(carried.id):
+		# a courier parcel put into a port box of the port it is addressed to is delivered (courier_quests.gd)
+		var res: Dictionary = QuestsScript.deliver(carried.id, String((gen as CargoGenerator).stock_key).get_slice("/", 0))
+		said = String(res["msg"])
+		if bool(res["ok"]):
+			_say(said)
+			_let_go()
+			if _ghost != null:
+				_ghost.visible = false
+			return
 	for i in n:
 		(gen as CargoGenerator).put_good(carried)
-	_say("Put %d back in the port box" % n if n > 1 else "Put back in the port box")
+	_say(said if said != "" else ("Put %d back in the port box" % n if n > 1 else "Put back in the port box"))
 	_let_go()
 	if _ghost != null:
 		_ghost.visible = false
@@ -996,6 +1130,7 @@ func _process(delta: float) -> void:
 	_msg_t = maxf(_msg_t - delta, 0.0)
 	_find_refs()
 	_refresh_blocked(delta)
+	_try_start_cargo(delta)
 	_try_spawn_crate(delta)
 	var captured := Input.mouse_mode == Input.MOUSE_MODE_CAPTURED and not bool(player.get("input_locked"))
 	snapping = carried != null and captured and Input.is_physical_key_pressed(KEY_SPACE) and _grid_ready()
@@ -1019,7 +1154,7 @@ func _update_label() -> void:
 			t += ("Click to place one" if carried_qty > 1 else "Click to place") if ghost_ok else "Won't fit here: no room, or nothing to rest on"
 			t += "\nE flip   R turn   Right click drop   Q send back"
 		elif _aim_gen != null:
-			t += "Click: put it back in the port box\nE flip   R turn   Right click drop   Q send back"
+			t += (QuestsScript.prompt_for(carried.id, String((_aim_gen as CargoGenerator).stock_key).get_slice("/", 0)) if QuestsScript.is_parcel(carried.id) else "Click: put it back in the port box") + "\nE flip   R turn   Right click drop   Q send back"
 		else:
 			t += "Hold SPACE to snap it to the hold grid\nE flip   R turn   Right click drop   Q send back"
 	elif _aim_gen != null:

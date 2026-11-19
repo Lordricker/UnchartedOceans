@@ -1,0 +1,86 @@
+[
+  {
+    "name": "Rock_Boulder_S",
+    "source": "namaqualand_boulder_06",
+    "tris_before": 109114,
+    "tris": 1500,
+    "size_m": [
+      0.67,
+      1.2,
+      0.65
+    ],
+    "bytes": 2830720
+  },
+  {
+    "name": "Rock_Reef_S",
+    "source": "coast_rocks_05",
+    "tris_before": 771724,
+    "tris": 3000,
+    "size_m": [
+      4.03,
+      3.76,
+      1.33
+    ],
+    "bytes": 3276336
+  },
+  {
+    "name": "Rock_Boulder_M",
+    "source": "namaqualand_boulder_04",
+    "tris_before": 59066,
+    "tris": 2500,
+    "size_m": [
+      2.52,
+      2.49,
+      1.9
+    ],
+    "bytes": 2456888
+  },
+  {
+    "name": "Rock_Boulder_L",
+    "source": "namaqualand_boulder_03",
+    "tris_before": 64826,
+    "tris": 3000,
+    "size_m": [
+      2.4,
+      3.08,
+      1.48
+    ],
+    "bytes": 2402864
+  },
+  {
+    "name": "Rock_Shingle_M",
+    "source": "sand_rocks_small_01",
+    "tris_before": 739469,
+    "tris": 3500,
+    "size_m": [
+      4.64,
+      3.89,
+      0.53
+    ],
+    "bytes": 2678420
+  },
+  {
+    "name": "Rock_Shelf_XL",
+    "source": "coast_rocks_03",
+    "tris_before": 813464,
+    "tris": 8000,
+    "size_m": [
+      21.12,
+      28.29,
+      3.15
+    ],
+    "bytes": 2800300
+  },
+  {
+    "name": "Rock_Headland_XL",
+    "source": "coastal_cliff_04",
+    "tris_before": 1537926,
+    "tris": 9999,
+    "size_m": [
+      86.75,
+      24.23,
+      11.02
+    ],
+    "bytes": 3061504
+  }
+]

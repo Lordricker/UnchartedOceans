@@ -1,0 +1,319 @@
+class_name TutorialDirector
+extends Node
+## Runs the first voyage (data/tutorial/first_voyage.json) with Captain Silas Cobb. Put one in a world scene next to the
+## WorldStreamer; it does nothing unless GameSession.tutorial is true (or `force` is on, for testing the scene directly).
+##
+## It never takes control away from the player and never shows a box: Silas walks to the place the current lesson is
+## about and talks (subtitles, mate_subtitle.gd). Progress is read from the game, not from where the player is told to
+## be, so the lessons can be done in any order: the director watches latched flags ("bought", "stowed", "cast_off"...)
+## and a step whose flag is already set is skipped with a short line. A step that sits for `nudge_after_s` with nothing
+## happening gets its next nudge line.
+##
+## Debug: F10 skips the current step. F9 prints the flags.
+
+signal step_changed(index: int, id: String)
+signal flag_set(flag: String)
+signal finished
+
+const SilasScript := preload("res://scripts/silas_cobb.gd")
+const SubtitleScript := preload("res://scripts/mate_subtitle.gd")
+
+@export_file("*.json") var steps_file := "res://data/tutorial/first_voyage.json"
+@export var force := false
+## Tuning of the pollers.
+@export var good_speed_mps := 0.9
+@export var good_speed_seconds := 10.0
+@export var heading_tolerance_deg := 15.0
+@export var heading_hold_seconds := 2.0
+@export var dock_distance_m := 3000.0
+## At the end of the last step: false stays in the world (free roam), true goes back to the main menu after a pause.
+@export var end_to_menu := false
+@export var end_menu_delay_s := 14.0
+
+var flags := {}
+var index := -1
+var silas: SilasCobb
+var subtitle: MateSubtitle
+
+var _steps: Array = []
+var _cfg := {}
+var _rig: Node3D
+var _streamer: Node
+var _shelf: Node
+var _map: Node
+var _sails: Node
+var _log: Node
+var _harbor: Node
+var _cargo: Node
+var _active := false
+var _gold0 := 0
+var _gold_low := 1 << 30
+var _seen_moored := false
+var _t := 0.0
+var _speed_t := 0.0
+var _head_t := 0.0
+var _poll := 0.0
+var _idle_t := 0.0
+var _nudge_i := 0
+var _step_started := 0.0
+var _done_spoken := false
+var _walk_lines_waiting := false
+var _ending := false
+var _cast_off_t := 1e9
+
+
+func _ready() -> void:
+	var gs := get_node_or_null("/root/GameSession")
+	var on := force or (gs != null and bool(gs.get("tutorial")))
+	if not on:
+		return
+	var f := FileAccess.open(steps_file, FileAccess.READ)
+	if f == null:
+		push_error("TutorialDirector: %s missing" % steps_file)
+		return
+	var d = JSON.parse_string(f.get_as_text())
+	if typeof(d) != TYPE_DICTIONARY:
+		push_error("TutorialDirector: %s is not valid JSON" % steps_file)
+		return
+	_cfg = d
+	_steps = d.get("steps", [])
+	_start.call_deferred()
+
+
+func _start() -> void:
+	# let the ship build its rope, wheel, bed... and the world put the ship in its berth
+	for i in range(8):
+		await get_tree().process_frame
+	_rig = get_tree().get_first_node_in_group("ships") as Node3D
+	_streamer = get_tree().get_first_node_in_group("world_streamer")
+	if _rig == null or _streamer == null:
+		push_error("TutorialDirector: no ship or world streamer in the scene")
+		return
+	_shelf = _rig.get_node_or_null("ShipBookshelf")
+	_map = _rig.get_node_or_null("ShipMap")
+	_sails = _rig.get_node_or_null("ShipSails")
+	_log = _rig.get_node_or_null("ShipLogLine")
+	_harbor = _rig.get_node_or_null("ShipHarbor")
+	_cargo = get_tree().get_first_node_in_group("cargo_system")
+	if _shelf != null and _shelf.has_signal("book_opened"):
+		_shelf.connect("book_opened", _on_book)
+	if _streamer.has_signal("slept"):
+		_streamer.connect("slept", func(_r) -> void: _set_flag("slept"))
+	if _streamer.has_signal("arrived"):
+		_streamer.connect("arrived", func(_id) -> void: _set_flag("arrived"))
+	_gold0 = TradeState.gold
+	subtitle = SubtitleScript.new()
+	add_child(subtitle)
+	silas = SilasScript.new()
+	silas.name = "SilasCobb"
+	silas.setup(_rig)
+	silas.arrived.connect(_on_silas_arrived)
+	_active = true
+	_advance()
+
+
+# ------------------------------------------------------------------ flags
+
+func _set_flag(f: String) -> void:
+	if flags.get(f, false):
+		return
+	flags[f] = true
+	_idle_t = 0.0
+	_nudge_i = 0
+	flag_set.emit(f)
+
+
+func _on_book(id: String) -> void:
+	if id == "tutorial_01":
+		_set_flag("orders_read")
+
+
+func _process(delta: float) -> void:
+	if not _active:
+		return
+	_t += delta
+	var sp := float(_rig.get("speed"))
+	# only once she has been off the pier a while (the push off the quay is not sailing)
+	if sp > good_speed_mps and _sails_up() and flags.get("cast_off", false) and _t - _cast_off_t > 8.0:
+		_speed_t += delta
+		if _speed_t >= good_speed_seconds:
+			_set_flag("speed_good")
+	_poll += delta
+	if _poll >= 0.2:
+		_poll = 0.0
+		_poll_flags(0.2)
+	# nudges: nothing has happened for a while
+	if index >= 0 and index < _steps.size() and not _ending:
+		_idle_t += delta
+		var after := float(_cfg.get("nudge_after_s", 90.0))
+		if _idle_t >= after and subtitle.is_idle() and not silas.is_walking():
+			_idle_t = 0.0
+			_nudge()
+	if Input.is_physical_key_pressed(KEY_F10) and OS.is_debug_build() and _t - _step_started > 0.5:
+		_skip()
+	if Input.is_physical_key_pressed(KEY_F9) and OS.is_debug_build():
+		print("tutorial step %d flags %s" % [index, flags])
+
+
+func _sails_up() -> bool:
+	if _sails == null:
+		return true
+	for r in _sails.get("recs"):
+		if float(r.progress) < 0.5:
+			return true
+	return false
+
+
+func _poll_flags(dt: float) -> void:
+	# trade: the purse going down is a purchase, going up after that a sale
+	var g := TradeState.gold
+	if g < _gold0:
+		_set_flag("bought")
+	if flags.get("bought", false):
+		_gold_low = mini(_gold_low, g)
+		if g > _gold_low:
+			_set_flag("sold")
+	if _cargo != null and _cargo.has_method("stowed_weight_kg") and _cargo.stowed_weight_kg() > 0.5:
+		_set_flag("stowed")
+	if _harbor != null:
+		var moored := bool(_harbor.get("moored"))
+		if moored:
+			_seen_moored = true
+		elif _seen_moored or _t > 10.0:
+			if not flags.get("cast_off", false):
+				_cast_off_t = _t
+			_set_flag("cast_off")
+		if moored and flags.get("cast_off", false) and _streamer.waypoint_is_port() and _streamer.waypoint_distance_m() < dock_distance_m:
+			_set_flag("docked")
+	if _sails_up():
+		_set_flag("sails_set")
+	if _map != null and _map.has_method("is_open") and _map.is_open():
+		_set_flag("chart_opened")
+	if flags.get("chart_opened", false) and float(_rig.get("speed")) > 0.3:
+		var err := wrapf(float(_streamer.waypoint_bearing()) - float(_streamer.ship_chart_heading()), -180.0, 180.0)
+		if absf(err) <= heading_tolerance_deg:
+			_head_t += dt
+			if _head_t >= heading_hold_seconds:
+				_set_flag("heading_ok")
+		else:
+			_head_t = 0.0
+	if _log != null and int(_log.get("_state")) == 2:
+		_set_flag("log_read")
+	if _t > 5.0 and flags.get("cast_off", false) and _streamer.waypoint_is_port() and _streamer.waypoint_distance_m() < 12000.0:
+		_set_flag("arrived")
+
+
+# ------------------------------------------------------------------ steps
+
+func _step_done(s: Dictionary) -> bool:
+	for f in s.get("done", []):
+		if flags.get(String(f), false):
+			return true
+	return false
+
+
+func _advance() -> void:
+	index += 1
+	if index >= _steps.size():
+		_finish()
+		return
+	var s: Dictionary = _steps[index]
+	_step_started = _t
+	_idle_t = 0.0
+	_nudge_i = 0
+	step_changed.emit(index, String(s.get("id", "")))
+	var early := _step_done(s) and not (s.get("done", []) as Array).is_empty()
+	if early:
+		var el: Array = s.get("early", [])
+		for l in el:
+			subtitle.say(String(l["id"]), _fill(String(l["text"])))
+		# straight on after the line
+		if el.is_empty():
+			_advance()
+		else:
+			subtitle.queue_empty.connect(_advance, CONNECT_ONE_SHOT)
+		return
+	# walk to the lesson spot, then say the lines
+	_walk_lines_waiting = true
+	silas.go_to(String(s.get("station", "tiller")))
+
+
+func _on_silas_arrived(_station: String) -> void:
+	if not _walk_lines_waiting or index < 0 or index >= _steps.size():
+		return
+	_walk_lines_waiting = false
+	var s: Dictionary = _steps[index]
+	# he says his piece while looking at you
+	silas.face_player()
+	for l in s.get("lines", []):
+		subtitle.say(String(l["id"]), _fill(String(l["text"])))
+	_idle_t = 0.0
+	if (s.get("done", []) as Array).is_empty():
+		# the last step: talk and stop
+		subtitle.queue_empty.connect(_advance, CONNECT_ONE_SHOT)
+	else:
+		_watch_step()
+
+
+func _watch_step() -> void:
+	# poll until the step's flag is set (or it was set while he was talking)
+	var tick := get_tree().create_timer(0.3)
+	tick.timeout.connect(func() -> void:
+		if index < 0 or index >= _steps.size() or _ending:
+			return
+		var s: Dictionary = _steps[index]
+		if _step_done(s):
+			_praise_and_next()
+		else:
+			_watch_step())
+
+
+func _praise_and_next() -> void:
+	# do not cut across his own lines: go on once he has finished talking
+	if subtitle.is_idle():
+		_advance()
+	else:
+		subtitle.queue_empty.connect(_advance, CONNECT_ONE_SHOT)
+
+
+func _nudge() -> void:
+	var s: Dictionary = _steps[index]
+	var n: Array = s.get("nudge", [])
+	if n.is_empty():
+		return
+	var l: Dictionary = n[_nudge_i % n.size()]
+	_nudge_i += 1
+	# he comes back to the lesson spot if he wandered... he does not: just say it
+	subtitle.say(String(l["id"]), _fill(String(l["text"])))
+
+
+func _skip() -> void:
+	if index < 0 or index >= _steps.size():
+		return
+	for f in (_steps[index] as Dictionary).get("done", []):
+		_set_flag(String(f))
+		break
+	subtitle.clear_queue()
+
+
+func _finish() -> void:
+	_ending = true
+	finished.emit()
+	if end_to_menu:
+		await get_tree().create_timer(end_menu_delay_s).timeout
+		var gs := get_node_or_null("/root/GameSession")
+		if gs != null:
+			gs.call("to_main_menu")
+
+
+## {km} {kn} {kmh} {hours}: the sum Silas does out loud, from the live chart distance and speed.
+func _fill(t: String) -> String:
+	if not t.contains("{"):
+		return t
+	var km := float(_streamer.route_length_m()) / 1000.0
+	var kn := float(_rig.get("speed")) / 0.514444
+	if kn < 1.0:
+		kn = 3.0                      # lying idle: he uses a sailor's fair estimate
+	var kmh := kn * 1.852
+	var hours := km / maxf(kmh, 0.1)
+	return t.replace("{km}", str(int(round(km)))).replace("{kn}", "%.1f" % kn).replace("{kmh}", "%.1f" % kmh).replace("{hours}", str(int(round(hours))))
